@@ -24,6 +24,8 @@ class GenerationRequest:
     attempt: int = 0
     # Filled by the client: token counts summed over all HTTP calls for this request.
     usage: dict[str, int] = field(default_factory=dict)
+    # Filled by the client: the model that actually served this request.
+    model: str | None = None
 
 
 class ModelClient(Protocol):

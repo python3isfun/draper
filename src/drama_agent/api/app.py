@@ -62,8 +62,9 @@ class JobSummary(BaseModel):
 
 
 class Meta(BaseModel):
-    model_id: str
+    model_id: str  # default model
     client: str
+    stage_models: dict[str, str] = {}  # per-step overrides of the default
 
 
 def create_app(
@@ -118,7 +119,11 @@ def create_app(
     @app.get("/v1/meta", response_model=Meta)
     async def meta() -> Meta:
         c = orchestrator.client
-        return Meta(model_id=c.model_id, client=type(c).__name__)
+        return Meta(
+            model_id=c.model_id,
+            client=type(c).__name__,
+            stage_models=getattr(c, "stage_models", {}),
+        )
 
     @app.get("/v1/drama-jobs", response_model=list[JobSummary])
     async def list_jobs(limit: int = Query(50, ge=1, le=200)) -> list[JobSummary]:

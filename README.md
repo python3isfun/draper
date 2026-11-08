@@ -91,7 +91,22 @@ restart, and separate worker processes aren't possible.
 | `mcphub` | [MCPHub](https://api.mcphub.com) OpenAI-compatible gateway |
 
 `mcphub` needs `MCPHUB_URL`, `MCPHUB_KEY` and `MCPHUB_MODEL` (e.g. `gpt-6.1-sol`);
-`MCPHUB_TIMEOUT_S` is optional (default 600). Having a key set never switches the backend
+`MCPHUB_TIMEOUT_S` is optional (default 600).
+
+**Per-step models.** `MCPHUB_MODEL` is the default for every pipeline step. Override it
+for individual steps with `MCPHUB_MODEL_INGEST`, `MCPHUB_MODEL_OUTLINE`,
+`MCPHUB_MODEL_SCRIPT`, `MCPHUB_MODEL_STORYBOARD` and `MCPHUB_MODEL_REVIEW`, e.g. a cheaper
+model for the light steps:
+
+```bash
+MCPHUB_MODEL="gpt-6.1-sol"
+MCPHUB_MODEL_INGEST="gpt-6-luna"
+MCPHUB_MODEL_REVIEW="gpt-6-luna"
+```
+
+A misspelt override (e.g. `MCPHUB_MODEL_SCRIPTS`) stops the server at startup instead of
+being ignored. The model each step actually used is recorded in
+`provenance.model_versions`, and the web UI header lists the active overrides. Having a key set never switches the backend
 on its own; set `DRAMA_MODEL_CLIENT=mcphub` explicitly. `.env` is git-ignored.
 
 ```bash

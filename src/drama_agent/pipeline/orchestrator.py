@@ -80,7 +80,7 @@ class Orchestrator:
                         used = state.token_usage.setdefault(step.name, {})
                         for k, v in gen.usage.items():
                             used[k] = used.get(k, 0) + v
-                    state.model_versions[step.name] = self.client.model_id
+                    state.model_versions[step.name] = gen.model or self.client.model_id
                     step.apply(state, output)
                     issues = step.check(state)
                     if not issues:

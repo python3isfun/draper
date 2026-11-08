@@ -171,3 +171,96 @@ def test_live_ingest_step():
     )
     out = asyncio.run(client.generate(req, SourceBrief))
     assert out.source_coverage and req.usage["completion_tokens"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Per-step models
+
+
+def test_stage_models_route_each_step_to_its_model():
+    seen_models = []
+
+    def handler(req, n):
+        seen_models.append(json.loads(req.content)["model"])
+        return httpx.Response(200, json=completion(json.dumps(VALID_BRIEF)))
+
+    transport = httpx.MockTransport(lambda r: handler(r, 0))
+    client = MCPHubClient(
+        "https://hub.test/v1",
+        "sk-test",
+        "gpt-6.1-sol",
+        stage_models={"ingest": "gpt-6-luna"},
+        transport=transport,
+    )
+    ingest = GenerationRequest(stage="ingest", instructions="", context={})
+    review = GenerationRequest(stage="review", instructions="", context={})
+    asyncio.run(client.generate(ingest, SourceBrief))
+    asyncio.run(client.generate(review, SourceBrief))
+    assert seen_models == ["gpt-6-luna", "gpt-6.1-sol"]
+    assert (ingest.model, review.model) == ("gpt-6-luna", "gpt-6.1-sol")
+
+
+def test_stage_models_from_env(monkeypatch):
+    from drama_agent.config import stage_models_from_env
+
+    for k in list(os.environ):
+        if k.startswith("MCPHUB_MODEL_"):
+            monkeypatch.delenv(k)
+    assert stage_models_from_env() == {}
+
+    monkeypatch.setenv("MCPHUB_MODEL_INGEST", "gpt-6-luna")
+    monkeypatch.setenv("MCPHUB_MODEL_REVIEW", " gpt-6-luna ")
+    monkeypatch.setenv("MCPHUB_MODEL_SCRIPT", "")  # empty = no override
+    assert stage_models_from_env() == {"ingest": "gpt-6-luna", "review": "gpt-6-luna"}
+
+    monkeypatch.setenv("MCPHUB_MODEL_SCRIPTS", "gpt-6-luna")  # typo
+    with pytest.raises(RuntimeError, match="MCPHUB_MODEL_SCRIPTS"):
+        stage_models_from_env()
+
+
+def test_client_from_env_applies_stage_models(monkeypatch):
+    for k in list(os.environ):
+        if k.startswith("MCPHUB_MODEL_"):
+            monkeypatch.delenv(k)
+    monkeypatch.setenv("DRAMA_MODEL_CLIENT", "mcphub")
+    monkeypatch.setenv("MCPHUB_URL", "https://hub.test/v1")
+    monkeypatch.setenv("MCPHUB_KEY", "sk-test")
+    monkeypatch.setenv("MCPHUB_MODEL", "gpt-6.1-sol")
+    monkeypatch.setenv("MCPHUB_MODEL_STORYBOARD", "gpt-6.1-terra")
+    client = client_from_env()  # constructing makes no network call
+    assert client.model_for("storyboard") == "gpt-6.1-terra"
+    assert client.model_for("script") == "gpt-6.1-sol"
+
+
+def test_provenance_records_the_model_each_step_used():
+    class PerStage(FixtureModelClient):
+        async def generate(self, request, output_model):
+            out = await super().generate(request, output_model)
+            request.model = "gpt-6-luna" if request.stage in ("ingest", "review") else "gpt-6.1-sol"
+            return out
+
+    job, repo = run_pipeline(PerStage())
+    versions = repo.get_package(job.package_id).provenance.model_versions
+    assert versions == {
+        "ingest": "gpt-6-luna",
+        "outline": "gpt-6.1-sol",
+        "script": "gpt-6.1-sol",
+        "storyboard": "gpt-6.1-sol",
+        "review": "gpt-6-luna",
+    }
+
+
+def test_meta_reports_stage_models():
+    from fastapi.testclient import TestClient
+
+    from drama_agent.api import create_app
+
+    client = MCPHubClient(
+        "https://hub.test/v1", "sk-test", "gpt-6.1-sol", stage_models={"review": "gpt-6-luna"}
+    )
+    meta = TestClient(create_app(client=client)).get("/v1/meta").json()
+    assert meta == {
+        "model_id": "gpt-6.1-sol",
+        "client": "MCPHubClient",
+        "stage_models": {"review": "gpt-6-luna"},
+    }

@@ -44,9 +44,33 @@ def client_from_env() -> ModelClient:
             base_url=os.environ["MCPHUB_URL"],
             api_key=os.environ["MCPHUB_KEY"],
             model=os.environ["MCPHUB_MODEL"],
+            stage_models=stage_models_from_env(),
             timeout_s=float(os.environ.get("MCPHUB_TIMEOUT_S", "600")),
         )
     raise RuntimeError(f"unknown DRAMA_MODEL_CLIENT={kind!r}")
+
+
+STAGE_MODEL_PREFIX = "MCPHUB_MODEL_"
+
+
+def stage_models_from_env() -> dict[str, str]:
+    """Per-step model overrides: MCPHUB_MODEL_INGEST, _OUTLINE, _SCRIPT, _STORYBOARD,
+    _REVIEW. Steps without one use MCPHUB_MODEL. A misspelt variable is an error rather
+    than a silently ignored setting."""
+    from .models.package import STAGES
+
+    known = {f"{STAGE_MODEL_PREFIX}{s.upper()}": s for s in STAGES}
+    overrides: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if not key.startswith(STAGE_MODEL_PREFIX):
+            continue
+        if key not in known:
+            raise RuntimeError(
+                f"unknown setting {key}; per-step models are {', '.join(sorted(known))}"
+            )
+        if value.strip():
+            overrides[known[key]] = value.strip()
+    return overrides
 
 
 def repo_from_env() -> Repository:

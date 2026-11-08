@@ -105,10 +105,14 @@ async function loadMeta() {
     const live = m.client !== "FixtureModelClient";
     state.offline = !live;
     $("#offline-note").hidden = live;
-    $("#meta").replaceChildren(
+    // Built with h() so nested arrays are flattened (replaceChildren would stringify them).
+    $("#meta").replaceChildren(h("span", { class: "meta-models" },
       h("span", { class: `chip ${live ? "ok" : "warn"}` }, live ? "live model" : "offline fixture"),
-      " ", h("span", { class: "mono" }, m.model_id),
-    );
+      " ", h("span", { class: "mono", title: "Default model for every step without an override" }, m.model_id),
+      // Per-step overrides, e.g. "review: gpt-6-luna".
+      Object.entries(m.stage_models || {}).map(([stage, model]) =>
+        [" ", h("span", { class: "chip mono", title: `The ${stage} step uses ${model}` }, `${stage}: ${model}`)]),
+    ));
   } catch {
     $("#meta").textContent = "API unreachable";
   }

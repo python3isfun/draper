@@ -35,6 +35,7 @@ class FixtureModelClient:
         )
 
         self.calls.append(request)
+        request.model = self.model_id
         output: BaseModel
         match request.stage:
             case "ingest":

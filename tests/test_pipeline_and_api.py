@@ -96,6 +96,7 @@ def test_web_ui_and_listing_endpoints():
         assert client.get("/v1/meta").json() == {
             "model_id": "fixture-v1",
             "client": "FixtureModelClient",
+            "stage_models": {},
         }
         assert client.get("/v1/drama-jobs").json() == []
 

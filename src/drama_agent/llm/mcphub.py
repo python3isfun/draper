@@ -59,6 +59,7 @@ class MCPHubClient:
         api_key: str,
         model: str,
         *,
+        stage_models: dict[str, str] | None = None,
         timeout_s: float = 600.0,
         max_http_retries: int = 3,
         max_repair_turns: int = 1,
@@ -67,7 +68,8 @@ class MCPHubClient:
     ) -> None:
         if not api_key:
             raise ValueError("MCPHub API key is empty")
-        self.model_id = model
+        self.model_id = model  # default for any stage without an override
+        self.stage_models = dict(stage_models or {})
         self.max_http_retries = max_http_retries
         self.max_repair_turns = max_repair_turns
         self.backoff_s = backoff_s
@@ -81,7 +83,12 @@ class MCPHubClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    def model_for(self, stage: str) -> str:
+        return self.stage_models.get(stage, self.model_id)
+
     async def generate(self, request: GenerationRequest, output_model: type[T]) -> T:
+        model = self.model_for(request.stage)
+        request.model = model
         messages = build_messages(request)
         response_format = {
             "type": "json_schema",
@@ -93,7 +100,7 @@ class MCPHubClient:
         }
         for turn in range(self.max_repair_turns + 1):
             data = await self._post(
-                {"model": self.model_id, "messages": messages, "response_format": response_format}
+                {"model": model, "messages": messages, "response_format": response_format}
             )
             self._record_usage(request, data)
             content = self._content(data)
