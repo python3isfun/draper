@@ -117,6 +117,8 @@ class PipelineState:
     model_versions: dict[str, str] = field(default_factory=dict)
     token_usage: dict[str, dict[str, int]] = field(default_factory=dict)
     notes: dict[str, StageNotes] = field(default_factory=dict)  # stage -> notes
+    # Trace hook set by the orchestrator: emit(kind, message, **fields). Not checkpointed.
+    emit: Any = None
 
     @property
     def language(self) -> str:
@@ -392,6 +394,12 @@ def _normalize(state: PipelineState, stage: str, obj: object) -> None:
     changed = normalize_prose(obj, names, state.language)
     if changed:
         log.info("%s: normalized %d prose fields", stage, changed)
+        if state.emit:
+            state.emit(
+                "normalized",
+                f"Cleaned {changed} text fields (IDs or timecodes in prose).",
+                stage=stage,
+            )
 
 
 STEPS: tuple[Step, ...] = (

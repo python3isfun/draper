@@ -23,12 +23,20 @@ from ..config import (
 )
 from ..jobqueue import InMemoryJobQueue, JobQueue
 from ..llm import FixtureModelClient, ModelClient
-from ..models import Job, JobRequest, ProductionPackage, Revision, RevisionRequest
+from ..models import (
+    Job,
+    JobRequest,
+    LLMCall,
+    ProductionPackage,
+    Revision,
+    RevisionRequest,
+    TraceEvent,
+)
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
 from ..store import InMemoryRepository, Repository
-from ..worker import JobWorker, recover, retry_job
+from ..worker import JobWorker, pause_job, recover, resume_job, retry_job
 
 log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -59,6 +67,22 @@ class JobSummary(BaseModel):
     seed: str
     package_id: str | None
     revision_id: str | None
+
+
+class LLMCallView(BaseModel):
+    """A model call for the live view: no request body; running calls carry an output tail."""
+
+    call: LLMCall
+    output_tail: str = ""
+
+
+class Trace(BaseModel):
+    events: list[TraceEvent]
+    calls: list[LLMCallView]
+    next_seq: int  # pass back as after_seq to get only newer events
+
+
+OUTPUT_TAIL_CHARS = 4000
 
 
 class Meta(BaseModel):
@@ -159,7 +183,57 @@ def create_app(
         job = repo.get_job(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
+        # The pause flag lives in the queue (a running worker would overwrite it on the job).
+        job.pause_requested = job.status == "running" and queue.pause_requested(job_id)
         return job
+
+    @app.post("/v1/drama-jobs/{job_id}/pause", status_code=202, response_model=Job)
+    async def pause(job_id: str) -> Job:
+        """Pause a queued job now, or a running one after its current model call."""
+        try:
+            return pause_job(repo, queue, job_id)
+        except KeyError:
+            raise HTTPException(404, "job not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.post("/v1/drama-jobs/{job_id}/resume", status_code=202, response_model=Job)
+    async def resume(job_id: str) -> Job:
+        """Continue a paused job; steps that passed are kept."""
+        try:
+            job = resume_job(repo, queue, job_id)
+        except KeyError:
+            raise HTTPException(404, "job not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        wakeup.set()
+        return job
+
+    @app.get("/v1/drama-jobs/{job_id}/trace", response_model=Trace)
+    async def trace(job_id: str, after_seq: int = Query(0, ge=0)) -> Trace:
+        """Agent steps and model calls. Poll with after_seq=next_seq for new events."""
+        if repo.get_job(job_id) is None:
+            raise HTTPException(404, "job not found")
+        events = repo.list_events(job_id, after_seq)
+        views = []
+        for call in repo.list_llm_calls(job_id):
+            tail = ""
+            if call.status == "running" and (full := repo.get_llm_call(call.call_id)):
+                tail = full.output[-OUTPUT_TAIL_CHARS:]
+            views.append(LLMCallView(call=call, output_tail=tail))
+        return Trace(
+            events=events,
+            calls=views,
+            next_seq=events[-1].seq if events else after_seq,
+        )
+
+    @app.get("/v1/llm-calls/{call_id}", response_model=LLMCall)
+    async def llm_call(call_id: str) -> LLMCall:
+        """One model call in full: request messages, commentary and the complete output."""
+        call = repo.get_llm_call(call_id)
+        if call is None:
+            raise HTTPException(404, "call not found")
+        return call
 
     @app.post("/v1/drama-jobs/{job_id}/retry", status_code=202, response_model=Job)
     async def retry(job_id: str) -> Job:

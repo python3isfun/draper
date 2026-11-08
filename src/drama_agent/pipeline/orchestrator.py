@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Protocol
 
@@ -11,6 +12,7 @@ from ..models import Job, ProductionPackage, Revision
 from ..models.package import utcnow
 from ..prompts import load_orchestrator_prompt
 from ..store import Repository
+from ..tracing import Tracer
 from .steps import OUTPUT_RULES, STEPS, PipelineState
 
 log = logging.getLogger(__name__)
@@ -21,6 +23,8 @@ def new_id(prefix: str) -> str:
 
 
 class CheckpointStore(Protocol):
+    """The job queue: per-job checkpoints, plus (optionally) `pause_requested(job_id)`."""
+
     def save_checkpoint(self, job_id: str, data: str) -> None: ...
     def load_checkpoint(self, job_id: str) -> str | None: ...
 
@@ -38,17 +42,25 @@ class Orchestrator:
         self.base_prompt = load_orchestrator_prompt()
 
     async def run_job(self, job_id: str) -> Job:
-        """Run (or resume) a job. Returns it in a terminal state, or raises CancelledError
-        if the surrounding task is cancelled (e.g. the worker lost its lease)."""
+        """Run (or resume) a job. Returns it in a terminal or paused state, or raises
+        CancelledError if the surrounding task is cancelled (e.g. lost lease)."""
         job = self.repo.get_job(job_id)
         if job is None:
             raise KeyError(job_id)
         if job.status == "cancelled":
             return job
 
+        trace = Tracer(self.repo, job_id)
         state, completed = self._restore(job)
+        state.emit = lambda kind, msg, **kw: trace.event(kind, msg, **kw)
         budget = job.request.options.revision_budget_per_stage
         self._set(job, status="running", failure_reason=None)
+        if completed:
+            trace.event(
+                "job_resumed", f"Resumed; keeping {', '.join(completed)} from the checkpoint."
+            )
+        else:
+            trace.event("job_started", "Started.")
         stage = None
 
         # Everything, including the final save, is inside the try so the job can never be
@@ -59,19 +71,39 @@ class Orchestrator:
                 if step.name in completed:
                     stage.status = "passed"  # restored from checkpoint; not re-run
                     continue
+                # Safe point between steps: pause before announcing the next one.
+                if self._pause_requested(job_id):
+                    return self._pause(job, stage, trace, step.name)
                 stage.status, stage.error, stage.issues = "running", None, []
                 self._touch(job)
+                trace.event(
+                    "stage_started", f"{step.name.capitalize()} step started.", stage=step.name
+                )
+                started = time.monotonic()
                 issues = []
                 # One initial attempt plus `budget` automatic repairs. Only this step is
                 # retried; earlier passed steps are not re-run.
                 for attempt in range(budget + 1):
+                    # Safe point: nothing is in flight, so pausing here loses no work
+                    # except this step's unfinished attempts.
+                    if self._pause_requested(job_id):
+                        return self._pause(job, stage, trace, step.name)
                     stage.attempts = attempt + 1
+                    if attempt:
+                        trace.event(
+                            "attempt_started",
+                            f"Attempt {attempt + 1} of {budget + 1}, with {len(issues)} "
+                            "issues as feedback.",
+                            stage=step.name,
+                            attempt=attempt,
+                        )
                     gen = GenerationRequest(
                         stage=step.name,
                         instructions=(f"{self.base_prompt}\n\n{step.directive}\n\n{OUTPUT_RULES}"),
                         context=state.context(),
                         feedback=issues,
                         attempt=attempt,
+                        recorder=trace.recorder(step.name, attempt),
                     )
                     try:
                         output = await self.client.generate(gen, step.output_model)
@@ -85,11 +117,24 @@ class Orchestrator:
                     issues = step.check(state)
                     if not issues:
                         break
+                    trace.event(
+                        "gate_issues",
+                        f"Hard checks found {len(issues)} issues.",
+                        stage=step.name,
+                        attempt=attempt,
+                        issues=[f"{i.check} {i.object_id}: {i.evidence}" for i in issues[:10]],
+                    )
                 stage.issues = issues
                 if issues:
                     stage.status = "failed"
                     # Keep the draft (with its issues) so the user can inspect and revise it.
                     state.qa_report.hard_issues = issues
+                    trace.event(
+                        "stage_failed",
+                        f"{step.name.capitalize()} still had {len(issues)} issues after "
+                        f"{budget + 1} attempts; stopping as needs_revision.",
+                        stage=step.name,
+                    )
                     self._finish(job, state, status="needs_revision")
                     return job
                 # Checkpoint before marking passed: a crash in between re-runs this step
@@ -99,8 +144,17 @@ class Orchestrator:
                     self.checkpoints.save_checkpoint(job_id, state.to_checkpoint(completed))
                 stage.status = "passed"
                 self._touch(job)
+                used = state.token_usage.get(step.name, {})
+                trace.event(
+                    "stage_passed",
+                    f"{step.name.capitalize()} passed in {time.monotonic() - started:.0f}s "
+                    f"({stage.attempts} attempt{'s' if stage.attempts > 1 else ''}).",
+                    stage=step.name,
+                    tokens=used,
+                )
             stage = None
             self._finish(job, state, status="completed")
+            trace.event("job_completed", "Completed; all hard checks passed.")
         except Exception as exc:  # job must record any failure
             log.exception("job %s failed", job_id)
             reason = f"{type(exc).__name__}: {exc}"
@@ -108,7 +162,28 @@ class Orchestrator:
                 stage.status = "failed"
                 stage.error = reason
             self._set(job, status="failed", failure_reason=reason)
+            trace.event(
+                "job_failed", f"Failed: {reason}", stage=stage and self._stage_name(job, stage)
+            )
         return job
+
+    def _pause_requested(self, job_id: str) -> bool:
+        check = getattr(self.checkpoints, "pause_requested", None)
+        return bool(check and check(job_id))
+
+    def _pause(self, job: Job, stage, trace: Tracer, stage_name: str) -> Job:
+        # The interrupted step restarts from its first attempt on resume; passed steps are
+        # kept by the checkpoint.
+        stage.status, stage.attempts, stage.issues, stage.error = "pending", 0, [], None
+        self._set(job, status="paused", failure_reason=None)
+        trace.event(
+            "paused", f"Paused before the {stage_name} step's next model call.", stage=stage_name
+        )
+        return job
+
+    @staticmethod
+    def _stage_name(job: Job, stage) -> str | None:
+        return next((name for name, s in job.stages.items() if s is stage), None)
 
     # ------------------------------------------------------------------
 

@@ -33,7 +33,11 @@ def client_from_env() -> ModelClient:
     """
     kind = os.environ.get("DRAMA_MODEL_CLIENT", "fixture").lower()
     if kind == "fixture":
-        return FixtureModelClient()
+        # DRAMA_FIXTURE_DELAY_S makes each offline step take that long, streaming its
+        # output, so the live activity view can be exercised without paid model calls.
+        return FixtureModelClient(
+            stream_delay_s=float(os.environ.get("DRAMA_FIXTURE_DELAY_S", "0"))
+        )
     if kind == "mcphub":
         from .llm.mcphub import MCPHubClient
 
@@ -45,6 +49,7 @@ def client_from_env() -> ModelClient:
             api_key=os.environ["MCPHUB_KEY"],
             model=os.environ["MCPHUB_MODEL"],
             stage_models=stage_models_from_env(),
+            api=os.environ.get("MCPHUB_API", "responses"),  # type: ignore[arg-type]
             timeout_s=float(os.environ.get("MCPHUB_TIMEOUT_S", "600")),
         )
     raise RuntimeError(f"unknown DRAMA_MODEL_CLIENT={kind!r}")

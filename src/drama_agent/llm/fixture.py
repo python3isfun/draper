@@ -6,12 +6,14 @@ broken outputs for chosen stages to exercise retry and needs_revision paths.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel
 
 from ..fixtures import sample
+from ..tracing import NULL_RECORDER
 from .base import GenerationRequest, T
 
 # fault(output, attempt) -> output; applied before returning.
@@ -21,9 +23,11 @@ Fault = Callable[[Any, int], Any]
 class FixtureModelClient:
     model_id = "fixture-v1"
 
-    def __init__(self, faults: dict[str, Fault] | None = None) -> None:
+    def __init__(self, faults: dict[str, Fault] | None = None, stream_delay_s: float = 0.0) -> None:
         self.faults = faults or {}
         self.calls: list[GenerationRequest] = []
+        # >0 streams the output in chunks with pauses, to exercise the live UI offline.
+        self.stream_delay_s = stream_delay_s
 
     async def generate(self, request: GenerationRequest, output_model: type[T]) -> T:
         # Imported lazily to avoid a cycle: pipeline.steps imports llm types.
@@ -57,7 +61,22 @@ class FixtureModelClient:
             case _:
                 raise ValueError(f"unknown stage {request.stage}")
 
-        if fault := self.faults.get(request.stage):
-            output = fault(output, request.attempt)
-        assert isinstance(output, output_model)
+        rec = request.recorder or NULL_RECORDER
+        rec.start(model=self.model_id, api="fixture", request={"stage": request.stage}, turn=0)
+        try:
+            if fault := self.faults.get(request.stage):
+                output = fault(output, request.attempt)
+            assert isinstance(output, output_model)
+        except BaseException as exc:
+            rec.finish(error=f"{type(exc).__name__}: {exc}")
+            raise
+        rec.delta("commentary", f"Offline sample: returning the built-in {request.stage} output.")
+        text = output.model_dump_json(indent=1)
+        chunks = 12 if self.stream_delay_s else 1
+        size = max(1, len(text) // chunks + 1)
+        for i in range(0, len(text), size):
+            rec.delta("output", text[i : i + size])
+            if self.stream_delay_s:
+                await asyncio.sleep(self.stream_delay_s / chunks)
+        rec.finish(usage={"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0})
         return output

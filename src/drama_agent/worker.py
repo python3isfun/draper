@@ -22,10 +22,12 @@ from .models import Job
 from .pipeline.orchestrator import Orchestrator, new_id
 from .pipeline.steps import PipelineCheckpoint
 from .store import Repository
+from .tracing import Tracer
 
 log = logging.getLogger(__name__)
 
 TERMINAL = ("completed", "needs_revision", "failed", "cancelled")
+PAUSABLE = ("queued", "running")
 
 
 class JobWorker:
@@ -83,13 +85,16 @@ class JobWorker:
                 f"gave up after {claim.attempt} attempts; the last worker stopped responding"
             )
             self.repo.save_job(job)
+            Tracer(self.repo, claim.job_id).event("job_failed", job.failure_reason)
             return
         if job.status in TERMINAL:
             self.queue.complete(claim.job_id, self.worker_id)
             return
 
+        trace = Tracer(self.repo, claim.job_id)
         if claim.recovered:
             log.warning("job %s: previous worker's lease expired; resuming", claim.job_id)
+            trace.event("recovered", "The previous worker stopped responding; picked the job up.")
         job.attempts = claim.attempt
         self.repo.save_job(job)
 
@@ -101,17 +106,23 @@ class JobWorker:
         except asyncio.CancelledError:
             if lost_lease.is_set():
                 log.warning("job %s: lease lost to another worker; stopped", claim.job_id)
+                trace.event("lease_lost", "Another worker took over this job; stopped here.")
                 return
             # Shutdown: hand the job back without spending an attempt. The checkpoint
             # lets the next worker resume after the last passed step.
             self.queue.release(claim.job_id, self.worker_id)
             self._mark_queued(claim.job_id, "worker shut down; job requeued")
+            trace.event("requeued", "The worker shut down; the job is back in the queue.")
             raise
         finally:
             beat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await beat
 
+        if job.status == "paused":
+            # Parked until resumed; pausing doesn't spend an attempt.
+            self.queue.pause(claim.job_id, self.worker_id)
+            return
         if job.status != "failed":
             self.queue.complete(claim.job_id, self.worker_id)
             return
@@ -119,14 +130,16 @@ class JobWorker:
         delay = self.retry_base_s * 2 ** (claim.attempt - 1)
         reason = job.failure_reason or "unknown error"
         if self.queue.retry(claim.job_id, self.worker_id, reason, delay):
-            self._mark_queued(
-                claim.job_id,
+            message = (
                 f"attempt {claim.attempt}/{claim.max_attempts} failed: {reason}; "
-                f"retrying in {delay:.0f}s",
+                f"retrying in {delay:.0f}s"
             )
+            self._mark_queued(claim.job_id, message)
+            trace.event("retry_scheduled", message[0].upper() + message[1:] + ".")
         else:
             job.failure_reason = f"failed after {claim.attempt} attempts: {reason}"
             self.repo.save_job(job)
+            trace.event("gave_up", f"Gave up after {claim.attempt} attempts.")
 
     async def _heartbeat(self, job_id: str, run: asyncio.Task, lost: asyncio.Event) -> None:
         while True:
@@ -195,6 +208,44 @@ def retry_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
         f"retry requested; keeping {', '.join(passed)}" if passed else "retry requested"
     )
     repo.save_job(job)
+    Tracer(repo, job_id).event(
+        "retry_requested", job.failure_reason[0].upper() + job.failure_reason[1:] + "."
+    )
+    return job
+
+
+def pause_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
+    """Pause now if the job is waiting, otherwise at the running pipeline's next safe point
+    (after the current model call). Raises KeyError / ValueError."""
+    job = repo.get_job(job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job.status not in PAUSABLE:
+        raise ValueError(f"only queued or running jobs can be paused, not {job.status}")
+    outcome = queue.request_pause(job_id)
+    trace = Tracer(repo, job_id)
+    if outcome == "paused":
+        job.status = "paused"
+        repo.save_job(job)
+        trace.event("paused", "Paused before it started.")
+    else:
+        trace.event("pause_requested", "Pause requested; stopping after the current model call.")
+    job.pause_requested = outcome == "requested"
+    return job
+
+
+def resume_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
+    """Continue a paused job from its checkpoint. Raises KeyError / ValueError."""
+    job = repo.get_job(job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job.status != "paused":
+        raise ValueError(f"only paused jobs can be resumed, not {job.status}")
+    queue.resume(job_id)
+    job.status = "queued"
+    job.failure_reason = None
+    repo.save_job(job)
+    Tracer(repo, job_id).event("resumed", "Resumed by the user; waiting for a worker.")
     return job
 
 

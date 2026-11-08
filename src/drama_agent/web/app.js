@@ -90,7 +90,12 @@ async function route() {
     state.job = state.pkg = null;
     state.retryError = "";
     state.renderedSig = null;
+    stopActivity();
     state.revise = null;
+    renderMain();
+  } else if (state.job) {
+    // Same job, different tab: a user action, so redraw now. (loadJob below only redraws
+    // when the job's data changed, which a tab switch doesn't do.)
     renderMain();
   }
   await loadJob(job);
@@ -152,6 +157,7 @@ async function loadJob(jobId) {
       state.renderedSig = sig;
       renderWhenNotSelecting();
     }
+    kickActivity();  // e.g. a resumed job starts streaming again
     if (changed) loadJobs();
     clearTimeout(state.pollTimer);
     if (isActive(job.status)) state.pollTimer = setTimeout(() => loadJob(jobId), 1500);
@@ -287,6 +293,16 @@ function renderJobHeader(job) {
       h("a", { class: "btn small", href: `${base}?${q}`, download: `${pkg.package_id}.json` }, "JSON"),
     );
   }
+  if (isActive(job.status)) {
+    actions.unshift(job.pause_requested
+      ? h("button", { class: "btn small", type: "button", disabled: true }, "Pausing…")
+      : h("button", { class: "btn small primary-outline", type: "button", onclick: (e) => jobAction(job.job_id, "pause", e.currentTarget),
+          title: "Stop after the current model call. Steps that passed are kept." }, "Pause"));
+  }
+  if (job.status === "paused") {
+    actions.unshift(h("button", { class: "btn small primary-outline", type: "button", onclick: (e) => jobAction(job.job_id, "resume", e.currentTarget),
+      title: "Continue from where it stopped." }, "Resume"));
+  }
   if (job.status === "needs_revision" || job.status === "failed") {
     const from = Object.entries(job.stages).find(([, s]) => s.status !== "passed")?.[0];
     actions.unshift(
@@ -302,6 +318,15 @@ function renderJobHeader(job) {
   }
   if (job.status === "queued" && job.failure_reason) {
     banners.push(h("div", { class: "banner warn" }, h("strong", {}, "Queued. "), job.failure_reason));
+  }
+  if (job.pause_requested) {
+    banners.push(h("div", { class: "banner info" }, h("strong", {}, "Pausing. "),
+      "The job stops once the current model call finishes, so that call's work isn't lost."));
+  }
+  if (job.status === "paused") {
+    const next = Object.entries(job.stages).find(([, s]) => s.status !== "passed")?.[0];
+    banners.push(h("div", { class: "banner info" }, h("strong", {}, "Paused. "),
+      `Steps that passed are kept. Resume continues with the ${next || "next"} step.`));
   }
   if (job.status === "failed") {
     banners.push(h("div", { class: "banner bad" }, h("strong", {}, "Job failed. "), job.failure_reason || ""));
@@ -340,6 +365,19 @@ function renderJobHeader(job) {
   );
 }
 
+async function jobAction(jobId, action, button) {
+  button.disabled = true;
+  state.retryError = "";
+  try {
+    await api(`/v1/drama-jobs/${encodeURIComponent(jobId)}/${action}`, { method: "POST" });
+    await loadJob(jobId);
+  } catch (e) {
+    state.retryError = `${action}: ${e.message}`;
+    button.disabled = false;
+    renderMain();
+  }
+}
+
 async function retryJob(jobId, button) {
   button.disabled = true;
   state.retryError = "";
@@ -357,10 +395,8 @@ async function retryJob(jobId, button) {
 const isSampleOutput = (pkg) => Object.values(pkg.provenance?.model_versions || {}).includes("fixture-v1");
 
 function renderWaiting(job) {
-  if (isActive(job.status)) {
-    return h("div", { class: "loading" }, "Generating… with a live model each step can take a minute or more.");
-  }
-  return h("div", { class: "loading" }, "No package was produced.");
+  // No package yet (running, paused, or failed early): the activity view is the page.
+  return activityPanel(job.job_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +409,7 @@ const TABS = [
   ["assets", "Assets"],
   ["qa", "QA"],
   ["revise", "Revise"],
+  ["activity", "Activity"],
 ];
 
 function lookups(pkg) {
@@ -404,6 +441,7 @@ function renderPackage(pkg) {
   const body = {
     overview: renderOverview, script: renderScript, storyboard: renderStoryboard,
     assets: renderAssets, qa: renderQA, revise: renderRevise,
+    activity: () => activityPanel(state.job.job_id),
   }[state.tab] || renderOverview;
   return h("div", {}, tabs, h("div", { role: "tabpanel" }, body(pkg, L)));
 }
@@ -760,3 +798,190 @@ function renderRevisionResult(rev) {
 
 loadMeta();
 loadJobs().then(route);
+
+// ---------------------------------------------------------------------------
+// Activity: live agent steps and model calls (also the debugging record later).
+//
+// Built once per job and updated in place: streaming updates arrive every second, and
+// rebuilding would wipe any text the user has selected.
+
+const ACTIVITY_POLL_MS = 1000;
+const EVENT_TONE = {
+  stage_passed: "ok", job_completed: "ok", resumed: "info", job_resumed: "info",
+  gate_issues: "warn", schema_repair: "warn", model_retry: "warn", retry_scheduled: "warn",
+  normalized: "", paused: "info", pause_requested: "info", requeued: "warn",
+  stage_failed: "bad", job_failed: "bad", gave_up: "bad", lease_lost: "warn",
+};
+
+function stopActivity() {
+  if (state.activity) clearTimeout(state.activity.timer);
+  state.activity = null;
+}
+
+function activityPanel(jobId) {
+  if (state.activity?.jobId !== jobId) {
+    stopActivity();
+    const a = { jobId, seq: 0, calls: new Map(), timer: null, polling: false };
+    a.status = h("span", { class: "chip" }, "loading");
+    a.timeline = h("ol", { class: "timeline-list" });
+    a.callList = h("div", { class: "call-list" });
+    a.empty = h("p", { class: "muted small" }, "No model calls yet.");
+    a.el = h("section", { class: "card activity" },
+      h("div", { class: "section-head" }, h("h3", {}, "Activity"), a.status),
+      h("div", { class: "activity-grid" },
+        h("div", {}, h("h4", { class: "subhead" }, "Agent steps"), a.timeline),
+        h("div", {}, h("h4", { class: "subhead" }, "Model calls"), a.empty, a.callList),
+      ),
+    );
+    state.activity = a;
+    pollActivity(a);
+  }
+  return state.activity.el;
+}
+
+async function pollActivity(a) {
+  if (a.polling || state.activity !== a) return;
+  a.polling = true;
+  try {
+    const t = await api(`/v1/drama-jobs/${encodeURIComponent(a.jobId)}/trace?after_seq=${a.seq}`);
+    if (state.activity !== a) return;  // the user moved to another job
+    for (const ev of t.events) a.timeline.append(eventRow(ev));
+    a.seq = t.next_seq;
+    for (const view of t.calls) upsertCall(a, view);
+    a.empty.hidden = t.calls.length > 0;
+    const live = isActive(state.job?.status) || t.calls.some((v) => v.call.status === "running");
+    a.status.className = `chip ${live ? "accent" : ""}`;
+    a.status.textContent = live ? "● live" : state.job?.status === "paused" ? "paused" : "finished";
+    if (live) a.timer = setTimeout(() => pollActivity(a), ACTIVITY_POLL_MS);
+  } catch (e) {
+    a.status.textContent = `trace unavailable: ${e.message}`;
+    a.timer = setTimeout(() => pollActivity(a), ACTIVITY_POLL_MS * 5);
+  } finally {
+    a.polling = false;
+  }
+}
+
+// When a paused/finished job starts running again, the activity resumes polling.
+function kickActivity() {
+  const a = state.activity;
+  if (a && !a.polling && isActive(state.job?.status)) {
+    clearTimeout(a.timer);
+    pollActivity(a);
+  }
+}
+
+const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+
+function eventRow(ev) {
+  const extra = [];
+  if (ev.data?.issues?.length) {
+    extra.push(h("ul", { class: "plain small" }, ev.data.issues.slice(0, 5).map((i) => h("li", { class: "mono" }, i))));
+  }
+  if (ev.data?.errors?.length) {
+    extra.push(h("div", { class: "small muted mono" }, `fields: ${ev.data.errors.join(", ")}`));
+  }
+  if (ev.data?.tokens && Object.keys(ev.data.tokens).length) {
+    const t = ev.data.tokens;
+    extra.push(h("div", { class: "small muted" },
+      `${(t.prompt_tokens || 0).toLocaleString()} in · ${(t.completion_tokens || 0).toLocaleString()} out` +
+      (t.reasoning_tokens ? ` · ${t.reasoning_tokens.toLocaleString()} reasoning` : "")));
+  }
+  return h("li", { class: `event ${EVENT_TONE[ev.kind] || ""}` },
+    h("span", { class: "event-time mono" }, clock(ev.ts)),
+    h("div", {},
+      ev.stage && h("span", { class: "chip" }, ev.stage), " ",
+      h("span", {}, ev.message),
+      extra),
+  );
+}
+
+function callTitle(c) {
+  const parts = [c.stage, `attempt ${c.attempt + 1}`];
+  if (c.turn) parts.push(`repair ${c.turn}`);
+  return parts.join(" · ");
+}
+
+function callMeta(c) {
+  const end = c.finished_at ? new Date(c.finished_at) : new Date();
+  const secs = Math.max(0, Math.round((end - new Date(c.started_at)) / 1000));
+  const u = c.usage || {};
+  const bits = [c.model, `${secs}s`];
+  if (c.status !== "running" && (u.prompt_tokens || u.completion_tokens)) {
+    bits.push(`${(u.prompt_tokens || 0).toLocaleString()} in / ${(u.completion_tokens || 0).toLocaleString()} out`);
+    if (u.reasoning_tokens) bits.push(`${u.reasoning_tokens.toLocaleString()} reasoning`);
+  }
+  bits.push(`${(c.output_chars || 0).toLocaleString()} chars`);
+  return bits.join(" · ");
+}
+
+// Replace text only when it changed and the user isn't selecting inside it.
+function setText(node, text) {
+  if (node.textContent !== text && !selectingIn(node)) node.textContent = text;
+}
+
+function lazyDetails(label, load) {
+  const body = h("pre", { class: "call-body" }, "Loading…");
+  const d = h("details", { class: "call-details" }, h("summary", {}, label), body);
+  let loaded = false;
+  d.addEventListener("toggle", async () => {
+    if (!d.open || loaded) return;
+    loaded = true;
+    try {
+      body.textContent = await load();
+    } catch (e) {
+      body.textContent = `Couldn't load: ${e.message}`;
+      loaded = false;
+    }
+  });
+  return d;
+}
+
+const fetchCall = (id) => api(`/v1/llm-calls/${encodeURIComponent(id)}`);
+
+function upsertCall(a, view) {
+  const c = view.call;
+  let ref = a.calls.get(c.call_id);
+  if (!ref) {
+    ref = {};
+    ref.status = h("span", { class: "chip" });
+    ref.meta = h("div", { class: "small muted mono" });
+    ref.notesWrap = h("div", { class: "call-notes", hidden: true },
+      h("div", { class: "subhead" }, "Model notes"), (ref.notes = h("p", {})));
+    ref.reasonWrap = h("div", { class: "call-notes", hidden: true },
+      h("div", { class: "subhead" }, "Reasoning summary"), (ref.reason = h("p", {})));
+    ref.live = h("pre", { class: "call-body live", hidden: true });
+    ref.error = h("p", { class: "form-error" });
+    ref.done = h("div", { class: "call-done", hidden: true },
+      lazyDetails("Output", async () => {
+        const full = await fetchCall(c.call_id);
+        try { return JSON.stringify(JSON.parse(full.output), null, 2); } catch { return full.output || "(empty)"; }
+      }),
+      lazyDetails("Prompt sent to the model", async () => {
+        const full = await fetchCall(c.call_id);
+        return (full.request.messages || []).map((m) => `── ${m.role} ──\n${m.content}`).join("\n\n") || JSON.stringify(full.request, null, 2);
+      }),
+    );
+    ref.el = h("article", { class: "call" },
+      h("div", { class: "call-head" }, h("strong", {}, callTitle(c)), ref.status),
+      ref.meta, ref.notesWrap, ref.reasonWrap, ref.live, ref.error, ref.done);
+    a.calls.set(c.call_id, ref);
+    a.callList.prepend(ref.el);  // newest first
+  }
+  const running = c.status === "running";
+  ref.status.className = `chip ${running ? "accent" : c.status === "failed" ? "bad" : "ok"}`;
+  setText(ref.status, running ? "streaming" : c.status);
+  setText(ref.meta, callMeta(c));
+  ref.notesWrap.hidden = !c.commentary;
+  setText(ref.notes, c.commentary || "");
+  ref.reasonWrap.hidden = !c.reasoning_summary;
+  setText(ref.reason, c.reasoning_summary || "");
+  setText(ref.error, c.error || "");
+  ref.live.hidden = !running;
+  ref.done.hidden = running;
+  if (running) {
+    const pre = ref.live;
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+    setText(pre, view.output_tail || "Waiting for the first tokens…");
+    if (atBottom && !selectingIn(pre)) pre.scrollTop = pre.scrollHeight;
+  }
+}

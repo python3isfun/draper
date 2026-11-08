@@ -13,10 +13,11 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from ..models import Job, ProductionPackage, QAReport, Revision
+from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 
-# v1: objects. v2: job_queue (additive; v1 files upgrade in place).
-SCHEMA_VERSION = 2
+# v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
+# Each step is additive, so older files upgrade in place (see _migrate).
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -59,9 +60,27 @@ CREATE TABLE IF NOT EXISTS job_queue (
     lease_owner      TEXT,
     lease_expires_at REAL,
     last_error       TEXT,
-    checkpoint       TEXT                        -- PipelineCheckpoint JSON
+    checkpoint       TEXT,                       -- PipelineCheckpoint JSON
+    pause_requested  INTEGER NOT NULL DEFAULT 0  -- user asked to pause at the next safe point
 );
 CREATE INDEX IF NOT EXISTS job_queue_ready ON job_queue (state, available_at);
+CREATE TABLE IF NOT EXISTS job_events (
+    seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id  TEXT NOT NULL,
+    data    TEXT NOT NULL                    -- TraceEvent JSON (without seq)
+);
+CREATE INDEX IF NOT EXISTS job_events_job ON job_events (job_id, seq);
+CREATE TABLE IF NOT EXISTS llm_calls (
+    call_id           TEXT PRIMARY KEY,
+    job_id            TEXT NOT NULL,
+    started_at        TEXT NOT NULL,
+    meta              TEXT NOT NULL,         -- LLMCall JSON without the bodies below
+    request           TEXT NOT NULL DEFAULT '{}',
+    commentary        TEXT NOT NULL DEFAULT '',
+    reasoning_summary TEXT NOT NULL DEFAULT '',
+    output            TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS llm_calls_job ON llm_calls (job_id, started_at);
 """
 
 
@@ -85,7 +104,16 @@ class SqliteRepository:
                     f"{self.path} has schema v{version}; this code supports v{SCHEMA_VERSION}"
                 )
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    def _migrate(self) -> None:
+        """Column additions that CREATE TABLE IF NOT EXISTS can't apply to old tables."""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(job_queue)")}
+        if "pause_requested" not in cols:
+            self._conn.execute(
+                "ALTER TABLE job_queue ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -201,3 +229,80 @@ class SqliteRepository:
             (package_id, revision_id),
         )
         return QAReport.model_validate_json(raw) if raw else None
+
+    # Trace ----------------------------------------------------------------
+
+    def add_event(self, event: TraceEvent) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO job_events (job_id, data) VALUES (?, ?)",
+                (event.job_id, event.model_dump_json(exclude={"seq"})),
+            )
+        return int(cur.lastrowid)
+
+    def list_events(self, job_id: str, after_seq: int = 0, limit: int = 1000) -> list[TraceEvent]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT seq, data FROM job_events WHERE job_id = ? AND seq > ? "
+                "ORDER BY seq LIMIT ?",
+                (job_id, after_seq, limit),
+            ).fetchall()
+        return [TraceEvent.model_validate_json(d).model_copy(update={"seq": q}) for q, d in rows]
+
+    _BODIES = ("request", "commentary", "reasoning_summary", "output")
+
+    def save_llm_call(self, call: LLMCall) -> None:
+        meta = call.model_dump_json(exclude=set(self._BODIES))
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO llm_calls (call_id, job_id, started_at, meta, request, commentary, "
+                "reasoning_summary, output) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (call_id) DO UPDATE SET meta = excluded.meta, "
+                "request = excluded.request, commentary = excluded.commentary, "
+                "reasoning_summary = excluded.reasoning_summary, output = excluded.output",
+                (
+                    call.call_id,
+                    call.job_id,
+                    call.started_at.isoformat(),
+                    meta,
+                    json.dumps(call.request, ensure_ascii=False),
+                    call.commentary,
+                    call.reasoning_summary,
+                    call.output,
+                ),
+            )
+
+    def get_llm_call(self, call_id: str) -> LLMCall | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT meta, request, commentary, reasoning_summary, output FROM llm_calls "
+                "WHERE call_id = ?",
+                (call_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        meta, request, commentary, reasoning, output = row
+        return LLMCall.model_validate_json(meta).model_copy(
+            update={
+                "request": json.loads(request),
+                "commentary": commentary,
+                "reasoning_summary": reasoning,
+                "output": output,
+            }
+        )
+
+    def list_llm_calls(self, job_id: str) -> list[LLMCall]:
+        """Calls in start order, with commentary/reasoning but without request/output bodies
+        (fetch one call with get_llm_call for those)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT meta, commentary, reasoning_summary, length(output) FROM llm_calls "
+                "WHERE job_id = ? ORDER BY started_at, call_id",
+                (job_id,),
+            ).fetchall()
+        return [
+            LLMCall.model_validate_json(meta).model_copy(
+                update={"commentary": c, "reasoning_summary": r, "output_chars": n}
+            )
+            for meta, c, r, n in rows
+        ]

@@ -32,6 +32,32 @@ with no build step. It lets you:
 
 Model output is always inserted as text, never as HTML.
 
+### Live activity, trace and pause
+
+While a job runs, its page shows an **Activity** view (also a tab on finished jobs):
+
+- **Agent steps:** step started/passed, hard-check issues and retries, schema repairs,
+  text cleanup, pause/resume, and failures, with timestamps.
+- **Model calls:** each request to the model, streaming live: the model's **progress
+  notes**, its **reasoning summary**, and the **output** as it's generated. Finished calls
+  show model, duration and tokens; their full output and the exact prompt load on demand.
+
+Everything is stored in SQLite (`job_events`, `llm_calls`) for debugging a story later.
+API: `GET /v1/drama-jobs/{id}/trace?after_seq=N` (incremental) and
+`GET /v1/llm-calls/{call_id}` (one call in full).
+
+Raw model reasoning is encrypted by the provider and isn't available; the reasoning
+*summary* and progress notes come from the Responses API (`MCPHUB_API=responses`, the
+default). `MCPHUB_API=chat` uses streaming Chat Completions instead: live output, but no
+notes or summaries.
+
+**Pause** (`POST /v1/drama-jobs/{id}/pause`) stops a queued job at once, and a running one
+once its current model call finishes, so that call's work is kept. **Resume**
+(`POST .../resume`) continues from the checkpoint; pausing doesn't use up a retry attempt.
+
+To try the live view offline, run with `DRAMA_MODEL_CLIENT=fixture
+DRAMA_FIXTURE_DELAY_S=4`: each sample step then takes about 4 seconds and streams.
+
 ### Storage
 
 The server stores everything in SQLite by default, at `data/drama.db` relative to the

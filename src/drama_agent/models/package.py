@@ -98,7 +98,10 @@ class ProductionPackage(BaseModel):
 # ---------------------------------------------------------------------------
 # Jobs (spec section 9)
 
-JobStatus = Literal["queued", "running", "completed", "needs_revision", "failed", "cancelled"]
+# "paused" extends the spec's statuses: the user paused the job; it resumes on request.
+JobStatus = Literal[
+    "queued", "running", "paused", "completed", "needs_revision", "failed", "cancelled"
+]
 StageName = Literal["ingest", "outline", "script", "storyboard", "review"]
 StageStatus = Literal["pending", "running", "passed", "failed"]
 STAGES: tuple[StageName, ...] = ("ingest", "outline", "script", "storyboard", "review")
@@ -123,6 +126,9 @@ class Job(BaseModel):
     failure_reason: str | None = None
     # Execution attempts by the job queue (each claim by a worker is one attempt).
     attempts: int = 0
+    # Set on API responses from the queue's pause flag; not authoritative when stored
+    # (the flag lives in the queue so a running worker can't overwrite it).
+    pause_requested: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -157,3 +163,44 @@ class Revision(BaseModel):
     # Locked objects inside the scope; regeneration must leave them unchanged.
     locked_in_scope: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Trace: what the agent did, for live progress and later debugging
+
+
+class TraceEvent(BaseModel):
+    seq: int = 0  # assigned by the store; strictly increasing per store
+    job_id: str
+    ts: datetime = Field(default_factory=utcnow)
+    kind: str  # e.g. stage_started, gate_issues, stage_passed, paused
+    stage: str | None = None
+    attempt: int | None = None
+    message: str
+    data: dict = Field(default_factory=dict)
+
+
+LLMCallStatus = Literal["running", "succeeded", "failed"]
+
+
+class LLMCall(BaseModel):
+    """One request to the model (a schema-repair turn is its own call)."""
+
+    call_id: str
+    job_id: str
+    stage: str
+    attempt: int  # step attempt (0-based) within the job run
+    turn: int = 0  # schema-repair turn within the attempt
+    model: str
+    api: str = ""
+    status: LLMCallStatus = "running"
+    started_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    finished_at: datetime | None = None
+    request: dict = Field(default_factory=dict)  # instructions + input as sent
+    commentary: str = ""  # the model's progress notes (Responses API "commentary")
+    reasoning_summary: str = ""  # only if the gateway returns summaries
+    output: str = ""  # the answer text (JSON), streamed in
+    output_chars: int = 0  # filled in list views, where `output` itself is omitted
+    usage: dict = Field(default_factory=dict)
+    error: str | None = None

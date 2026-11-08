@@ -26,6 +26,8 @@ class GenerationRequest:
     usage: dict[str, int] = field(default_factory=dict)
     # Filled by the client: the model that actually served this request.
     model: str | None = None
+    # Live trace hook (tracing.CallRecorder); None means nothing is recording.
+    recorder: Any = None
 
 
 class ModelClient(Protocol):

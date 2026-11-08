@@ -9,7 +9,13 @@ import pytest
 
 from drama_agent.config import client_from_env, load_dotenv
 from drama_agent.llm import FixtureModelClient, GenerationRequest
-from drama_agent.llm.mcphub import MCPHubClient, ModelClientError, ModelOutputInvalid, ModelRefusal
+from drama_agent.llm.mcphub import (
+    COMMENTARY_HINT,
+    MCPHubClient,
+    ModelClientError,
+    ModelOutputInvalid,
+    ModelRefusal,
+)
 from drama_agent.models import Issue, SourceBrief
 
 from .conftest import run_pipeline
@@ -26,19 +32,122 @@ VALID_BRIEF = {
 }
 
 
-def completion(content: str, finish="stop", refusal=None) -> dict:
-    return {
-        "choices": [
+def _sse(events: list[dict]) -> httpx.Response:
+    body = "".join(f"event: {e.get('type', 'chunk')}\ndata: {json.dumps(e)}\n\n" for e in events)
+    return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+
+def _chunks(text: str, n: int = 7) -> list[str]:
+    return [text[i : i + n] for i in range(0, len(text), n)] or [""]
+
+
+def responses_sse(
+    answer: str,
+    *,
+    commentary: str = "",
+    reasoning: str = "",
+    refusal: str = "",
+    incomplete: str | None = None,
+) -> httpx.Response:
+    """A Responses API stream shaped like MCPHub's (see the live probe): a reasoning item,
+    an optional commentary message, then the final_answer message."""
+    ev: list[dict] = [
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "reasoning", "summary": []},
+        }
+    ]
+    if reasoning:
+        ev.append({"type": "response.reasoning_summary_text.delta", "delta": reasoning})
+    idx = 1
+    if commentary:
+        ev.append(
             {
-                "message": {"role": "assistant", "content": content, "refusal": refusal},
-                "finish_reason": finish,
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {"type": "message", "phase": "commentary"},
             }
-        ],
-        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        )
+        ev += [
+            {"type": "response.output_text.delta", "output_index": 1, "delta": c}
+            for c in _chunks(commentary)
+        ]
+        idx = 2
+    ev.append(
+        {
+            "type": "response.output_item.added",
+            "output_index": idx,
+            "item": {"type": "message", "phase": "final_answer"},
+        }
+    )
+    if refusal:
+        ev.append({"type": "response.refusal.delta", "output_index": idx, "delta": refusal})
+    ev += [
+        {"type": "response.output_text.delta", "output_index": idx, "delta": c}
+        for c in _chunks(answer)
+    ]
+    response = {
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "output_tokens_details": {"reasoning_tokens": 3},
+        }
     }
+    if incomplete:
+        response["incomplete_details"] = {"reason": incomplete}
+    ev.append(
+        {
+            "type": "response.incomplete" if incomplete else "response.completed",
+            "response": response,
+        }
+    )
+    return _sse(ev)
 
 
-def make_client(handler) -> tuple[MCPHubClient, list[httpx.Request]]:
+def chat_sse(answer: str, finish: str = "stop") -> httpx.Response:
+    ev = [{"choices": [{"delta": {"role": "assistant", "content": ""}}]}]
+    ev += [{"choices": [{"delta": {"content": c}}]} for c in _chunks(answer)]
+    ev.append({"choices": [{"delta": {}, "finish_reason": finish}]})
+    ev.append(
+        {
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "completion_tokens_details": {"reasoning_tokens": 3},
+            },
+        }
+    )
+    return _sse(ev)
+
+
+class FakeRecorder:
+    """Captures what the client reports to the live trace."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.notes: list[tuple[str, str]] = []
+
+    @property
+    def call(self):
+        return None
+
+    def start(self, **kw):
+        self.calls.append({**kw, "output": "", "commentary": "", "reasoning": "", "end": None})
+
+    def delta(self, channel, text):
+        key = {"output": "output", "commentary": "commentary", "reasoning": "reasoning"}[channel]
+        self.calls[-1][key] += text
+
+    def finish(self, usage=None, error=None):
+        self.calls[-1]["end"] = {"usage": usage, "error": error}
+
+    def note(self, kind, message, **data):
+        self.notes.append((kind, message))
+
+
+def make_client(handler, api="responses") -> tuple[MCPHubClient, list[httpx.Request]]:
     seen: list[httpx.Request] = []
 
     def wrapped(req: httpx.Request) -> httpx.Response:
@@ -49,6 +158,7 @@ def make_client(handler) -> tuple[MCPHubClient, list[httpx.Request]]:
         "https://hub.test/v1",
         "sk-test",
         "gpt-6.1-sol",
+        api=api,
         backoff_s=0,
         transport=httpx.MockTransport(wrapped),
     )
@@ -59,67 +169,113 @@ def request(**kw) -> GenerationRequest:
     return GenerationRequest(stage="ingest", instructions="SYS", context={"x": 1}, **kw)
 
 
-def test_success_sends_schema_and_auth_and_records_usage():
+def test_responses_stream_separates_commentary_from_answer():
+    rec = FakeRecorder()
     client, seen = make_client(
-        lambda r, n: httpx.Response(200, json=completion(json.dumps(VALID_BRIEF)))
+        lambda r, n: responses_sse(
+            json.dumps(VALID_BRIEF),
+            commentary="先确认素材里的事实，再补足冲突。",
+            reasoning="summary text",
+        )
     )
-    req = request(feedback=[Issue(check="c", object_id="o", evidence="e")])
+    req = request(feedback=[Issue(check="c", object_id="o", evidence="e")], recorder=rec)
     out = asyncio.run(client.generate(req, SourceBrief))
 
-    assert isinstance(out, SourceBrief)
+    assert isinstance(out, SourceBrief)  # commentary is not part of the parsed answer
     sent = json.loads(seen[0].content)
-    assert seen[0].url.path == "/v1/chat/completions"
+    assert seen[0].url.path == "/v1/responses"
     assert seen[0].headers["authorization"] == "Bearer sk-test"
-    assert sent["model"] == "gpt-6.1-sol"
-    assert sent["response_format"]["json_schema"]["name"] == "SourceBrief"
-    assert sent["messages"][0] == {"role": "system", "content": "SYS"}
-    assert "previous attempt" in sent["messages"][1]["content"]  # feedback included
-    assert req.usage == {"prompt_tokens": 10, "completion_tokens": 5}
+    assert sent["model"] == "gpt-6.1-sol" and sent["stream"] is True
+    assert sent["text"]["format"]["name"] == "SourceBrief"
+    assert sent["reasoning"] == {"summary": "auto"}
+    assert sent["instructions"].startswith("SYS") and COMMENTARY_HINT in sent["instructions"]
+    assert "previous attempt" in sent["input"][0]["content"]  # feedback included
+    assert req.usage == {"prompt_tokens": 10, "completion_tokens": 5, "reasoning_tokens": 3}
+
+    [call] = rec.calls
+    assert call["api"] == "responses" and call["model"] == "gpt-6.1-sol" and call["turn"] == 0
+    assert call["commentary"] == "先确认素材里的事实，再补足冲突。"
+    assert call["reasoning"] == "summary text"
+    assert json.loads(call["output"]) == VALID_BRIEF
+    assert call["end"] == {"usage": req.usage, "error": None}
 
 
 def test_invalid_json_gets_one_repair_turn():
+    rec = FakeRecorder()
+
     def handler(r, n):
         body = {"language": "zh-CN"} if n == 1 else VALID_BRIEF
-        return httpx.Response(200, json=completion(json.dumps(body)))
+        return responses_sse(json.dumps(body))
 
     client, seen = make_client(handler)
-    req = request()
+    req = request(recorder=rec)
     out = asyncio.run(client.generate(req, SourceBrief))
     assert out.language == "zh-CN" and len(seen) == 2
-    repair = json.loads(seen[1].content)["messages"]
+    repair = json.loads(seen[1].content)["input"]
     assert repair[-2]["role"] == "assistant" and "failed schema validation" in repair[-1]["content"]
     assert req.usage["prompt_tokens"] == 20  # summed across both calls
+    assert [c["turn"] for c in rec.calls] == [0, 1]
+    assert rec.calls[0]["end"]["error"].startswith("schema validation failed")
+    assert rec.calls[1]["end"]["error"] is None
+    assert [k for k, _ in rec.notes] == ["schema_repair"]
 
 
 def test_invalid_after_repair_raises():
-    client, _ = make_client(lambda r, n: httpx.Response(200, json=completion("{}")))
+    client, _ = make_client(lambda r, n: responses_sse("{}"))
     with pytest.raises(ModelOutputInvalid):
         asyncio.run(client.generate(request(), SourceBrief))
 
 
 def test_retries_on_5xx_then_succeeds():
+    rec = FakeRecorder()
+
     def handler(r, n):
         if n < 3:
             return httpx.Response(503, text="busy")
-        return httpx.Response(200, json=completion(json.dumps(VALID_BRIEF)))
+        return responses_sse(json.dumps(VALID_BRIEF))
 
     client, seen = make_client(handler)
-    asyncio.run(client.generate(request(), SourceBrief))
+    asyncio.run(client.generate(request(recorder=rec), SourceBrief))
     assert len(seen) == 3
+    assert [k for k, _ in rec.notes] == ["model_retry", "model_retry"]
+    # Each broken request is closed as failed; only the last one succeeded.
+    assert [c["end"]["error"] is None for c in rec.calls] == [False, False, True]
 
 
 def test_non_retryable_error_does_not_leak_key():
+    rec = FakeRecorder()
     client, seen = make_client(lambda r, n: httpx.Response(401, text="bad key"))
     with pytest.raises(ModelClientError) as exc:
-        asyncio.run(client.generate(request(), SourceBrief))
+        asyncio.run(client.generate(request(recorder=rec), SourceBrief))
     assert len(seen) == 1 and "401" in str(exc.value) and "sk-test" not in str(exc.value)
+    assert "401" in rec.calls[-1]["end"]["error"]
 
 
-def test_refusal_and_truncation():
-    client, _ = make_client(lambda r, n: httpx.Response(200, json=completion("", refusal="no")))
+def test_refusal_truncation_and_failed_stream():
+    client, _ = make_client(lambda r, n: responses_sse("", refusal="no"))
     with pytest.raises(ModelRefusal):
         asyncio.run(client.generate(request(), SourceBrief))
-    client, _ = make_client(lambda r, n: httpx.Response(200, json=completion("{", finish="length")))
+    client, _ = make_client(lambda r, n: responses_sse("{", incomplete="max_output_tokens"))
+    with pytest.raises(ModelOutputInvalid, match="truncated"):
+        asyncio.run(client.generate(request(), SourceBrief))
+    client, _ = make_client(
+        lambda r, n: _sse([{"type": "response.failed", "response": {"error": {"message": "x"}}}])
+    )
+    with pytest.raises(ModelClientError, match="response failed"):
+        asyncio.run(client.generate(request(), SourceBrief))
+
+
+def test_chat_api_streams_without_commentary_hint():
+    rec = FakeRecorder()
+    client, seen = make_client(lambda r, n: chat_sse(json.dumps(VALID_BRIEF)), api="chat")
+    req = request(recorder=rec)
+    asyncio.run(client.generate(req, SourceBrief))
+    sent = json.loads(seen[0].content)
+    assert seen[0].url.path == "/v1/chat/completions" and sent["stream"] is True
+    assert sent["messages"][0] == {"role": "system", "content": "SYS"}
+    assert req.usage == {"prompt_tokens": 10, "completion_tokens": 5, "reasoning_tokens": 3}
+    assert json.loads(rec.calls[0]["output"]) == VALID_BRIEF
+    client, _ = make_client(lambda r, n: chat_sse("{", finish="length"), api="chat")
     with pytest.raises(ModelOutputInvalid, match="truncated"):
         asyncio.run(client.generate(request(), SourceBrief))
 
@@ -182,7 +338,7 @@ def test_stage_models_route_each_step_to_its_model():
 
     def handler(req, n):
         seen_models.append(json.loads(req.content)["model"])
-        return httpx.Response(200, json=completion(json.dumps(VALID_BRIEF)))
+        return responses_sse(json.dumps(VALID_BRIEF))
 
     transport = httpx.MockTransport(lambda r: handler(r, 0))
     client = MCPHubClient(

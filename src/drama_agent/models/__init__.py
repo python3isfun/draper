@@ -14,12 +14,14 @@ from .package import (
     Experiment,
     Issue,
     Job,
+    LLMCall,
     ProductionPackage,
     Provenance,
     QAReport,
     Revision,
     RevisionRequest,
     StageState,
+    TraceEvent,
 )
 from .request import JobOptions, JobRequest, Source
 from .screenplay import Beat, DialogueLine, Episode, Scene, SceneState
@@ -65,6 +67,7 @@ __all__ = [
     "Job",
     "JobOptions",
     "JobRequest",
+    "LLMCall",
     "Location",
     "LocationState",
     "ProductionPackage",
@@ -85,5 +88,6 @@ __all__ = [
     "StoryBible",
     "StyleBrief",
     "SubjectRef",
+    "TraceEvent",
     "UsedBy",
 ]
