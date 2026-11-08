@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from .llm import FixtureModelClient, ModelClient
+from .store import InMemoryRepository, Repository
 
 
 def load_dotenv(path: str | Path = ".env") -> None:
@@ -46,3 +47,18 @@ def client_from_env() -> ModelClient:
             timeout_s=float(os.environ.get("MCPHUB_TIMEOUT_S", "600")),
         )
     raise RuntimeError(f"unknown DRAMA_MODEL_CLIENT={kind!r}")
+
+
+def repo_from_env() -> Repository:
+    """DRAMA_STORE selects storage: 'sqlite' (default) or 'memory'.
+
+    DRAMA_DB_PATH sets the SQLite file (default data/drama.db, relative to the working dir).
+    """
+    kind = os.environ.get("DRAMA_STORE", "sqlite").lower()
+    if kind == "memory":
+        return InMemoryRepository()
+    if kind == "sqlite":
+        from .store.sqlite import SqliteRepository
+
+        return SqliteRepository(os.environ.get("DRAMA_DB_PATH", "data/drama.db"))
+    raise RuntimeError(f"unknown DRAMA_STORE={kind!r}")

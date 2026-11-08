@@ -32,6 +32,23 @@ with no build step. It lets you:
 
 Model output is always inserted as text, never as HTML.
 
+### Storage
+
+The server stores everything in SQLite by default, at `data/drama.db` relative to the
+directory you start it from (git-ignored). Jobs, packages, revisions and evaluation reports
+survive restarts.
+
+| variable | default | meaning |
+| --- | --- | --- |
+| `DRAMA_STORE` | `sqlite` | `sqlite`, or `memory` for nothing written to disk |
+| `DRAMA_DB_PATH` | `data/drama.db` | SQLite file; parent directories are created |
+
+Each object is stored as its JSON document. Package revisions are append-only: one row per
+revision, never overwritten. On startup, jobs a previous process left `queued` or
+`running` are marked `failed` with the reason "interrupted by server restart".
+
+Tests use the in-memory store unless they pass a temporary SQLite file.
+
 ### Model backend
 
 `DRAMA_MODEL_CLIENT` picks the backend (read from the environment or `.env`):
@@ -80,7 +97,7 @@ src/drama_agent/
   llm/             Vendor-neutral ModelClient protocol, MCPHub client, offline fixture
   config.py        .env loading and model client selection
   prompts/         Base orchestrator prompt (verbatim from spec §10)
-  store/           Repository protocol + in-memory implementation
+  store/           Repository protocol; SQLite (default) and in-memory backends
   api/             FastAPI routes (spec §9) + /v1/meta, job listing
   web/             Web UI (HTML/CSS/JS, served at /)
   fixtures/        Complete sample package used by the fixture client and tests
@@ -108,6 +125,6 @@ src/drama_agent/
 - The revision regeneration worker: `POST .../revisions` validates the request, runs the
   impact analysis and records the revision as `queued`, but nothing regenerates content yet.
 - Upstream retry: a failing step only retries itself. It never re-runs earlier steps.
-- Persistent storage and a durable job queue (the current version uses in-memory storage
-  and FastAPI background tasks).
+- A durable job queue. Jobs run as FastAPI background tasks, so a restart interrupts any
+  job in progress (it is marked `failed` on the next start rather than resumed).
 - Source asset upload endpoint.

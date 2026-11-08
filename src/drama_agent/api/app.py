@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -11,15 +12,16 @@ from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
-
-from ..config import client_from_env, load_dotenv
+from ..config import client_from_env, load_dotenv, repo_from_env
 from ..llm import FixtureModelClient, ModelClient
 from ..models import Job, JobRequest, ProductionPackage, Revision, RevisionRequest
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
 from ..store import InMemoryRepository, Repository
+
+log = logging.getLogger(__name__)
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
 class JobCreated(BaseModel):
@@ -139,7 +141,13 @@ def create_app(repo: Repository | None = None, client: ModelClient | None = None
 def create_app_from_env() -> FastAPI:
     """Entry point for uvicorn: reads .env and picks the model client from DRAMA_MODEL_CLIENT."""
     load_dotenv()
-    return create_app(client=client_from_env())
+    repo = repo_from_env()
+    # Background tasks die with the process; jobs a previous run left mid-flight would
+    # otherwise show 'running' forever.
+    interrupted = repo.fail_interrupted_jobs("interrupted by server restart")
+    if interrupted:
+        log.warning("marked %d interrupted jobs as failed: %s", len(interrupted), interrupted)
+    return create_app(repo=repo, client=client_from_env())
 
 
 _app: FastAPI | None = None
