@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, TypeVar
+from pathlib import Path
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -28,6 +29,9 @@ class GenerationRequest:
     model: str | None = None
     # Live trace hook (tracing.CallRecorder); None means nothing is recording.
     recorder: Any = None
+    # Images shown to the model with this request (media.MediaPart: label, path, mime).
+    # Only the ingest step gets them; later steps work from the source brief.
+    media: list[Any] = field(default_factory=list)
 
 
 class ModelClient(Protocol):
@@ -36,4 +40,15 @@ class ModelClient(Protocol):
     async def generate(self, request: GenerationRequest, output_model: type[T]) -> T:
         """Return an instance of output_model. Implementations should use structured output
         (JSON schema from output_model.model_json_schema()) and validate the response."""
+        ...
+
+
+@runtime_checkable
+class Transcriber(Protocol):
+    """Optional client capability: speech-to-text for video sources."""
+
+    transcribe_model: str
+
+    async def transcribe(self, audio_path: Path) -> list[dict[str, Any]]:
+        """Return segments [{start_ms, end_ms, text}]."""
         ...

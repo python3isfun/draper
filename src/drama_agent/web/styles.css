@@ -296,3 +296,59 @@ td.mono { white-space: nowrap; }
 .call-details { margin-top: 6px; }
 .call-details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 .call .form-error { margin-top: 6px; }
+
+/* Uploads (new-job form) ---------------------------------------------------- */
+.dropzone {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 12px; border: 1px dashed var(--border); border-radius: var(--radius);
+  background: var(--surface-2); color: var(--text); font-size: 13px; text-align: center;
+  cursor: pointer;
+}
+.dropzone:hover, .dropzone.over { border-color: var(--accent); background: var(--accent-soft); }
+.dropzone:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dropzone input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.attachments { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.attachments:empty { display: none; }
+.attachment {
+  display: flex; gap: 8px; padding: 8px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--surface);
+}
+.attachment .thumb {
+  width: 64px; height: 64px; flex: none; object-fit: cover; border-radius: 6px;
+  background: var(--surface-2);
+}
+.attachment-body { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+.attachment-head { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-width: 0; }
+.attachment-head .name {
+  font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1 1 100%; min-width: 0;
+}
+.attachment-head .btn { flex: none; margin-left: auto; }
+
+/* Sources (job page) -------------------------------------------------------- */
+.sources { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.sources > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
+.source { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.source:last-child { border-bottom: 0; }
+.source-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.source-head .name { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+.source-text { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.source-media { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; margin-top: 8px; }
+.source-image {
+  display: block; max-width: min(320px, 100%); max-height: 240px; border-radius: 6px;
+  border: 1px solid var(--border); object-fit: contain; background: var(--surface-2);
+}
+.frames { margin-top: 6px; }
+.frames > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.frame-strip {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px;
+  margin-top: 8px;
+}
+.frame-strip figure { margin: 0; min-width: 0; }
+.frame-strip img {
+  display: block; width: 100%; max-width: 100%; height: auto; aspect-ratio: 16 / 9;
+  object-fit: cover; border-radius: 4px;
+  background: var(--surface-2);
+}
+.frame-strip figcaption { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.transcript { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; font-size: 13px; }

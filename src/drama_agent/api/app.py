@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -23,6 +24,7 @@ from ..config import (
 )
 from ..jobqueue import InMemoryJobQueue, JobQueue
 from ..llm import FixtureModelClient, ModelClient
+from ..media import MediaError, MediaStore, UploadTooLarge, media_from_env
 from ..models import (
     Job,
     JobRequest,
@@ -30,6 +32,7 @@ from ..models import (
     ProductionPackage,
     Revision,
     RevisionRequest,
+    SourceAsset,
     TraceEvent,
 )
 from ..pipeline.impact import analyze_impact
@@ -91,6 +94,19 @@ class Meta(BaseModel):
     stage_models: dict[str, str] = {}  # per-step overrides of the default
 
 
+def _seed_label(job: Job, assets: dict[str, dict]) -> str:
+    """Job list label: the first text, else the first uploaded file's name."""
+    sources = job.request.sources
+    text = next((s.text for s in sources if s.type in ("text", "script") and s.text), None)
+    if text:
+        return text
+    prompt = next((s.text for s in sources if s.text), None)
+    first = sources[0]
+    name = (assets.get(first.asset_id or "") or {}).get("filename") or first.asset_id or ""
+    label = f"[{first.type}] {name}"
+    return f"{label} · {prompt}" if prompt else label
+
+
 def create_app(
     repo: Repository | None = None,
     client: ModelClient | None = None,
@@ -99,12 +115,17 @@ def create_app(
     lease_s: float = 30.0,
     poll_s: float = 1.0,
     retry_base_s: float = 5.0,
+    media: MediaStore | None = None,
 ) -> FastAPI:
     """Build the API. `workers` in-process job workers start with the app (lifespan);
-    with workers=0 jobs are only enqueued, for a separate `python -m drama_agent.worker`."""
+    with workers=0 jobs are only enqueued, for a separate `python -m drama_agent.worker`.
+    Uploads go to `media` (default: a fresh temporary directory)."""
     repo = repo or InMemoryRepository()
     queue = queue or InMemoryJobQueue()
-    orchestrator = Orchestrator(repo, client or FixtureModelClient(), checkpoints=queue)
+    media = media or MediaStore(tempfile.mkdtemp(prefix="drama-media-"))
+    orchestrator = Orchestrator(
+        repo, client or FixtureModelClient(), checkpoints=queue, media=media
+    )
     wakeup = asyncio.Event()
 
     @asynccontextmanager
@@ -139,6 +160,7 @@ def create_app(
     app.state.repo = repo
     app.state.queue = queue
     app.state.orchestrator = orchestrator
+    app.state.media = media
 
     @app.get("/v1/meta", response_model=Meta)
     async def meta() -> Meta:
@@ -152,9 +174,12 @@ def create_app(
     @app.get("/v1/drama-jobs", response_model=list[JobSummary])
     async def list_jobs(limit: int = Query(50, ge=1, le=200)) -> list[JobSummary]:
         out = []
-        for j in repo.list_jobs(limit):
-            first = j.request.sources[0]
-            seed = first.text or f"[{first.type}] {first.asset_id or ''}"
+        jobs = repo.list_jobs(limit)
+        # One batched lookup for the file names of media-only jobs (not one per job).
+        firsts = [j.request.sources[0].asset_id for j in jobs]
+        assets = repo.get_source_assets([a for a in firsts if a])
+        for j in jobs:
+            seed = _seed_label(j, assets)
             out.append(
                 JobSummary(
                     job_id=j.job_id,
@@ -169,14 +194,84 @@ def create_app(
 
     @app.post("/v1/drama-jobs", status_code=202, response_model=JobCreated)
     async def create_job(req: JobRequest) -> JobCreated:
-        for src in req.sources:
-            if src.asset_id and repo.get_source_asset(src.asset_id) is None:
+        n_media = sum(1 for src in req.sources if src.type in ("image", "video"))
+        if n_media > media.limits.max_media_sources:
+            raise HTTPException(
+                422, f"at most {media.limits.max_media_sources} images and videos per job"
+            )
+        for i, src in enumerate(req.sources):
+            if not src.asset_id:
+                continue
+            raw = repo.get_source_asset(src.asset_id)
+            if raw is None:
                 raise HTTPException(422, f"unknown asset_id {src.asset_id}")
+            kind = raw.get("kind")
+            if src.type in ("image", "video") and kind != src.type:
+                raise HTTPException(
+                    422, f"sources[{i}] is type {src.type} but {src.asset_id} is a {kind}"
+                )
         job = Job(job_id=new_id("job"), request=req)
         repo.save_job(job)
         queue.enqueue(job.job_id)
         wakeup.set()
         return JobCreated(job_id=job.job_id, status=job.status)
+
+    @app.post("/v1/source-assets", status_code=201, response_model=SourceAsset)
+    async def upload_asset(
+        request: Request,
+        filename: str = Query("upload", max_length=255),
+    ) -> SourceAsset:
+        """Upload one image or video as the raw request body (not multipart). Use the
+        returned asset_id in a job source: {"type": "image"|"video", "asset_id": ...}."""
+        declared = request.headers.get("content-length")
+        try:
+            asset = await media.save_upload(
+                request.stream(), filename, int(declared) if declared else None
+            )
+        except UploadTooLarge as exc:
+            raise HTTPException(413, str(exc)) from None
+        except MediaError as exc:
+            raise HTTPException(422, str(exc)) from None
+        repo.save_source_asset(asset.asset_id, asset.model_dump(mode="json"))
+        return asset
+
+    def _asset(asset_id: str) -> SourceAsset:
+        raw = repo.get_source_asset(asset_id)
+        if raw is None:
+            raise HTTPException(404, "asset not found")
+        return SourceAsset.model_validate(raw)
+
+    def _file(rel: str, content_type: str) -> FileResponse:
+        try:
+            path = media.path(rel)
+        except MediaError:
+            raise HTTPException(404, "file not found") from None
+        if not path.is_file():
+            raise HTTPException(404, "file not found")
+        return FileResponse(
+            path,
+            media_type=content_type,
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600"},
+        )
+
+    @app.get("/v1/source-assets/{asset_id}", response_model=SourceAsset)
+    async def get_asset(asset_id: str) -> SourceAsset:
+        """What was extracted from an upload: size, duration, keyframes, transcript."""
+        return _asset(asset_id)
+
+    @app.get("/v1/source-assets/{asset_id}/content", response_class=FileResponse)
+    async def asset_content(asset_id: str) -> FileResponse:
+        """The uploaded file itself (supports range requests, so videos can seek)."""
+        asset = _asset(asset_id)
+        return _file(asset.file, asset.content_type)
+
+    @app.get("/v1/source-assets/{asset_id}/frames/{index}", response_class=FileResponse)
+    async def asset_frame(asset_id: str, index: int) -> FileResponse:
+        """A video keyframe exactly as the model saw it."""
+        asset = _asset(asset_id)
+        if not 0 <= index < len(asset.frames):
+            raise HTTPException(404, "frame not found")
+        return _file(asset.frames[index].file, "image/jpeg")
 
     @app.get("/v1/drama-jobs/{job_id}", response_model=Job)
     async def get_job(job_id: str) -> Job:
@@ -308,6 +403,7 @@ def create_app_from_env() -> FastAPI:
         queue=queue_from_env(repo),
         workers=int(settings["workers"]),
         lease_s=float(settings["lease_s"]),
+        media=media_from_env(),
     )
 
 

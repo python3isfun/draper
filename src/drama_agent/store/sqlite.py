@@ -143,6 +143,19 @@ class SqliteRepository:
         raw = self._one("SELECT meta FROM source_assets WHERE asset_id = ?", (asset_id,))
         return json.loads(raw) if raw else None
 
+    def get_source_assets(self, asset_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Several assets in one query (e.g. file names for the job list)."""
+        ids = list(dict.fromkeys(asset_ids))[:500]  # stays under SQLite's variable limit
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT asset_id, meta FROM source_assets WHERE asset_id IN ({marks})",
+                tuple(ids),
+            ).fetchall()
+        return {r[0]: json.loads(r[1]) for r in rows}
+
     # Jobs ---------------------------------------------------------------
 
     def save_job(self, job: Job) -> None:

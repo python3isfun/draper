@@ -50,6 +50,7 @@ def client_from_env() -> ModelClient:
             model=os.environ["MCPHUB_MODEL"],
             stage_models=stage_models_from_env(),
             api=os.environ.get("MCPHUB_API", "responses"),  # type: ignore[arg-type]
+            transcribe_model=os.environ.get("MCPHUB_TRANSCRIBE_MODEL", "whisper-1"),
             timeout_s=float(os.environ.get("MCPHUB_TIMEOUT_S", "600")),
         )
     raise RuntimeError(f"unknown DRAMA_MODEL_CLIENT={kind!r}")

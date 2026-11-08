@@ -60,7 +60,7 @@ const isActive = (s) => s === "queued" || s === "running";
 // ---------------------------------------------------------------------------
 // State + routing (hash: #job=<id>&tab=<tab>)
 
-const state = { jobs: [], job: null, pkg: null, tab: "overview", pollTimer: null, assetFilter: "all", revise: null, offline: false };
+const state = { jobs: [], job: null, pkg: null, tab: "overview", pollTimer: null, assetFilter: "all", revise: null, offline: false, attachments: [], assets: {}, sourcesOpen: null, openDetails: new Set() };
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
@@ -92,6 +92,7 @@ async function route() {
     state.renderedSig = null;
     stopActivity();
     state.revise = null;
+    state.sourcesOpen = null;
     renderMain();
   } else if (state.job) {
     // Same job, different tab: a user action, so redraw now. (loadJob below only redraws
@@ -149,7 +150,9 @@ async function loadJob(jobId) {
     }
     // Polling must not rebuild the page when nothing changed: rebuilding destroys any text
     // the user has selected, which made running jobs impossible to copy from.
-    const sig = JSON.stringify(job) + "|" + (pkg?.revision_id || "");
+    await loadAssets(job);
+    if (!stillCurrent()) return;
+    const sig = JSON.stringify(job) + "|" + (pkg?.revision_id || "") + "|" + assetSig(job);
     const unchanged = sig === state.renderedSig;
     state.job = job;
     state.pkg = pkg;
@@ -165,6 +168,20 @@ async function loadJob(jobId) {
     if (!stillCurrent()) return;
     $("#main").replaceChildren(h("div", { class: "card placeholder" }, h("h2", {}, "Couldn't load job"), err.message));
   }
+}
+
+const assetIds = (job) => job.request.sources.map((src) => src.asset_id).filter(Boolean);
+const assetSig = (job) => assetIds(job).map((id) => state.assets[id]?.transcript_status || "").join(",");
+
+// Uploaded media of the job's sources. Re-fetched while a transcript is still pending.
+async function loadAssets(job) {
+  await Promise.all(assetIds(job).map(async (id) => {
+    const cached = state.assets[id];
+    if (cached && !(cached.transcript_status === "pending" && isActive(job.status))) return;
+    try {
+      state.assets[id] = await api(`/v1/source-assets/${encodeURIComponent(id)}`);
+    } catch { /* shown as unavailable */ }
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -208,33 +225,155 @@ function renderJobList() {
 
 $("#refresh-jobs").addEventListener("click", loadJobs);
 
+// New-job attachments ----------------------------------------------------------
+
+const USE_AS = [
+  ["", "Auto"],
+  ["story_seed", "Story seed"],
+  ["character_reference", "Character reference"],
+  ["location_reference", "Location reference"],
+  ["visual_style", "Visual style"],
+  ["plot_reference", "Plot reference"],
+];
+const ACCEPTED = /^(image\/(jpeg|png|webp|gif)|video\/(mp4|quicktime|webm))$/;
+
+function fmtBytes(n) {
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function addFiles(files) {
+  const err = $("#new-job-error");
+  err.textContent = "";
+  for (const file of files) {
+    if (!ACCEPTED.test(file.type)) {
+      err.textContent = `${file.name}: unsupported type. Use JPEG, PNG, WebP or GIF images, or MP4, MOV or WebM videos.`;
+      continue;
+    }
+    state.attachments.push({ file, url: URL.createObjectURL(file), use_as: "", text: "" });
+  }
+  renderAttachments();
+}
+
+function removeAttachment(a) {
+  URL.revokeObjectURL(a.url);
+  state.attachments = state.attachments.filter((x) => x !== a);
+  renderAttachments();
+}
+
+function renderAttachments() {
+  $("#attachments").replaceChildren(...state.attachments.map((a) => {
+    const isVideo = a.file.type.startsWith("video/");
+    const preview = isVideo
+      ? h("video", { src: a.url, muted: true, preload: "metadata", class: "thumb" })
+      : h("img", { src: a.url, alt: "", class: "thumb" });
+    const select = h("select", { "aria-label": "Use as", onchange: (e) => { a.use_as = e.target.value; } },
+      USE_AS.map(([v, label]) => h("option", { value: v, selected: v === a.use_as }, label)));
+    const prompt = h("textarea", {
+      rows: 2, placeholder: isVideo ? "Optional: what to take from this video, e.g. 保留父女重逢的情节" : "Optional: what to do with this image, e.g. 让她成为女主角，复仇题材",
+      oninput: (e) => { a.text = e.target.value; },
+    });
+    prompt.value = a.text;
+    return h("div", { class: "attachment" },
+      preview,
+      h("div", { class: "attachment-body" },
+        h("div", { class: "attachment-head" },
+          h("span", { class: "name", title: a.file.name }, a.file.name),
+          h("span", { class: "muted small" }, `${isVideo ? "video" : "image"} · ${fmtBytes(a.file.size)}${a.asset ? " · uploaded" : ""}`),
+          h("button", { type: "button", class: "btn ghost small", onclick: () => removeAttachment(a), "aria-label": `Remove ${a.file.name}` }, "Remove"),
+        ),
+        select,
+        prompt,
+      ),
+    );
+  }));
+}
+
+$("#file-input").addEventListener("change", (e) => {
+  addFiles([...e.target.files]);
+  e.target.value = "";  // choosing the same file again still fires change
+});
+const dropzone = $("#dropzone");
+for (const t of ["dragenter", "dragover"]) dropzone.addEventListener(t, (e) => { e.preventDefault(); dropzone.classList.add("over"); });
+for (const t of ["dragleave", "drop"]) dropzone.addEventListener(t, () => dropzone.classList.remove("over"));
+dropzone.addEventListener("drop", (e) => { e.preventDefault(); addFiles([...e.dataTransfer.files]); });
+
+// XHR, not fetch: fetch can't report upload progress, and videos can be large.
+// onSent fires when the bytes are all sent; the server then processes the file (videos:
+// keyframe extraction) before it answers.
+function uploadFile(file, onProgress, onSent) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/v1/source-assets?filename=${encodeURIComponent(file.name)}`);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.upload.onload = onSent;
+    xhr.onload = () => {
+      let body = null;
+      try { body = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status === 201 && body) resolve(body);
+      else reject(new Error(`${file.name}: ${body?.detail || xhr.statusText || "upload failed"}`));
+    };
+    xhr.onerror = () => reject(new Error(`${file.name}: network error during upload`));
+    xhr.send(file);
+  });
+}
+
 $("#new-job").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const form = ev.currentTarget;
   const f = new FormData(form);
   const button = form.querySelector("button[type=submit]");
+  const label = button.textContent;
   const err = $("#new-job-error");
   err.textContent = "";
   const type = f.get("type");
-  const body = {
-    sources: [{ type, text: f.get("text").trim(), use_as: type === "script" ? "plot_reference" : "story_seed" }],
-    options: {
-      language: f.get("language") || null,
-      story_scope: f.get("story_scope"),
-      reference_mode: f.get("reference_mode"),
-      genre: f.get("genre").trim() || null,
-      audience: f.get("audience").trim() || null,
-    },
-  };
+  const text = f.get("text").trim();
+  if (!text && !state.attachments.length) {
+    err.textContent = "Enter an idea, or attach an image or video.";
+    return;
+  }
+  const sources = [];
+  if (text) sources.push({ type, text, use_as: type === "script" ? "plot_reference" : "story_seed" });
   button.disabled = true;
   try {
+    const attachments = [...state.attachments];
+    for (const [i, a] of attachments.entries()) {
+      const n = attachments.length > 1 ? ` ${i + 1} of ${attachments.length}` : "";
+      // Files that uploaded before a failed submit are reused, not uploaded again.
+      if (!a.asset) {
+        button.textContent = `Uploading${n}…`;
+        a.asset = await uploadFile(
+          a.file,
+          (p) => { button.textContent = `Uploading${n} (${Math.round(p * 100)}%)…`; },
+          () => { button.textContent = a.file.type.startsWith("video/") ? `Extracting frames${n}…` : `Processing${n}…`; },
+        );
+        renderAttachments();
+      }
+      sources.push({ type: a.asset.kind, asset_id: a.asset.asset_id, text: a.text.trim() || null, use_as: a.use_as || null });
+    }
+    button.textContent = "Starting…";
+    const body = {
+      sources,
+      options: {
+        language: f.get("language") || null,
+        story_scope: f.get("story_scope"),
+        reference_mode: f.get("reference_mode"),
+        genre: f.get("genre").trim() || null,
+        audience: f.get("audience").trim() || null,
+      },
+    };
     const created = await api("/v1/drama-jobs", { method: "POST", body: JSON.stringify(body) });
+    for (const a of state.attachments) URL.revokeObjectURL(a.url);
+    state.attachments = [];
+    renderAttachments();
+    form.querySelector("textarea[name=text]").value = "";
     await loadJobs();
     go(created.job_id);
   } catch (e) {
     err.textContent = e.message;
   } finally {
     button.disabled = false;
+    button.textContent = label;
   }
 });
 
@@ -269,7 +408,7 @@ function renderMain() {
     main.replaceChildren(
       h("div", { class: "card placeholder" },
         h("h2", {}, "Turn a seed into a 3-episode short drama"),
-        h("p", {}, "Enter a one-line idea or paste a script on the left. Each job produces scripts, a timed shot list and art asset requirements."),
+        h("p", {}, "Enter a one-line idea, paste a script, or upload images or videos on the left. Each job produces scripts, a timed shot list and art asset requirements."),
       ),
     );
     return;
@@ -283,7 +422,9 @@ function renderMain() {
 
 function renderJobHeader(job) {
   const pkg = state.pkg;
-  const title = pkg?.story_bible?.title || job.request.sources[0].text?.slice(0, 60) || job.job_id;
+  const firstText = job.request.sources.find((src) => src.text)?.text;
+  const firstFile = state.assets[assetIds(job)[0]]?.filename;
+  const title = pkg?.story_bible?.title || firstText?.slice(0, 60) || firstFile || job.job_id;
   const actions = [];
   if (pkg) {
     const q = new URLSearchParams({ revision_id: pkg.revision_id });
@@ -362,7 +503,85 @@ function renderJobHeader(job) {
       ),
     ),
     banners,
+    renderSources(job),
   );
+}
+
+// Sources -------------------------------------------------------------------
+
+const USE_AS_LABEL = Object.fromEntries(USE_AS);
+const assetUrl = (id, path = "content") => `/v1/source-assets/${encodeURIComponent(id)}/${path}`;
+
+function renderSources(job) {
+  const sources = job.request.sources;
+  // Open by default until there's a package to look at; then it remembers the user's choice.
+  const open = state.sourcesOpen ?? !state.pkg;
+  const d = h("details", { class: "sources", open },
+    h("summary", {}, `Sources (${sources.length})`),
+    sources.map((src, i) => renderSource(src, i)),
+  );
+  d.addEventListener("toggle", () => { state.sourcesOpen = d.open; });
+  return d;
+}
+
+function renderSource(src, i) {
+  const tag = h("span", { class: "chip mono" }, `source[${i}]`);
+  const use = src.use_as && h("span", { class: "chip" }, USE_AS_LABEL[src.use_as] || src.use_as);
+  if (src.type === "text" || src.type === "script") {
+    return h("div", { class: "source" },
+      h("div", { class: "source-head" }, tag, h("span", { class: "chip" }, src.type === "script" ? "Script" : "Idea"), use),
+      h("p", { class: "source-text" }, src.text || ""),
+    );
+  }
+  const asset = state.assets[src.asset_id];
+  const prompt = src.text && h("p", { class: "source-text" }, h("span", { class: "muted" }, "Prompt: "), src.text);
+  if (!asset) {
+    return h("div", { class: "source" },
+      h("div", { class: "source-head" }, tag, h("span", { class: "chip" }, src.type), h("code", {}, src.asset_id)), prompt);
+  }
+  const head = h("div", { class: "source-head" }, tag, h("span", { class: "chip" }, asset.kind), use,
+    h("span", { class: "name" }, asset.filename),
+    h("span", { class: "muted small" }, [
+      asset.width && `${asset.width}×${asset.height}`,
+      asset.duration_ms != null && fmtMs(asset.duration_ms),
+      fmtBytes(asset.size_bytes),
+    ].filter(Boolean).join(" · ")),
+    h("a", { class: "btn ghost small", href: assetUrl(asset.asset_id), target: "_blank", rel: "noopener" }, "Open file"),
+  );
+  if (asset.kind === "image") {
+    return h("div", { class: "source" }, head,
+      h("div", { class: "source-media" },
+        h("a", { href: assetUrl(asset.asset_id), target: "_blank", rel: "noopener" },
+          h("img", { src: assetUrl(asset.asset_id), alt: asset.filename, class: "source-image", loading: "lazy" })),
+        prompt));
+  }
+  return h("div", { class: "source" }, head, prompt,
+    h("p", { class: "muted small" }, `Audio: ${audioLabel(asset)}`),
+    stickyDetails(`${asset.asset_id}:frames`, `Keyframes the model sees (${asset.frames.length})`,
+      h("div", { class: "frame-strip" }, asset.frames.map((f, n) =>
+        h("figure", {},
+          h("img", { src: assetUrl(asset.asset_id, `frames/${n}`), alt: `frame at ${fmtMs(f.t_ms)}`, loading: "lazy" }),
+          h("figcaption", {}, fmtMs(f.t_ms)))))),
+    asset.transcript.length > 0 && stickyDetails(`${asset.asset_id}:transcript`, `Transcript (${asset.transcript.length} segments)`,
+      h("div", { class: "transcript" }, asset.transcript.map((seg) =>
+        h("div", {}, h("span", { class: "mono muted" }, `${fmtMs(seg.start_ms)}–${fmtMs(seg.end_ms)} `), seg.text)))),
+  );
+}
+
+// A <details> that stays open across re-renders (polling redraws the job header).
+function stickyDetails(key, summary, ...body) {
+  const d = h("details", { class: "frames", open: state.openDetails.has(key) }, h("summary", {}, summary), ...body);
+  d.addEventListener("toggle", () => { d.open ? state.openDetails.add(key) : state.openDetails.delete(key); });
+  return d;
+}
+
+function audioLabel(a) {
+  return {
+    no_audio: "no audio track",
+    pending: isActive(state.job?.status) ? "not transcribed yet (happens at the ingest step)" : "not analyzed (the offline sample client doesn't transcribe)",
+    done: a.transcript_until_ms != null ? `transcribed up to ${fmtMs(a.transcript_until_ms)}` : `transcribed (${a.transcript_model})`,
+    failed: `transcription failed: ${a.transcript_error || "unknown error"}`,
+  }[a.transcript_status] || "not analyzed";
 }
 
 async function jobAction(jobId, action, button) {
@@ -936,6 +1155,12 @@ function lazyDetails(label, load) {
   return d;
 }
 
+// Message content is a string, or (with images) a list of text and image parts.
+function messageText(content) {
+  if (!Array.isArray(content)) return String(content ?? "");
+  return content.map((p) => p.text ?? (p.file ? `[image: ${p.file}]` : JSON.stringify(p))).join("\n");
+}
+
 const fetchCall = (id) => api(`/v1/llm-calls/${encodeURIComponent(id)}`);
 
 function upsertCall(a, view) {
@@ -958,7 +1183,7 @@ function upsertCall(a, view) {
       }),
       lazyDetails("Prompt sent to the model", async () => {
         const full = await fetchCall(c.call_id);
-        return (full.request.messages || []).map((m) => `── ${m.role} ──\n${m.content}`).join("\n\n") || JSON.stringify(full.request, null, 2);
+        return (full.request.messages || []).map((m) => `── ${m.role} ──\n${messageText(m.content)}`).join("\n\n") || JSON.stringify(full.request, null, 2);
       }),
     );
     ref.el = h("article", { class: "call" },

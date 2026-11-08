@@ -273,7 +273,9 @@ async def _main() -> None:
     settings = worker_settings()
     if type(queue).__name__ == "InMemoryJobQueue":
         raise SystemExit("a separate worker process needs DRAMA_STORE=sqlite (the default)")
-    orchestrator = Orchestrator(repo, client_from_env(), checkpoints=queue)
+    from .media import media_from_env
+
+    orchestrator = Orchestrator(repo, client_from_env(), checkpoints=queue, media=media_from_env())
     recover(repo, queue)
 
     stop = asyncio.Event()

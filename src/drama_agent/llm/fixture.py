@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..fixtures import sample
+from ..models import JobRequest
 from ..tracing import NULL_RECORDER
 from .base import GenerationRequest, T
 
@@ -43,7 +44,7 @@ class FixtureModelClient:
         output: BaseModel
         match request.stage:
             case "ingest":
-                output = sample.sample_source_brief()
+                output = self._source_brief(request)
             case "outline":
                 output = OutlineOutput(story_bible=sample.sample_story_bible())
             case "script":
@@ -71,6 +72,8 @@ class FixtureModelClient:
             rec.finish(error=f"{type(exc).__name__}: {exc}")
             raise
         rec.delta("commentary", f"Offline sample: returning the built-in {request.stage} output.")
+        if request.media:
+            rec.delta("commentary", f" ({len(request.media)} attached images were not looked at.)")
         text = output.model_dump_json(indent=1)
         chunks = 12 if self.stream_delay_s else 1
         size = max(1, len(text) // chunks + 1)
@@ -80,3 +83,17 @@ class FixtureModelClient:
                 await asyncio.sleep(self.stream_delay_s / chunks)
         rec.finish(usage={"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0})
         return output
+
+    @staticmethod
+    def _source_brief(request: GenerationRequest) -> BaseModel:
+        """The sample brief, with one honest coverage record per source of this job."""
+        raw = request.context.get("request")
+        job_request = JobRequest.model_validate(raw) if raw else None
+        brief = sample.sample_source_brief(job_request)
+        if job_request:
+            for cov, src in zip(brief.source_coverage, job_request.sources, strict=True):
+                if src.type in ("image", "video"):
+                    cov.asset_id = src.asset_id
+                    cov.analyzed_sections = []
+                    cov.notes = "offline sample: the media was not analyzed"
+        return brief

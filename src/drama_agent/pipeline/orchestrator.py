@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
 from typing import Protocol
 
 from ..llm import GenerationRequest, ModelClient
-from ..models import Job, ProductionPackage, Revision
+from ..llm.base import Transcriber
+from ..media import MediaPart, MediaStore, source_media
+from ..models import Job, ProductionPackage, Revision, SourceAsset, TranscriptSegment
 from ..models.package import utcnow
 from ..prompts import load_orchestrator_prompt
 from ..store import Repository
@@ -35,10 +38,13 @@ class Orchestrator:
         repo: Repository,
         client: ModelClient,
         checkpoints: CheckpointStore | None = None,
+        media: MediaStore | None = None,
     ) -> None:
         self.repo = repo
         self.client = client
         self.checkpoints = checkpoints
+        self.media = media
+        self._asset_locks: dict[str, asyncio.Lock] = {}
         self.base_prompt = load_orchestrator_prompt()
 
     async def run_job(self, job_id: str) -> Job:
@@ -81,6 +87,9 @@ class Orchestrator:
                 )
                 started = time.monotonic()
                 issues = []
+                media_ctx, media_parts = [], []
+                if step.name == "ingest":
+                    media_ctx, media_parts = await self._prepare_media(job, state, trace)
                 # One initial attempt plus `budget` automatic repairs. Only this step is
                 # retried; earlier passed steps are not re-run.
                 for attempt in range(budget + 1):
@@ -97,13 +106,17 @@ class Orchestrator:
                             stage=step.name,
                             attempt=attempt,
                         )
+                    context = state.context()
+                    if media_ctx:
+                        context["source_media"] = media_ctx
                     gen = GenerationRequest(
                         stage=step.name,
                         instructions=(f"{self.base_prompt}\n\n{step.directive}\n\n{OUTPUT_RULES}"),
-                        context=state.context(),
+                        context=context,
                         feedback=issues,
                         attempt=attempt,
                         recorder=trace.recorder(step.name, attempt),
+                        media=media_parts,
                     )
                     try:
                         output = await self.client.generate(gen, step.output_model)
@@ -166,6 +179,95 @@ class Orchestrator:
                 "job_failed", f"Failed: {reason}", stage=stage and self._stage_name(job, stage)
             )
         return job
+
+    async def _prepare_media(
+        self, job: Job, state: PipelineState, trace: Tracer
+    ) -> tuple[list[dict], list[MediaPart]]:
+        """Load the job's uploaded media, transcribe videos (cached on the asset) and return
+        the ingest step's context entries and images."""
+        assets: dict[str, SourceAsset] = {}
+        for src in job.request.sources:
+            if src.type in ("image", "video") and src.asset_id:
+                raw = self.repo.get_source_asset(src.asset_id)
+                if raw is None:
+                    raise RuntimeError(f"source asset {src.asset_id} not found")
+                assets[src.asset_id] = SourceAsset.model_validate(raw)
+        state.source_assets = assets
+        if not assets:
+            return [], []
+        if self.media is None:
+            raise RuntimeError("this job has image/video sources but no media store is set up")
+        for asset_id, asset in assets.items():
+            if asset.kind == "video" and asset.transcript_status in ("pending", "failed"):
+                assets[asset_id] = await self._transcribe(asset, trace)
+        ctx, parts = source_media(job.request, assets, self.media)
+        trace.event(
+            "media_attached",
+            f"Showing the model {len(parts)} image{'s' if len(parts) != 1 else ''} from "
+            f"{len(assets)} uploaded file{'s' if len(assets) != 1 else ''}.",
+            stage="ingest",
+            images=[p.label for p in parts],
+        )
+        return ctx, parts
+
+    async def _transcribe(self, asset: SourceAsset, trace: Tracer) -> SourceAsset:
+        """Transcribe a video's audio once; returns the asset as now stored."""
+        if not isinstance(self.client, Transcriber):
+            return asset  # offline client: the audio stays "not analyzed"
+        assert self.media is not None
+        # Jobs sharing an upload wait for each other instead of transcribing (and paying)
+        # twice. Separate worker processes still could; their audio files don't collide.
+        async with self._asset_locks.setdefault(asset.asset_id, asyncio.Lock()):
+            raw = self.repo.get_source_asset(asset.asset_id)
+            if raw is not None:
+                asset = SourceAsset.model_validate(raw)
+            if asset.transcript_status not in ("pending", "failed"):
+                return asset  # done by another job while this one waited
+            await self._run_transcription(asset, trace, self.client)
+            self.repo.save_source_asset(asset.asset_id, asset.model_dump(mode="json"))
+            return asset
+
+    async def _run_transcription(
+        self, asset: SourceAsset, trace: Tracer, client: Transcriber
+    ) -> None:
+        assert self.media is not None
+        model = client.transcribe_model
+        rec = trace.recorder("ingest", 0)
+        rec.start(model=model, api="transcription", request={"asset_id": asset.asset_id})
+        rec.delta("commentary", f"Transcribing the audio of {asset.filename}.")
+        audio = None
+        try:
+            audio, cut_ms = await asyncio.to_thread(self.media.extract_audio, asset)
+            segments = await client.transcribe(audio)
+        except Exception as exc:  # the job goes on; the audio is recorded as unknown
+            log.warning("asset %s: transcription failed", asset.asset_id, exc_info=True)
+            asset.transcript_status = "failed"
+            asset.transcript_error = f"{type(exc).__name__}: {exc}"[:300]
+            rec.finish(error=asset.transcript_error)
+            return
+        finally:
+            if audio is not None:
+                audio.unlink(missing_ok=True)
+        # Whisper rounds segment ends up; keep every timestamp inside the video.
+        end = asset.duration_ms or None
+        asset.transcript = [
+            TranscriptSegment(
+                start_ms=min(seg["start_ms"], end) if end else seg["start_ms"],
+                end_ms=min(seg["end_ms"], end) if end else seg["end_ms"],
+                text=seg["text"],
+            )
+            for seg in segments
+        ]
+        asset.transcript_status = "done"
+        asset.transcript_until_ms = cut_ms
+        asset.transcript_model = model
+        asset.transcript_error = None
+        rec.delta(
+            "output",
+            "\n".join(f"[{s.start_ms}-{s.end_ms} ms] {s.text}" for s in asset.transcript)
+            or "(no speech detected)",
+        )
+        rec.finish()
 
     def _pause_requested(self, job_id: str) -> bool:
         check = getattr(self.checkpoints, "pause_requested", None)

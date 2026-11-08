@@ -23,7 +23,8 @@ Then open http://127.0.0.1:8000/ for the web UI (the API docs are at `/docs`).
 A static single-page app (`src/drama_agent/web/`) served by the same FastAPI process,
 with no build step. It lets you:
 
-- submit a seed or script and watch the five pipeline steps progress
+- submit a seed or script, and/or upload images and videos (each with an optional
+  prompt), then watch the five pipeline steps progress
 - browse the result: story bible, scripts, the timed storyboard with a shot timeline,
   asset requirements (filterable by type), and QA issues with token usage
 - request a targeted revision and see its impact analysis (conflicts, locked objects in
@@ -57,6 +58,50 @@ once its current model call finishes, so that call's work is kept. **Resume**
 
 To try the live view offline, run with `DRAMA_MODEL_CLIENT=fixture
 DRAMA_FIXTURE_DELAY_S=4`: each sample step then takes about 4 seconds and streams.
+
+### Image and video sources
+
+A job can start from uploaded images and videos, alone or with a text idea. Each file can
+carry an optional **prompt** (the source's `text`), which the model treats as your
+direction for that file, for example "让她成为女主角，复仇题材". Text that appears inside
+an image, or is spoken in a video, is material to analyze, not an instruction.
+
+```bash
+# 1. Upload the raw file (not multipart). The type is detected from the bytes.
+curl -X POST --data-binary @street.jpg 'http://127.0.0.1:8000/v1/source-assets?filename=street.jpg'
+# -> {"asset_id": "asset_...", "kind": "image", ...}
+
+# 2. Use it as a source.
+curl -X POST http://127.0.0.1:8000/v1/drama-jobs -H 'content-type: application/json' -d '{
+  "sources": [{"type": "image", "asset_id": "asset_...", "text": "让她成为女主角，复仇题材"}]}'
+```
+
+- **Images** (JPEG, PNG, WebP, GIF): a copy downscaled to 1536 px goes to the model.
+- **Videos** (MP4, MOV, WebM): evenly spaced keyframes are extracted on upload (up to 24,
+  each labeled with its timestamp). The audio is transcribed with `whisper-1` at the
+  ingest step, and the transcript is cached on the asset. The model records which time
+  ranges it actually analyzed. The ingest gate rejects coverage ranges that fall outside
+  the video. A failed transcription doesn't fail the job: the audio is recorded as unknown.
+- Only the **ingest** step sees the media. Later steps work from the source brief.
+- The job page lists the sources, the keyframes the model saw, and the transcript. The
+  activity trace records the transcription as its own call. Recorded prompts keep image
+  labels and file names, not the image data.
+
+A job takes at most 12 images and videos. HEIC/AVIF photos aren't supported yet (export
+as JPEG or PNG). Video needs `ffmpeg` and `ffprobe` on the server; without them, video
+uploads are refused and only images up to 5 MB are accepted, since they're sent as uploaded. Endpoints: `GET /v1/source-assets/{id}` (metadata,
+keyframes, transcript), `.../content` (the file, supports range requests),
+`.../frames/{n}` (a keyframe).
+
+| variable | default | meaning |
+| --- | --- | --- |
+| `DRAMA_MEDIA_DIR` | `data/media` | where uploads and extracted frames are stored |
+| `DRAMA_MAX_IMAGE_MB` / `DRAMA_MAX_VIDEO_MB` | `20` / `500` | upload size limits |
+| `DRAMA_MAX_VIDEO_S` | `3600` | longest accepted video |
+| `DRAMA_VIDEO_FRAMES` | `24` | keyframes extracted per video |
+| `DRAMA_MAX_IMAGES_PER_REQUEST` | `48` | images per model request; videos' keyframes are thinned evenly to fit |
+| `DRAMA_TRANSCRIBE_MAX_S` | `1800` | audio after this is not transcribed (marked unknown) |
+| `MCPHUB_TRANSCRIBE_MODEL` | `whisper-1` | speech-to-text model |
 
 ### Storage
 
@@ -172,6 +217,7 @@ src/drama_agent/
   prompts/         Base orchestrator prompt (verbatim from spec §10)
   store/           Repository protocol; SQLite (default) and in-memory backends
   jobqueue.py      Durable job queue (leases, retries, checkpoints)
+  media.py         Uploaded images/videos: storage, type sniffing, keyframes, audio
   worker.py        Job workers; `drama-worker` entry point
   api/             FastAPI routes (spec §9) + /v1/meta, job listing
   web/             Web UI (HTML/CSS/JS, served at /)
@@ -196,8 +242,8 @@ src/drama_agent/
 
 ## Not implemented yet
 
-- Image/video/script input adapters (transcription, keyframes, coverage ranges).
+- Script files as uploads (`type: script` with an `asset_id`); paste scripts as text.
+- Non-speech audio analysis (music, sound effects) for videos.
 - The revision regeneration worker: `POST .../revisions` validates the request, runs the
   impact analysis and records the revision as `queued`, but nothing regenerates content yet.
 - Upstream retry: a failing step only retries itself. It never re-runs earlier steps.
-- Source asset upload endpoint.

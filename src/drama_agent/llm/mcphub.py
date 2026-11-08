@@ -17,9 +17,11 @@ reported to the GenerationRequest's recorder for the live trace.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
@@ -74,6 +76,40 @@ def build_messages(request: GenerationRequest) -> list[dict[str, str]]:
     ]
 
 
+def _data_url(part: Any) -> str:
+    data = base64.b64encode(Path(part.path).read_bytes()).decode()
+    return f"data:{part.mime};base64,{data}"
+
+
+def with_media(
+    messages: list[dict[str, Any]],
+    images: list[tuple[Any, str]],
+    api: WireAPI,
+    *,
+    inline: bool = True,
+) -> list[dict[str, Any]]:
+    """Attach images to the first user message, each preceded by its label.
+
+    inline=False gives the version kept in the trace: labels and file names instead of
+    base64 data, so a recorded call stays small and readable.
+    """
+    if not images:
+        return messages
+    text_type, image_type = (
+        ("input_text", "input_image") if api == "responses" else ("text", "image_url")
+    )
+    content: list[dict[str, Any]] = [{"type": text_type, "text": messages[1]["content"]}]
+    for part, url in images:
+        content.append({"type": text_type, "text": part.label})
+        if not inline:
+            content.append({"type": "image", "file": Path(part.path).name})
+        elif api == "responses":
+            content.append({"type": image_type, "image_url": url})
+        else:
+            content.append({"type": image_type, "image_url": {"url": url}})
+    return [messages[0], {**messages[1], "content": content}, *messages[2:]]
+
+
 @dataclass
 class _Streamed:
     text: str = ""  # the answer (JSON)
@@ -102,6 +138,7 @@ class MCPHubClient:
         *,
         stage_models: dict[str, str] | None = None,
         api: WireAPI = "responses",
+        transcribe_model: str = "whisper-1",
         timeout_s: float = 600.0,
         max_http_retries: int = 3,
         max_repair_turns: int = 1,
@@ -115,6 +152,7 @@ class MCPHubClient:
         self.model_id = model  # default for any stage without an override
         self.stage_models = dict(stage_models or {})
         self.api: WireAPI = api
+        self.transcribe_model = transcribe_model
         self.max_http_retries = max_http_retries
         self.max_repair_turns = max_repair_turns
         self.backoff_s = backoff_s
@@ -142,16 +180,21 @@ class MCPHubClient:
                 "content": f"{messages[0]['content']}\n\n{COMMENTARY_HINT}",
             }
         schema = output_model.model_json_schema()
+        images = await asyncio.to_thread(  # read and encoded once per request
+            lambda: [(part, _data_url(part)) for part in request.media]
+        )
 
         for turn in range(self.max_repair_turns + 1):
-            rec.start(
-                model=model,
-                api=self.api,
-                request={"messages": messages, "schema": output_model.__name__},
-                turn=turn,
-            )
+            recorded = {
+                "messages": with_media(messages, images, self.api, inline=False),
+                "schema": output_model.__name__,
+            }
+            rec.start(model=model, api=self.api, request=recorded, turn=turn)
+            wire = with_media(messages, images, self.api)
             try:
-                result = await self._stream_with_retries(model, messages, output_model, schema, rec)
+                result = await self._stream_with_retries(
+                    model, wire, recorded, output_model, schema, rec
+                )
             except ModelClientError as exc:
                 rec.finish(error=str(exc))
                 raise
@@ -206,10 +249,49 @@ class MCPHubClient:
             return parsed
         raise AssertionError("unreachable")
 
+    async def transcribe(self, audio_path: Path) -> list[dict[str, Any]]:
+        """Speech to text with segment timestamps (whisper verbose_json)."""
+        audio = await asyncio.to_thread(Path(audio_path).read_bytes)
+        last: Exception | None = None
+        for attempt in range(self.max_http_retries + 1):
+            try:
+                resp = await self._http.post(
+                    "/audio/transcriptions",
+                    data={"model": self.transcribe_model, "response_format": "verbose_json"},
+                    files={"file": (Path(audio_path).name, audio, "audio/mpeg")},
+                )
+            except httpx.TransportError as exc:
+                last = exc
+            else:
+                if resp.status_code == 200:
+                    body = resp.json()
+                    segments = body.get("segments") or []
+                    if not segments and body.get("text"):  # model without timestamps
+                        dur = float(body.get("duration") or 0)
+                        segments = [{"start": 0, "end": dur, "text": body["text"]}]
+                    return [
+                        {
+                            "start_ms": round(float(seg.get("start") or 0) * 1000),
+                            "end_ms": round(float(seg.get("end") or 0) * 1000),
+                            "text": str(seg.get("text") or "").strip(),
+                        }
+                        for seg in segments
+                        if str(seg.get("text") or "").strip()
+                    ]
+                msg = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                if resp.status_code not in RETRYABLE_STATUS:
+                    raise ModelClientError(f"MCPHub transcription {msg}")
+                last = RuntimeError(msg)
+            if attempt < self.max_http_retries:
+                await asyncio.sleep(self.backoff_s * 2**attempt)
+        raise ModelClientError(f"MCPHub transcription failed: {last}")
+
     # ------------------------------------------------------------------
     # Transport
 
-    async def _stream_with_retries(self, model, messages, output_model, schema, rec) -> _Streamed:
+    async def _stream_with_retries(
+        self, model, messages, recorded, output_model, schema, rec
+    ) -> _Streamed:
         for attempt in range(self.max_http_retries + 1):
             try:
                 if self.api == "responses":
@@ -224,7 +306,7 @@ class MCPHubClient:
                 rec.start(  # a fresh call record; the broken stream's partial text is dropped
                     model=model,
                     api=self.api,
-                    request={"messages": messages, "schema": output_model.__name__},
+                    request=recorded,
                     turn=getattr(getattr(rec, "call", None), "turn", 0),
                 )
                 await asyncio.sleep(delay)

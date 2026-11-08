@@ -8,6 +8,7 @@ from .assets import (
     SubjectRef,
     UsedBy,
 )
+from .media import MediaKind, SourceAsset, TranscriptSegment, VideoFrame
 from .package import (
     STAGES,
     ChangeLogEntry,
@@ -70,6 +71,7 @@ __all__ = [
     "LLMCall",
     "Location",
     "LocationState",
+    "MediaKind",
     "ProductionPackage",
     "Prop",
     "PropState",
@@ -82,6 +84,7 @@ __all__ = [
     "SceneState",
     "Shot",
     "Source",
+    "SourceAsset",
     "SourceBrief",
     "SourceCoverage",
     "StageState",
@@ -89,5 +92,7 @@ __all__ = [
     "StyleBrief",
     "SubjectRef",
     "TraceEvent",
+    "TranscriptSegment",
     "UsedBy",
+    "VideoFrame",
 ]
