@@ -226,6 +226,9 @@ function renderJobHeader(job) {
   }
 
   const banners = [];
+  if (job.status === "queued" && job.failure_reason) {
+    banners.push(h("div", { class: "banner warn" }, h("strong", {}, "Waiting to retry. "), job.failure_reason));
+  }
   if (job.status === "failed") {
     banners.push(h("div", { class: "banner bad" }, h("strong", {}, "Job failed. "), job.failure_reason || ""));
   }
@@ -245,6 +248,7 @@ function renderJobHeader(job) {
       h("div", {},
         h("h1", {}, title),
         h("div", { class: "chips" }, statusChip(job.status), h("span", { class: "chip mono" }, job.job_id),
+          job.attempts > 1 && h("span", { class: "chip warn" }, `attempt ${job.attempts}`),
           pkg && h("span", { class: "chip mono" }, pkg.revision_id)),
       ),
       h("div", { class: "job-actions" }, actions),

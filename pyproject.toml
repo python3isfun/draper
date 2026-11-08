@@ -11,6 +11,9 @@ dependencies = [
     "uvicorn>=0.30",
 ]
 
+[project.scripts]
+drama-worker = "drama_agent.worker:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",

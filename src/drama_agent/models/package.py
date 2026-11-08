@@ -121,6 +121,8 @@ class Job(BaseModel):
     package_id: str | None = None
     revision_id: str | None = None
     failure_reason: str | None = None
+    # Execution attempts by the job queue (each claim by a worker is one attempt).
+    attempts: int = 0
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

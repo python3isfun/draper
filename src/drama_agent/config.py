@@ -62,3 +62,23 @@ def repo_from_env() -> Repository:
 
         return SqliteRepository(os.environ.get("DRAMA_DB_PATH", "data/drama.db"))
     raise RuntimeError(f"unknown DRAMA_STORE={kind!r}")
+
+
+def worker_settings() -> dict[str, float | int]:
+    """DRAMA_WORKERS: in-process workers for the API (default 1; 0 = run workers separately).
+    DRAMA_JOB_MAX_ATTEMPTS (default 3) and DRAMA_JOB_LEASE_S (default 30) tune the queue."""
+    return {
+        "workers": int(os.environ.get("DRAMA_WORKERS", "1")),
+        "max_attempts": int(os.environ.get("DRAMA_JOB_MAX_ATTEMPTS", "3")),
+        "lease_s": float(os.environ.get("DRAMA_JOB_LEASE_S", "30")),
+    }
+
+
+def queue_from_env(repo: Repository):  # -> JobQueue (import kept lazy)
+    from .jobqueue import InMemoryJobQueue, SqliteJobQueue
+    from .store.sqlite import SqliteRepository
+
+    max_attempts = int(worker_settings()["max_attempts"])
+    if isinstance(repo, SqliteRepository):
+        return SqliteJobQueue(repo, max_attempts=max_attempts)
+    return InMemoryJobQueue(max_attempts=max_attempts)

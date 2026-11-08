@@ -57,6 +57,26 @@ class CreativeReviewOutput(BaseModel):
 # Pipeline state
 
 
+class PipelineCheckpoint(BaseModel):
+    """Pipeline state after the last passed step; lets a retried job skip finished steps.
+
+    package_id / revision_id are kept so a resumed job publishes under the same IDs.
+    """
+
+    completed_stages: list[str]
+    package_id: str
+    revision_id: str
+    source_brief: SourceBrief | None = None
+    story_bible: StoryBible | None = None
+    episodes: list[Episode] = Field(default_factory=list)
+    shots: list[Shot] = Field(default_factory=list)
+    timing: list[EpisodeTiming] = Field(default_factory=list)
+    asset_requirements: AssetRequirements | None = None
+    qa_report: QAReport = Field(default_factory=QAReport)
+    model_versions: dict[str, str] = Field(default_factory=dict)
+    token_usage: dict[str, dict[str, int]] = Field(default_factory=dict)
+
+
 @dataclass
 class PipelineState:
     request: JobRequest
@@ -96,6 +116,41 @@ class PipelineState:
             ),
             qa_report=self.qa_report,
         )
+
+    def to_checkpoint(self, completed_stages: list[str]) -> str:
+        return PipelineCheckpoint(
+            completed_stages=completed_stages,
+            package_id=self.package_id,
+            revision_id=self.revision_id,
+            source_brief=self.source_brief,
+            story_bible=self.story_bible,
+            episodes=self.episodes,
+            shots=self.shots,
+            timing=self.timing,
+            asset_requirements=self.asset_requirements,
+            qa_report=self.qa_report,
+            model_versions=self.model_versions,
+            token_usage=self.token_usage,
+        ).model_dump_json()
+
+    @classmethod
+    def from_checkpoint(cls, request: JobRequest, raw: str) -> tuple[PipelineState, list[str]]:
+        cp = PipelineCheckpoint.model_validate_json(raw)
+        state = cls(
+            request=request,
+            package_id=cp.package_id,
+            revision_id=cp.revision_id,
+            source_brief=cp.source_brief,
+            story_bible=cp.story_bible,
+            episodes=cp.episodes,
+            shots=cp.shots,
+            timing=cp.timing,
+            asset_requirements=cp.asset_requirements,
+            qa_report=cp.qa_report,
+            model_versions=cp.model_versions,
+            token_usage=cp.token_usage,
+        )
+        return state, cp.completed_stages
 
     def context(self) -> dict[str, Any]:
         """Upstream artifacts handed to the model as JSON."""

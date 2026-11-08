@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Protocol
 
 from ..llm import GenerationRequest, ModelClient
 from ..models import Job, ProductionPackage, Revision
@@ -19,24 +20,35 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+class CheckpointStore(Protocol):
+    def save_checkpoint(self, job_id: str, data: str) -> None: ...
+    def load_checkpoint(self, job_id: str) -> str | None: ...
+
+
 class Orchestrator:
-    def __init__(self, repo: Repository, client: ModelClient) -> None:
+    def __init__(
+        self,
+        repo: Repository,
+        client: ModelClient,
+        checkpoints: CheckpointStore | None = None,
+    ) -> None:
         self.repo = repo
         self.client = client
+        self.checkpoints = checkpoints
         self.base_prompt = load_orchestrator_prompt()
 
     async def run_job(self, job_id: str) -> Job:
+        """Run (or resume) a job. Returns it in a terminal state, or raises CancelledError
+        if the surrounding task is cancelled (e.g. the worker lost its lease)."""
         job = self.repo.get_job(job_id)
         if job is None:
             raise KeyError(job_id)
         if job.status == "cancelled":
             return job
 
-        state = PipelineState(
-            request=job.request, package_id=new_id("pkg"), revision_id=new_id("rev")
-        )
+        state, completed = self._restore(job)
         budget = job.request.options.revision_budget_per_stage
-        self._set(job, status="running")
+        self._set(job, status="running", failure_reason=None)
         stage = None
 
         # Everything, including the final save, is inside the try so the job can never be
@@ -44,7 +56,10 @@ class Orchestrator:
         try:
             for step in STEPS:
                 stage = job.stages[step.name]
-                stage.status = "running"
+                if step.name in completed:
+                    stage.status = "passed"  # restored from checkpoint; not re-run
+                    continue
+                stage.status, stage.error, stage.issues = "running", None, []
                 self._touch(job)
                 issues = []
                 # One initial attempt plus `budget` automatic repairs. Only this step is
@@ -79,6 +94,11 @@ class Orchestrator:
                     state.qa_report.hard_issues = issues
                     self._finish(job, state, status="needs_revision")
                     return job
+                # Checkpoint before marking passed: a crash in between re-runs this step
+                # rather than skipping it with missing output.
+                completed.append(step.name)
+                if self.checkpoints:
+                    self.checkpoints.save_checkpoint(job_id, state.to_checkpoint(completed))
                 stage.status = "passed"
                 self._touch(job)
             stage = None
@@ -94,11 +114,24 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
 
+    def _restore(self, job: Job) -> tuple[PipelineState, list[str]]:
+        raw = self.checkpoints.load_checkpoint(job.job_id) if self.checkpoints else None
+        if raw:
+            state, completed = PipelineState.from_checkpoint(job.request, raw)
+            log.info("job %s resuming after %s", job.job_id, completed)
+            return state, completed
+        fresh = PipelineState(
+            request=job.request, package_id=new_id("pkg"), revision_id=new_id("rev")
+        )
+        return fresh, []
+
     def _finish(self, job: Job, state: PipelineState, status: str) -> None:
         pkg: ProductionPackage | None = None
         if state.source_brief and state.story_bible:
             pkg = state.draft_package()
-            self.repo.save_package(pkg, published=status == "completed")
+            # Idempotent: a resumed job may already have saved this revision before a crash.
+            if self.repo.get_package(pkg.package_id, pkg.revision_id) is None:
+                self.repo.save_package(pkg, published=status == "completed")
             self.repo.save_revision(
                 Revision(
                     revision_id=pkg.revision_id,

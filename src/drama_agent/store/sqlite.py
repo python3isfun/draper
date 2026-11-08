@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from ..models import Job, ProductionPackage, QAReport, Revision
-from . import _fail_interrupted
 
-SCHEMA_VERSION = 1
+# v1: objects. v2: job_queue (additive; v1 files upgrade in place).
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -50,6 +50,18 @@ CREATE TABLE IF NOT EXISTS evaluation_reports (
     data        TEXT NOT NULL,
     PRIMARY KEY (package_id, revision_id)
 );
+CREATE TABLE IF NOT EXISTS job_queue (
+    job_id           TEXT PRIMARY KEY,
+    state            TEXT NOT NULL,              -- queued | leased | done | dead
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    available_at     REAL NOT NULL,              -- unix seconds; retry backoff
+    enqueued_at      REAL NOT NULL,
+    lease_owner      TEXT,
+    lease_expires_at REAL,
+    last_error       TEXT,
+    checkpoint       TEXT                        -- PipelineCheckpoint JSON
+);
+CREATE INDEX IF NOT EXISTS job_queue_ready ON job_queue (state, available_at);
 """
 
 
@@ -65,6 +77,8 @@ class SqliteRepository:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            # Wait for other processes (e.g. a separate worker) instead of failing at once.
+            self._conn.execute("PRAGMA busy_timeout=5000")
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise RuntimeError(
@@ -121,14 +135,13 @@ class SqliteRepository:
             ).fetchall()
         return [Job.model_validate_json(r[0]) for r in rows]
 
-    def fail_interrupted_jobs(self, reason: str) -> list[str]:
+    def list_active_jobs(self) -> list[Job]:
+        """Jobs not yet finished (queued or running), oldest first."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT data FROM jobs WHERE status IN ('queued', 'running')"
+                "SELECT data FROM jobs WHERE status IN ('queued', 'running') ORDER BY created_at"
             ).fetchall()
-        return _fail_interrupted(
-            [Job.model_validate_json(r[0]) for r in rows], reason, self.save_job
-        )
+        return [Job.model_validate_json(r[0]) for r in rows]
 
     # Packages -----------------------------------------------------------
 

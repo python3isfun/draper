@@ -3,28 +3,9 @@ revisions, evaluation_reports. Packages are stored per revision and never overwr
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any, Protocol
 
 from ..models import Job, ProductionPackage, QAReport, Revision
-from ..models.package import utcnow
-
-
-def _fail_interrupted(jobs: list[Job], reason: str, save: Callable[[Job], None]) -> list[str]:
-    """Mark jobs left queued/running by a previous process as failed. Returns their IDs."""
-    failed = []
-    for job in jobs:
-        if job.status in ("queued", "running"):
-            job.status = "failed"
-            job.failure_reason = reason
-            for stage in job.stages.values():
-                if stage.status == "running":
-                    stage.status = "failed"
-                    stage.error = reason
-            job.updated_at = utcnow()
-            save(job)
-            failed.append(job.job_id)
-    return failed
 
 
 class Repository(Protocol):
@@ -33,7 +14,7 @@ class Repository(Protocol):
     def save_job(self, job: Job) -> None: ...
     def get_job(self, job_id: str) -> Job | None: ...
     def list_jobs(self, limit: int = 50) -> list[Job]: ...
-    def fail_interrupted_jobs(self, reason: str) -> list[str]: ...
+    def list_active_jobs(self) -> list[Job]: ...
     def save_package(self, pkg: ProductionPackage, published: bool) -> None: ...
     def get_package(
         self, package_id: str, revision_id: str | None = None
@@ -74,8 +55,10 @@ class InMemoryRepository:
         """Newest first."""
         return sorted(self.jobs.values(), key=lambda j: j.created_at, reverse=True)[:limit]
 
-    def fail_interrupted_jobs(self, reason: str) -> list[str]:
-        return _fail_interrupted(list(self.jobs.values()), reason, self.save_job)
+    def list_active_jobs(self) -> list[Job]:
+        """Jobs not yet finished (queued or running), oldest first."""
+        active = [j for j in self.jobs.values() if j.status in ("queued", "running")]
+        return sorted(active, key=lambda j: j.created_at)
 
     def save_package(self, pkg: ProductionPackage, published: bool) -> None:
         revs = self.packages.setdefault(pkg.package_id, {})

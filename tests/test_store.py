@@ -9,11 +9,14 @@ from fastapi.testclient import TestClient
 from drama_agent.api import create_app
 from drama_agent.config import repo_from_env
 from drama_agent.fixtures.sample import SAMPLE_SEED, sample_request
+from drama_agent.jobqueue import SqliteJobQueue
 from drama_agent.llm import FixtureModelClient
 from drama_agent.models import Job, QAReport, Revision
 from drama_agent.pipeline.orchestrator import Orchestrator
 from drama_agent.store import InMemoryRepository
 from drama_agent.store.sqlite import SCHEMA_VERSION, SqliteRepository
+
+from .conftest import wait_job
 
 
 @pytest.fixture(params=["memory", "sqlite"])
@@ -86,18 +89,11 @@ def test_revision_report_and_asset_roundtrip(repo):
     assert repo.get_source_asset("nope") is None
 
 
-def test_fail_interrupted_jobs(repo):
-    running = Job(job_id="job_run", request=sample_request(), status="running")
-    running.stages["script"].status = "running"
-    repo.save_job(running)
+def test_list_active_jobs(repo):
+    repo.save_job(Job(job_id="job_run", request=sample_request(), status="running"))
     repo.save_job(Job(job_id="job_queued", request=sample_request()))
     repo.save_job(Job(job_id="job_done", request=sample_request(), status="completed"))
-
-    assert sorted(repo.fail_interrupted_jobs("restart")) == ["job_queued", "job_run"]
-    job = repo.get_job("job_run")
-    assert job.status == "failed" and job.failure_reason == "restart"
-    assert job.stages["script"].status == "failed"
-    assert repo.get_job("job_done").status == "completed"
+    assert [j.job_id for j in repo.list_active_jobs()] == ["job_run", "job_queued"]
 
 
 def test_full_pipeline_against_backend(repo):
@@ -139,14 +135,18 @@ def test_api_results_persist_across_server_restart(tmp_path):
     path = tmp_path / "drama.db"
     body = {"sources": [{"type": "text", "text": SAMPLE_SEED, "use_as": "story_seed"}]}
 
-    app1 = TestClient(create_app(repo=SqliteRepository(path)))
-    job_id = app1.post("/v1/drama-jobs", json=body).json()["job_id"]
-    pkg_id = app1.get(f"/v1/drama-jobs/{job_id}").json()["package_id"]
+    def app_on(path):
+        repo = SqliteRepository(path)
+        return TestClient(create_app(repo=repo, queue=SqliteJobQueue(repo), poll_s=0.01))
 
-    app2 = TestClient(create_app(repo=SqliteRepository(path)))  # "restarted" server
-    assert app2.get(f"/v1/drama-jobs/{job_id}").json()["status"] == "completed"
-    assert len(app2.get(f"/v1/drama-packages/{pkg_id}").json()["episodes"]) == 3
-    assert [j["job_id"] for j in app2.get("/v1/drama-jobs").json()] == [job_id]
+    with app_on(path) as app1:
+        job_id = app1.post("/v1/drama-jobs", json=body).json()["job_id"]
+        pkg_id = wait_job(app1, job_id)["package_id"]
+
+    with app_on(path) as app2:  # "restarted" server
+        assert app2.get(f"/v1/drama-jobs/{job_id}").json()["status"] == "completed"
+        assert len(app2.get(f"/v1/drama-packages/{pkg_id}").json()["episodes"]) == 3
+        assert [j["job_id"] for j in app2.get("/v1/drama-jobs").json()] == [job_id]
 
 
 def test_repo_from_env(monkeypatch, tmp_path):

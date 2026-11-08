@@ -2,23 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ..config import client_from_env, load_dotenv, repo_from_env
+from ..config import (
+    client_from_env,
+    load_dotenv,
+    queue_from_env,
+    repo_from_env,
+    worker_settings,
+)
+from ..jobqueue import InMemoryJobQueue, JobQueue
 from ..llm import FixtureModelClient, ModelClient
 from ..models import Job, JobRequest, ProductionPackage, Revision, RevisionRequest
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
 from ..store import InMemoryRepository, Repository
+from ..worker import JobWorker, recover
 
 log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -43,11 +53,53 @@ class Meta(BaseModel):
     client: str
 
 
-def create_app(repo: Repository | None = None, client: ModelClient | None = None) -> FastAPI:
+def create_app(
+    repo: Repository | None = None,
+    client: ModelClient | None = None,
+    queue: JobQueue | None = None,
+    workers: int = 1,
+    lease_s: float = 30.0,
+    poll_s: float = 1.0,
+    retry_base_s: float = 5.0,
+) -> FastAPI:
+    """Build the API. `workers` in-process job workers start with the app (lifespan);
+    with workers=0 jobs are only enqueued, for a separate `python -m drama_agent.worker`."""
     repo = repo or InMemoryRepository()
-    orchestrator = Orchestrator(repo, client or FixtureModelClient())
-    app = FastAPI(title="Drama Agent", version="0.1.0")
+    queue = queue or InMemoryJobQueue()
+    orchestrator = Orchestrator(repo, client or FixtureModelClient(), checkpoints=queue)
+    wakeup = asyncio.Event()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        n = recover(repo, queue)
+        if n:
+            log.info("enqueued %d unfinished jobs without a queue entry", n)
+        stop = asyncio.Event()
+        tasks = [
+            asyncio.create_task(
+                JobWorker(
+                    repo,
+                    queue,
+                    orchestrator,
+                    lease_s=lease_s,
+                    poll_s=poll_s,
+                    retry_base_s=retry_base_s,
+                ).run(stop, wakeup)
+            )
+            for _ in range(workers)
+        ]
+        try:
+            yield
+        finally:
+            stop.set()
+            # Cancelling releases in-flight jobs back to the queue (no attempt spent).
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    app = FastAPI(title="Drama Agent", version="0.1.0", lifespan=lifespan)
     app.state.repo = repo
+    app.state.queue = queue
     app.state.orchestrator = orchestrator
 
     @app.get("/v1/meta", response_model=Meta)
@@ -74,13 +126,14 @@ def create_app(repo: Repository | None = None, client: ModelClient | None = None
         return out
 
     @app.post("/v1/drama-jobs", status_code=202, response_model=JobCreated)
-    async def create_job(req: JobRequest, background: BackgroundTasks) -> JobCreated:
+    async def create_job(req: JobRequest) -> JobCreated:
         for src in req.sources:
             if src.asset_id and repo.get_source_asset(src.asset_id) is None:
                 raise HTTPException(422, f"unknown asset_id {src.asset_id}")
         job = Job(job_id=new_id("job"), request=req)
         repo.save_job(job)
-        background.add_task(orchestrator.run_job, job.job_id)
+        queue.enqueue(job.job_id)
+        wakeup.set()
         return JobCreated(job_id=job.job_id, status=job.status)
 
     @app.get("/v1/drama-jobs/{job_id}", response_model=Job)
@@ -142,12 +195,14 @@ def create_app_from_env() -> FastAPI:
     """Entry point for uvicorn: reads .env and picks the model client from DRAMA_MODEL_CLIENT."""
     load_dotenv()
     repo = repo_from_env()
-    # Background tasks die with the process; jobs a previous run left mid-flight would
-    # otherwise show 'running' forever.
-    interrupted = repo.fail_interrupted_jobs("interrupted by server restart")
-    if interrupted:
-        log.warning("marked %d interrupted jobs as failed: %s", len(interrupted), interrupted)
-    return create_app(repo=repo, client=client_from_env())
+    settings = worker_settings()
+    return create_app(
+        repo=repo,
+        client=client_from_env(),
+        queue=queue_from_env(repo),
+        workers=int(settings["workers"]),
+        lease_s=float(settings["lease_s"]),
+    )
 
 
 _app: FastAPI | None = None
