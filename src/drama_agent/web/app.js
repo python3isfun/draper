@@ -60,7 +60,7 @@ const isActive = (s) => s === "queued" || s === "running";
 // ---------------------------------------------------------------------------
 // State + routing (hash: #job=<id>&tab=<tab>)
 
-const state = { jobs: [], job: null, pkg: null, tab: "overview", pollTimer: null, assetFilter: "all", revise: null };
+const state = { jobs: [], job: null, pkg: null, tab: "overview", pollTimer: null, assetFilter: "all", revise: null, offline: false };
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
@@ -101,6 +101,8 @@ async function loadMeta() {
   try {
     const m = await api("/v1/meta");
     const live = m.client !== "FixtureModelClient";
+    state.offline = !live;
+    $("#offline-note").hidden = live;
     $("#meta").replaceChildren(
       h("span", { class: `chip ${live ? "ok" : "warn"}` }, live ? "live model" : "offline fixture"),
       " ", h("span", { class: "mono" }, m.model_id),
@@ -120,18 +122,28 @@ async function loadJobs() {
 }
 
 async function loadJob(jobId) {
+  // A request for a previous job can still be in flight when the user switches jobs.
+  // Its late response must not overwrite the job now on screen or restart its polling.
+  const stillCurrent = () => readHash().job === jobId;
   try {
     const job = await api(`/v1/drama-jobs/${encodeURIComponent(jobId)}`);
-    const changed = !state.job || state.job.status !== job.status || state.job.revision_id !== job.revision_id;
-    state.job = job;
-    if (job.package_id && (changed || !state.pkg)) {
+    if (!stillCurrent()) return;
+    const prev = state.job?.job_id === jobId ? state.job : null;
+    const changed = !prev || prev.status !== job.status || prev.revision_id !== job.revision_id;
+    let pkg = prev ? state.pkg : null;
+    if (job.package_id && (changed || !pkg)) {
       const q = new URLSearchParams({ revision_id: job.revision_id || "" });
-      state.pkg = await api(`/v1/drama-packages/${encodeURIComponent(job.package_id)}?${q}`);
+      pkg = await api(`/v1/drama-packages/${encodeURIComponent(job.package_id)}?${q}`);
+      if (!stillCurrent()) return;
     }
+    state.job = job;
+    state.pkg = pkg;
     renderMain();
     if (changed) loadJobs();
+    clearTimeout(state.pollTimer);
     if (isActive(job.status)) state.pollTimer = setTimeout(() => loadJob(jobId), 1500);
   } catch (err) {
+    if (!stillCurrent()) return;
     $("#main").replaceChildren(h("div", { class: "card placeholder" }, h("h2", {}, "Couldn't load job"), err.message));
   }
 }
@@ -249,7 +261,8 @@ function renderJobHeader(job) {
         h("h1", {}, title),
         h("div", { class: "chips" }, statusChip(job.status), h("span", { class: "chip mono" }, job.job_id),
           job.attempts > 1 && h("span", { class: "chip warn" }, `attempt ${job.attempts}`),
-          pkg && h("span", { class: "chip mono" }, pkg.revision_id)),
+          pkg && h("span", { class: "chip mono" }, pkg.revision_id),
+          pkg && isSampleOutput(pkg) && h("span", { class: "chip warn", title: "Produced by the offline fixture, not a model. The seed was ignored." }, "sample output")),
       ),
       h("div", { class: "job-actions" }, actions),
     ),
@@ -264,6 +277,8 @@ function renderJobHeader(job) {
     banners,
   );
 }
+
+const isSampleOutput = (pkg) => Object.values(pkg.provenance?.model_versions || {}).includes("fixture-v1");
 
 function renderWaiting(job) {
   if (isActive(job.status)) {

@@ -177,6 +177,9 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 .banner.bad { background: var(--bad-soft); color: var(--bad); }
 .banner.warn { background: var(--warn-soft); color: var(--warn); }
 .banner ul { margin: 6px 0 0; padding-left: 18px; }
+.banner.compact { margin: 0 0 12px; font-size: 12px; line-height: 1.45; }
+.banner code { font-size: 11px; }
+[hidden] { display: none !important; }
 
 .tabs {
   display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 18px 0 16px;

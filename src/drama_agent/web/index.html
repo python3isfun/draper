@@ -19,6 +19,11 @@
     <aside class="sidebar">
       <form id="new-job" class="card new-job">
         <h2>New job</h2>
+        <div id="offline-note" class="banner warn compact" hidden>
+          <strong>Offline sample mode.</strong> Every job returns the same built-in story and
+          ignores your seed. To generate from your seed, set
+          <code>DRAMA_MODEL_CLIENT=mcphub</code> in <code>.env</code> and restart the server.
+        </div>
         <label class="field">
           <span>Seed</span>
           <textarea name="text" rows="4" required
