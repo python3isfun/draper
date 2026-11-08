@@ -420,7 +420,7 @@ def check_locks(base: ProductionPackage, new: ProductionPackage) -> list[Issue]:
 
 
 def check_entity_keys(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
-    """Maps keyed by character must use real character IDs (and prop IDs as values).
+    """Maps keyed by character must use real character IDs.
 
     The live model invented keys such as `_production_notes` and `planning` to store its
     working notes inside story fields.
@@ -439,11 +439,9 @@ def check_entity_keys(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) 
 
     def state(owner: str, label: str, st) -> None:
         keys(owner, f"{label}.knowledge", st.knowledge)
+        # Values are prose ("现金信封已收回内袋"), not prop IDs: the spec registers only
+        # plot-relevant props, so requiring IDs here failed a valid live script.
         keys(owner, f"{label}.possessions", st.possessions)
-        for held in st.possessions.values():
-            for prop in held:
-                if prop not in idx.props:
-                    issues.append(_issue("entity_key", owner, f"{label} holds unknown prop {prop}"))
 
     for ep in pkg.episodes:
         state(ep.episode_id, "end_state", ep.end_state)

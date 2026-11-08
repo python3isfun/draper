@@ -102,11 +102,21 @@ def test_clean_sample_has_no_leaks(package):
 def test_invented_map_keys_are_hard_issues(package, options):
     package.story_bible.character_arcs["planning"] = "格式与时长"
     package.episodes[2].end_state.knowledge["_production_notes"] = ["假设：..."]
-    package.episodes[0].scenes[0].end_state.possessions["ch_lin"] = ["prop_ghost"]
+    package.episodes[0].scenes[0].end_state.possessions["ch_ghost"] = ["旧全家福"]
     evidence = [i.evidence for i in run_hard_checks(package, options) if i.check == "entity_key"]
     assert any("'planning'" in e for e in evidence)
     assert any("'_production_notes'" in e for e in evidence)
-    assert any("prop_ghost" in e for e in evidence)
+    assert any("'ch_ghost'" in e for e in evidence)
+
+
+def test_possessions_are_prose_not_prop_ids(package, options):
+    """Regression: the live gpt-6.1-sol script described held items in prose, which is
+    valid; an earlier version of the check demanded prop IDs and failed 89 times."""
+    package.episodes[0].end_state.possessions["ch_lin"] = [
+        "现金信封已收回内袋，三千元未支付。",
+        "旧全家福仍在前间后墙。",
+    ]
+    assert run_hard_checks(package, options) == []
 
 
 def test_prose_leak_is_a_hard_issue(package, options):

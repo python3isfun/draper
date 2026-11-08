@@ -26,8 +26,18 @@ class Beat(BaseModel):
 
 
 class SceneState(BaseModel):
-    knowledge: dict[str, list[str]] = Field(default_factory=dict)  # character_id -> facts
-    possessions: dict[str, list[str]] = Field(default_factory=dict)  # character_id -> prop_ids
+    # Descriptions reach the model through the JSON schema; keys are checked by
+    # check_entity_keys, values are prose (checked for ID/timecode leaks).
+    knowledge: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Keys: existing character IDs only. Values: facts that character knows, "
+        "as prose.",
+    )
+    possessions: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Keys: existing character IDs only. Values: what that character holds "
+        "and where, as prose, using names rather than IDs.",
+    )
     relationships: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
 

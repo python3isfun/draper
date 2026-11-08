@@ -13,7 +13,10 @@ class Character(BaseModel):
     name: str
     appearance: str
     costume: str
-    relationships: dict[str, str] = Field(default_factory=dict)  # character_id -> relation
+    relationships: dict[str, str] = Field(
+        default_factory=dict,
+        description="Keys: other existing character IDs only. Values: the relationship, as prose.",
+    )
     goal: str
     motivation: str
     knowledge: list[str] = Field(default_factory=list)
@@ -83,7 +86,10 @@ class StoryBible(BaseModel):
     series_synopsis: str
     # Required when story_scope == series_opening.
     future_direction: str | None = None
-    character_arcs: dict[str, str] = Field(default_factory=dict)
+    character_arcs: dict[str, str] = Field(
+        default_factory=dict,
+        description="Keys: existing character IDs only. Values: that character's arc, as prose.",
+    )
     characters: list[Character]
     looks: list[CharacterLook] = Field(default_factory=list)
     locations: list[Location]
