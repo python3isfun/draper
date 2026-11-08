@@ -89,6 +89,7 @@ async function route() {
   if (state.job?.job_id !== job) {
     state.job = state.pkg = null;
     state.retryError = "";
+    state.renderedSig = null;
     state.revise = null;
     renderMain();
   }
@@ -137,9 +138,16 @@ async function loadJob(jobId) {
       pkg = await api(`/v1/drama-packages/${encodeURIComponent(job.package_id)}?${q}`);
       if (!stillCurrent()) return;
     }
+    // Polling must not rebuild the page when nothing changed: rebuilding destroys any text
+    // the user has selected, which made running jobs impossible to copy from.
+    const sig = JSON.stringify(job) + "|" + (pkg?.revision_id || "");
+    const unchanged = sig === state.renderedSig;
     state.job = job;
     state.pkg = pkg;
-    renderMain();
+    if (!unchanged) {
+      state.renderedSig = sig;
+      renderWhenNotSelecting();
+    }
     if (changed) loadJobs();
     clearTimeout(state.pollTimer);
     if (isActive(job.status)) state.pollTimer = setTimeout(() => loadJob(jobId), 1500);
@@ -155,14 +163,31 @@ async function loadJob(jobId) {
 function renderJobList() {
   const list = $("#job-list");
   const current = readHash().job;
+  if (selectingIn(list)) {
+    state.jobListPending = true;
+    return;
+  }
+  state.jobListPending = false;
   if (!state.jobs.length) {
     list.replaceChildren(h("li", { class: "empty" }, "No jobs yet."));
     return;
   }
+  // Not <button>: browsers don't allow selecting text inside buttons, so seeds couldn't
+  // be copied. A click that ends a text selection selects instead of navigating.
+  const open = (jobId) => (ev) => {
+    if (ev.type === "keydown" && ev.key !== "Enter" && ev.key !== " ") return;
+    if (ev.type === "click" && !getSelection().isCollapsed) return;
+    ev.preventDefault();
+    go(jobId);
+  };
   list.replaceChildren(
     ...state.jobs.map((j) =>
       h("li", {},
-        h("button", { class: `job-item${j.job_id === current ? " active" : ""}`, type: "button", onclick: () => go(j.job_id) },
+        h("div", {
+          class: `job-item${j.job_id === current ? " active" : ""}`, role: "link", tabindex: "0",
+          "aria-current": j.job_id === current ? "page" : null,
+          onclick: open(j.job_id), onkeydown: open(j.job_id),
+        },
           h("div", { class: "seed" }, j.seed),
           h("div", { class: "meta" }, statusChip(j.status), h("span", { class: "muted small" }, timeAgo(j.created_at))),
         ),
@@ -205,6 +230,27 @@ $("#new-job").addEventListener("submit", async (ev) => {
 
 // ---------------------------------------------------------------------------
 // Main view
+
+// True while the user has text selected inside `el` (e.g. mid copy).
+function selectingIn(el) {
+  const sel = getSelection();
+  return sel && !sel.isCollapsed && sel.rangeCount > 0 && el.contains(sel.getRangeAt(0).commonAncestorContainer);
+}
+
+// Background updates wait until the selection is released; user actions render at once.
+function renderWhenNotSelecting() {
+  if (selectingIn($("#main"))) {
+    state.renderPending = true;
+    return;
+  }
+  state.renderPending = false;
+  renderMain();
+}
+
+document.addEventListener("selectionchange", () => {
+  if (state.renderPending && !selectingIn($("#main"))) renderWhenNotSelecting();
+  if (state.jobListPending && !selectingIn($("#job-list"))) renderJobList();
+});
 
 function renderMain() {
   const main = $("#main");

@@ -34,6 +34,19 @@ log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
+class RevalidatingStaticFiles(StaticFiles):
+    """Static files the browser must revalidate on each load (ETag makes that cheap).
+
+    Without Cache-Control, browsers cache app.js heuristically and keep running an old
+    version of the UI after an update.
+    """
+
+    async def get_response(self, path: str, scope):  # type: ignore[no-untyped-def]
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 class JobCreated(BaseModel):
     job_id: str
     status: str
@@ -165,7 +178,9 @@ def create_app(
         if pkg is None:
             raise HTTPException(404, "package not found")
         if format == "markdown":
-            return PlainTextResponse(render_markdown(pkg), media_type="text/markdown")
+            # text/plain, not text/markdown: browsers display it (and its text can be
+            # copied) instead of downloading it.
+            return PlainTextResponse(render_markdown(pkg), media_type="text/plain")
         return pkg
 
     @app.post("/v1/drama-packages/{package_id}/revisions", status_code=202, response_model=Revision)
@@ -198,7 +213,7 @@ def create_app(
 
     # Web UI. Mounted last so it never shadows the /v1 API routes.
     if WEB_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+        app.mount("/", RevalidatingStaticFiles(directory=WEB_DIR, html=True), name="web")
 
     return app
 

@@ -50,6 +50,8 @@ def test_api_job_lifecycle_and_revision():
         pkg = client.get(f"/v1/drama-packages/{pkg_id}").json()
         assert len(pkg["episodes"]) == 3
         md = client.get(f"/v1/drama-packages/{pkg_id}", params={"format": "markdown"})
+        # Displayed (and copyable) in the browser rather than downloaded.
+        assert md.headers["content-type"] == "text/plain; charset=utf-8"
         assert md.text.startswith("# ")
 
         rev_url = f"/v1/drama-packages/{pkg_id}/revisions"
@@ -83,7 +85,13 @@ def test_web_ui_and_listing_endpoints():
     with TestClient(create_app(poll_s=0.01)) as client:
         page = client.get("/")
         assert page.status_code == 200 and "<title>Drama Agent</title>" in page.text
-        assert client.get("/app.js").status_code == 200
+        script = client.get("/app.js")
+        assert script.status_code == 200
+        # The UI must be revalidated so browsers don't keep running an old app.js.
+        assert script.headers["cache-control"] == "no-cache"
+        assert page.headers["cache-control"] == "no-cache"
+        cached = client.get("/app.js", headers={"if-none-match": script.headers["etag"]})
+        assert cached.status_code == 304  # unchanged files aren't re-downloaded
 
         assert client.get("/v1/meta").json() == {
             "model_id": "fixture-v1",
