@@ -70,6 +70,7 @@ class PipelineState:
     asset_requirements: AssetRequirements | None = None
     qa_report: QAReport = field(default_factory=QAReport)
     model_versions: dict[str, str] = field(default_factory=dict)
+    token_usage: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def draft_package(self) -> ProductionPackage:
         """Assemble whatever exists so far; missing parts become empty placeholders."""
@@ -90,6 +91,7 @@ class PipelineState:
             provenance=Provenance(
                 request=self.request,
                 model_versions=self.model_versions,
+                token_usage=self.token_usage,
                 prompt_versions={"orchestrator": ORCHESTRATOR_PROMPT_VERSION},
             ),
             qa_report=self.qa_report,
@@ -109,6 +111,15 @@ class PipelineState:
 
 # ---------------------------------------------------------------------------
 # Steps
+
+# Appended to every step's instructions so IDs stay stable and predictable across steps.
+ID_CONVENTIONS = (
+    "ID conventions (keep IDs stable; never rename confirmed IDs): characters ch_<name>, "
+    "looks lk_<char>_<look>, locations loc_<name>, location states ls_<loc>_<state>, props "
+    "prop_<name>, prop states ps_<prop>_<state>, episodes ep_01..ep_03, scenes sc_<ep>_<n> "
+    "(e.g. sc_01_02), beats bt_<ep>_<scene>_<n>, dialogue dl_<ep>_<scene>_<n>, shots "
+    "sh_<ep>_<scene>_<n>. Times are integer milliseconds."
+)
 
 
 class Step:

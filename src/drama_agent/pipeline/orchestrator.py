@@ -10,7 +10,7 @@ from ..models import Job, ProductionPackage, Revision
 from ..models.package import utcnow
 from ..prompts import load_orchestrator_prompt
 from ..store import Repository
-from .steps import STEPS, PipelineState
+from .steps import ID_CONVENTIONS, STEPS, PipelineState
 
 log = logging.getLogger(__name__)
 
@@ -51,16 +51,22 @@ class Orchestrator:
                 # retried; earlier passed steps are not re-run.
                 for attempt in range(budget + 1):
                     stage.attempts = attempt + 1
-                    output = await self.client.generate(
-                        GenerationRequest(
-                            stage=step.name,
-                            instructions=f"{self.base_prompt}\n\n{step.directive}",
-                            context=state.context(),
-                            feedback=issues,
-                            attempt=attempt,
+                    gen = GenerationRequest(
+                        stage=step.name,
+                        instructions=(
+                            f"{self.base_prompt}\n\n{step.directive}\n\n{ID_CONVENTIONS}"
                         ),
-                        step.output_model,
+                        context=state.context(),
+                        feedback=issues,
+                        attempt=attempt,
                     )
+                    try:
+                        output = await self.client.generate(gen, step.output_model)
+                    finally:
+                        # Count tokens even when the call ultimately fails.
+                        used = state.token_usage.setdefault(step.name, {})
+                        for k, v in gen.usage.items():
+                            used[k] = used.get(k, 0) + v
                     state.model_versions[step.name] = self.client.model_id
                     step.apply(state, output)
                     issues = step.check(state)

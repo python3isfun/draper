@@ -11,9 +11,48 @@ Design source: [`drama_agent_service_v0_1.md`](drama_agent_service_v0_1.md) (spe
 
 ```bash
 uv sync
-uv run pytest                                   # 28 tests
-uv run uvicorn drama_agent.api.app:app --reload # http://127.0.0.1:8000/docs
+uv run pytest                                   # offline tests; no network
+uv run uvicorn drama_agent.api.app:app --reload
+                                                # http://127.0.0.1:8000/docs
 ```
+
+Then open http://127.0.0.1:8000/ for the web UI (the API docs are at `/docs`).
+
+### Web UI
+
+A static single-page app (`src/drama_agent/web/`) served by the same FastAPI process,
+with no build step. It lets you:
+
+- submit a seed or script and watch the five pipeline steps progress
+- browse the result: story bible, scripts, the timed storyboard with a shot timeline,
+  asset requirements (filterable by type), and QA issues with token usage
+- request a targeted revision and see its impact analysis (conflicts, locked objects in
+  scope, impacted objects, stale asset requirements)
+- export a package as Markdown or JSON
+
+Model output is always inserted as text, never as HTML.
+
+### Model backend
+
+`DRAMA_MODEL_CLIENT` picks the backend (read from the environment or `.env`):
+
+| value | backend |
+| --- | --- |
+| `fixture` (default) | Built-in sample package, offline, free |
+| `mcphub` | [MCPHub](https://api.mcphub.com) OpenAI-compatible gateway |
+
+`mcphub` needs `MCPHUB_URL`, `MCPHUB_KEY` and `MCPHUB_MODEL` (e.g. `gpt-6.1-sol`);
+`MCPHUB_TIMEOUT_S` is optional (default 600). Having a key set never switches the backend
+on its own; set `DRAMA_MODEL_CLIENT=mcphub` explicitly. `.env` is git-ignored.
+
+```bash
+DRAMA_MODEL_CLIENT=mcphub uv run uvicorn drama_agent.api.app:app
+RUN_LIVE=1 uv run pytest -m live                # one real MCPHub call
+```
+
+The client requests JSON-schema structured output in non-strict mode (the models contain
+open maps that strict mode rejects), validates locally, and gives the model one repair turn
+on validation errors. Token usage per stage is recorded in `provenance.token_usage`.
 
 ```bash
 curl -X POST localhost:8000/v1/drama-jobs -H 'content-type: application/json' \
@@ -23,7 +62,7 @@ curl 'localhost:8000/v1/drama-packages/<package_id>?format=markdown'
 ```
 
 By default the service uses `FixtureModelClient`, which returns a built-in sample package,
-so everything runs offline. No real model is wired in yet.
+so everything runs offline.
 
 ## Layout
 
@@ -38,10 +77,12 @@ src/drama_agent/
                           used_by, depends_on are program-owned)
     impact.py        Revision impact analysis and stale-requirement propagation
   validation/      Deterministic hard checks (spec §8) and ID index
-  llm/             Vendor-neutral ModelClient protocol + offline fixture client
+  llm/             Vendor-neutral ModelClient protocol, MCPHub client, offline fixture
+  config.py        .env loading and model client selection
   prompts/         Base orchestrator prompt (verbatim from spec §10)
   store/           Repository protocol + in-memory implementation
-  api/             FastAPI routes (spec §9)
+  api/             FastAPI routes (spec §9) + /v1/meta, job listing
+  web/             Web UI (HTML/CSS/JS, served at /)
   fixtures/        Complete sample package used by the fixture client and tests
 ```
 
@@ -63,7 +104,6 @@ src/drama_agent/
 
 ## Not implemented yet
 
-- A real `ModelClient` (implement `llm/base.py::ModelClient` with structured output).
 - Image/video/script input adapters (transcription, keyframes, coverage ranges).
 - The revision regeneration worker: `POST .../revisions` validates the request, runs the
   impact analysis and records the revision as `queued`, but nothing regenerates content yet.

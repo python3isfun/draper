@@ -22,6 +22,8 @@ class GenerationRequest:
     # Issues from the previous attempt of this stage, for targeted repair.
     feedback: list[Issue] = field(default_factory=list)
     attempt: int = 0
+    # Filled by the client: token counts summed over all HTTP calls for this request.
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 class ModelClient(Protocol):

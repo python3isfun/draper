@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Drama Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">▶</span>
+      <span>Drama Agent</span>
+    </div>
+    <div class="topbar-meta" id="meta">…</div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <form id="new-job" class="card new-job">
+        <h2>New job</h2>
+        <label class="field">
+          <span>Seed</span>
+          <textarea name="text" rows="4" required
+            placeholder="一个即将失去店铺的年轻人，发现前来收租的老人是失踪多年的父亲。"></textarea>
+        </label>
+        <div class="row">
+          <label class="field">
+            <span>Source type</span>
+            <select name="type">
+              <option value="text">One-line idea</option>
+              <option value="script">Existing script</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Language</span>
+            <select name="language">
+              <option value="">Inherit</option>
+              <option value="zh-CN">zh-CN</option>
+              <option value="en-US">en-US</option>
+            </select>
+          </label>
+        </div>
+        <details class="advanced">
+          <summary>Options</summary>
+          <div class="row">
+            <label class="field">
+              <span>Story scope</span>
+              <select name="story_scope">
+                <option value="series_opening">Series opening</option>
+                <option value="complete_short">Complete short</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Reference mode</span>
+              <select name="reference_mode">
+                <option value="inspiration">Inspiration</option>
+                <option value="adaptation">Adaptation</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <label class="field"><span>Genre</span><input name="genre" placeholder="optional"></label>
+            <label class="field"><span>Audience</span><input name="audience" placeholder="optional"></label>
+          </div>
+        </details>
+        <p class="hint">Image and video inputs need asset upload, which the API doesn't support yet.</p>
+        <button type="submit" class="btn primary">Generate 3 episodes</button>
+        <p class="form-error" id="new-job-error" role="alert"></p>
+      </form>
+
+      <section class="jobs">
+        <div class="section-head">
+          <h2>Jobs</h2>
+          <button type="button" class="btn ghost small" id="refresh-jobs">Refresh</button>
+        </div>
+        <ul id="job-list" class="job-list"></ul>
+      </section>
+    </aside>
+
+    <main id="main" class="main"></main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

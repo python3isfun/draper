@@ -13,6 +13,7 @@ class Repository(Protocol):
     def get_source_asset(self, asset_id: str) -> dict[str, Any] | None: ...
     def save_job(self, job: Job) -> None: ...
     def get_job(self, job_id: str) -> Job | None: ...
+    def list_jobs(self, limit: int = 50) -> list[Job]: ...
     def save_package(self, pkg: ProductionPackage, published: bool) -> None: ...
     def get_package(
         self, package_id: str, revision_id: str | None = None
@@ -48,6 +49,10 @@ class InMemoryRepository:
 
     def get_job(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)
+
+    def list_jobs(self, limit: int = 50) -> list[Job]:
+        """Newest first."""
+        return sorted(self.jobs.values(), key=lambda j: j.created_at, reverse=True)[:limit]
 
     def save_package(self, pkg: ProductionPackage, published: bool) -> None:
         revs = self.packages.setdefault(pkg.package_id, {})

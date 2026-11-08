@@ -64,6 +64,8 @@ class Provenance(BaseModel):
     model_versions: dict[str, str] = Field(default_factory=dict)  # stage -> model id
     prompt_versions: dict[str, str] = Field(default_factory=dict)
     cost_usd: float = 0.0
+    # stage -> {"prompt_tokens": n, "completion_tokens": n}, summed over retries.
+    token_usage: dict[str, dict[str, int]] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
 
 

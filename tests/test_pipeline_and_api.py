@@ -76,3 +76,24 @@ def test_api_rejects_invalid_sources():
     assert client.post("/v1/drama-jobs", json={"sources": []}).status_code == 422
     missing_asset = {"sources": [{"type": "image", "asset_id": "nope"}]}
     assert client.post("/v1/drama-jobs", json=missing_asset).status_code == 422
+
+
+def test_web_ui_and_listing_endpoints():
+    client = TestClient(create_app())
+    page = client.get("/")
+    assert page.status_code == 200 and "<title>Drama Agent</title>" in page.text
+    assert client.get("/app.js").status_code == 200
+
+    assert client.get("/v1/meta").json() == {
+        "model_id": "fixture-v1",
+        "client": "FixtureModelClient",
+    }
+    assert client.get("/v1/drama-jobs").json() == []
+
+    body = {"sources": [{"type": "text", "text": SAMPLE_SEED, "use_as": "story_seed"}]}
+    job_id = client.post("/v1/drama-jobs", json=body).json()["job_id"]
+    jobs = client.get("/v1/drama-jobs").json()
+    assert [j["job_id"] for j in jobs] == [job_id]
+    assert jobs[0]["seed"] == SAMPLE_SEED and jobs[0]["status"] == "completed"
+    # API routes are not shadowed by the static mount.
+    assert client.get("/v1/drama-jobs/nope").status_code == 404
