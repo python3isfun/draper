@@ -18,7 +18,9 @@ import socket
 import uuid
 
 from .jobqueue import Claim, JobQueue
-from .pipeline.orchestrator import Orchestrator
+from .models import Job
+from .pipeline.orchestrator import Orchestrator, new_id
+from .pipeline.steps import PipelineCheckpoint
 from .store import Repository
 
 log = logging.getLogger(__name__)
@@ -157,6 +159,43 @@ async def _wait_any(stop: asyncio.Event, wakeup: asyncio.Event | None, timeout: 
             w.cancel()
     if wakeup is not None:
         wakeup.clear()
+
+
+RETRYABLE = ("needs_revision", "failed")
+
+
+def retry_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
+    """Run a finished job again, resuming after the steps its checkpoint says passed.
+
+    The retry saves under a new revision ID: the failed run may already have stored a
+    draft under the checkpoint's ID, and revisions are immutable. Raises KeyError for an
+    unknown job and ValueError if the job can't be retried.
+    """
+    job = repo.get_job(job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job.status not in RETRYABLE:
+        raise ValueError(f"only {' or '.join(RETRYABLE)} jobs can be retried, not {job.status}")
+
+    passed: list[str] = []
+    if raw := queue.load_checkpoint(job_id):
+        cp = PipelineCheckpoint.model_validate_json(raw)
+        cp.revision_id = new_id("rev")
+        queue.save_checkpoint(job_id, cp.model_dump_json())
+        passed = cp.completed_stages
+
+    queue.restart(job_id)  # raises ValueError if somehow still queued/leased
+    for name, stage in job.stages.items():
+        if name not in passed:  # the checkpoint, not the job record, is the source of truth
+            stage.status, stage.attempts, stage.issues, stage.error = "pending", 0, [], None
+    job.status = "queued"
+    job.attempts = 0
+    job.package_id = job.revision_id = None
+    job.failure_reason = (
+        f"retry requested; keeping {', '.join(passed)}" if passed else "retry requested"
+    )
+    repo.save_job(job)
+    return job
 
 
 def recover(repo: Repository, queue: JobQueue) -> int:

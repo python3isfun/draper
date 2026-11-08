@@ -28,7 +28,7 @@ from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
 from ..store import InMemoryRepository, Repository
-from ..worker import JobWorker, recover
+from ..worker import JobWorker, recover, retry_job
 
 log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -141,6 +141,18 @@ def create_app(
         job = repo.get_job(job_id)
         if job is None:
             raise HTTPException(404, "job not found")
+        return job
+
+    @app.post("/v1/drama-jobs/{job_id}/retry", status_code=202, response_model=Job)
+    async def retry(job_id: str) -> Job:
+        """Re-run a needs_revision or failed job from the step that didn't pass."""
+        try:
+            job = retry_job(repo, queue, job_id)
+        except KeyError:
+            raise HTTPException(404, "job not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        wakeup.set()
         return job
 
     @app.get("/v1/drama-packages/{package_id}", response_model=None)

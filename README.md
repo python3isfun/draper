@@ -61,6 +61,10 @@ survive restarts and crashes:
 - **Retries.** A failed job is retried with exponential backoff (5s, 10s, ...) up to
   `DRAMA_JOB_MAX_ATTEMPTS` (default 3). `needs_revision` is a final result and isn't
   retried. While a job waits to retry, its status is `queued` and `failure_reason` says why.
+- **Manual retry.** `POST /v1/drama-jobs/{job_id}/retry` (the **Retry** button in the web
+  UI) re-runs a `needs_revision` or `failed` job from the step that didn't pass, keeping
+  the steps that did. The result is saved as a new revision; the failed draft stays
+  available under its own revision ID.
 - **Graceful shutdown.** Stopping a worker (Ctrl+C / SIGTERM) hands its job back to the
   queue at once without spending an attempt.
 

@@ -88,6 +88,7 @@ async function route() {
   }
   if (state.job?.job_id !== job) {
     state.job = state.pkg = null;
+    state.retryError = "";
     state.revise = null;
     renderMain();
   }
@@ -236,10 +237,21 @@ function renderJobHeader(job) {
       h("a", { class: "btn small", href: `${base}?${q}`, download: `${pkg.package_id}.json` }, "JSON"),
     );
   }
+  if (job.status === "needs_revision" || job.status === "failed") {
+    const from = Object.entries(job.stages).find(([, s]) => s.status !== "passed")?.[0];
+    actions.unshift(
+      h("button", { class: "btn small primary-outline", type: "button", onclick: (e) => retryJob(job.job_id, e.currentTarget),
+        title: "Run again. Steps that already passed are kept and not re-run." },
+        from ? `Retry from ${from}` : "Retry"),
+    );
+  }
 
   const banners = [];
+  if (state.retryError) {
+    banners.push(h("div", { class: "banner bad" }, h("strong", {}, "Couldn't retry. "), state.retryError));
+  }
   if (job.status === "queued" && job.failure_reason) {
-    banners.push(h("div", { class: "banner warn" }, h("strong", {}, "Waiting to retry. "), job.failure_reason));
+    banners.push(h("div", { class: "banner warn" }, h("strong", {}, "Queued. "), job.failure_reason));
   }
   if (job.status === "failed") {
     banners.push(h("div", { class: "banner bad" }, h("strong", {}, "Job failed. "), job.failure_reason || ""));
@@ -276,6 +288,20 @@ function renderJobHeader(job) {
     ),
     banners,
   );
+}
+
+async function retryJob(jobId, button) {
+  button.disabled = true;
+  state.retryError = "";
+  try {
+    await api(`/v1/drama-jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
+    state.pkg = null;  // the retry publishes a new revision; drop the old draft from view
+    await loadJob(jobId);
+  } catch (e) {
+    state.retryError = e.message;
+    button.disabled = false;
+    renderMain();
+  }
 }
 
 const isSampleOutput = (pkg) => Object.values(pkg.provenance?.model_versions || {}).includes("fixture-v1");

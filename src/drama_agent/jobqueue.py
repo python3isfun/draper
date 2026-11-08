@@ -47,6 +47,10 @@ class JobQueue(Protocol):
     def release(self, job_id: str, worker_id: str) -> None:
         """Give the job back without counting the attempt (graceful shutdown)."""
 
+    def restart(self, job_id: str) -> None:
+        """Queue a finished (done/dead) job again with a fresh attempt budget, keeping its
+        checkpoint. Raises ValueError if the job is still queued or running."""
+
     def state(self, job_id: str) -> str | None: ...
     def save_checkpoint(self, job_id: str, data: str) -> None: ...
     def load_checkpoint(self, job_id: str) -> str | None: ...
@@ -126,6 +130,15 @@ class InMemoryJobQueue:
         if e := self._owned(job_id, worker_id):
             e.state, e.lease_owner, e.attempts = "queued", None, max(e.attempts - 1, 0)
             e.available_at = time.time()
+
+    def restart(self, job_id: str) -> None:
+        e = self.entries.get(job_id)
+        if e is None:
+            self.enqueue(job_id)
+            return
+        if e.state in ("queued", "leased"):
+            raise ValueError(f"job {job_id} is still {e.state}")
+        e.state, e.attempts, e.lease_owner, e.available_at = "queued", 0, None, time.time()
 
     def state(self, job_id: str) -> str | None:
         e = self.entries.get(job_id)
@@ -230,6 +243,20 @@ class SqliteJobQueue:
             "attempts = MAX(attempts - 1, 0)",
             (time.time(),),
         )
+
+    def restart(self, job_id: str) -> None:
+        current = self.state(job_id)
+        if current is None:
+            self.enqueue(job_id)
+            return
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE job_queue SET state = 'queued', attempts = 0, lease_owner = NULL, "
+                "available_at = ? WHERE job_id = ? AND state IN ('done', 'dead')",
+                (time.time(), job_id),
+            )
+        if cur.rowcount != 1:
+            raise ValueError(f"job {job_id} is still {current}")
 
     def state(self, job_id: str) -> str | None:
         with self._lock:
