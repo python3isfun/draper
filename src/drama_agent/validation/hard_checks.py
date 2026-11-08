@@ -12,6 +12,7 @@ from collections.abc import Callable
 from ..models import Issue, JobOptions, ProductionPackage
 from ..pipeline.asset_aggregation import required_units_for_shot, shot_reference_unit
 from .index import PackageIndex, lockable_objects
+from .prose import find_prose_leaks
 
 Check = Callable[[ProductionPackage, PackageIndex, JobOptions], list[Issue]]
 
@@ -418,6 +419,44 @@ def check_locks(base: ProductionPackage, new: ProductionPackage) -> list[Issue]:
     return issues
 
 
+def check_entity_keys(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
+    """Maps keyed by character must use real character IDs (and prop IDs as values).
+
+    The live model invented keys such as `_production_notes` and `planning` to store its
+    working notes inside story fields.
+    """
+    issues: list[Issue] = []
+    bible = pkg.story_bible
+
+    def keys(owner: str, label: str, mapping: dict) -> None:
+        for k in mapping:
+            if k not in idx.characters:
+                issues.append(_issue("entity_key", owner, f"{label} key {k!r} is not a character"))
+
+    keys("story_bible", "character_arcs", bible.character_arcs)
+    for c in bible.characters:
+        keys(c.character_id, "relationships", c.relationships)
+
+    def state(owner: str, label: str, st) -> None:
+        keys(owner, f"{label}.knowledge", st.knowledge)
+        keys(owner, f"{label}.possessions", st.possessions)
+        for held in st.possessions.values():
+            for prop in held:
+                if prop not in idx.props:
+                    issues.append(_issue("entity_key", owner, f"{label} holds unknown prop {prop}"))
+
+    for ep in pkg.episodes:
+        state(ep.episode_id, "end_state", ep.end_state)
+        for sc in ep.scenes:
+            state(sc.scene_id, "start_state", sc.start_state)
+            state(sc.scene_id, "end_state", sc.end_state)
+    return issues
+
+
+def check_prose(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
+    return find_prose_leaks(pkg.story_bible, pkg.episodes, pkg.shot_list)
+
+
 ALL_CHECKS: tuple[Check, ...] = (
     check_unique_ids,
     check_episode_structure,
@@ -425,6 +464,8 @@ ALL_CHECKS: tuple[Check, ...] = (
     check_dialogue_schedule,
     check_references,
     check_asset_requirements,
+    check_entity_keys,
+    check_prose,
 )
 
 

@@ -11,7 +11,7 @@ from ..models import Job, ProductionPackage, Revision
 from ..models.package import utcnow
 from ..prompts import load_orchestrator_prompt
 from ..store import Repository
-from .steps import ID_CONVENTIONS, STEPS, PipelineState
+from .steps import OUTPUT_RULES, STEPS, PipelineState
 
 log = logging.getLogger(__name__)
 
@@ -68,9 +68,7 @@ class Orchestrator:
                     stage.attempts = attempt + 1
                     gen = GenerationRequest(
                         stage=step.name,
-                        instructions=(
-                            f"{self.base_prompt}\n\n{step.directive}\n\n{ID_CONVENTIONS}"
-                        ),
+                        instructions=(f"{self.base_prompt}\n\n{step.directive}\n\n{OUTPUT_RULES}"),
                         context=state.context(),
                         feedback=issues,
                         attempt=attempt,

@@ -27,7 +27,12 @@ class FixtureModelClient:
 
     async def generate(self, request: GenerationRequest, output_model: type[T]) -> T:
         # Imported lazily to avoid a cycle: pipeline.steps imports llm types.
-        from ..pipeline.steps import CreativeReviewOutput, ScriptOutput, StoryboardOutput
+        from ..pipeline.steps import (
+            CreativeReviewOutput,
+            OutlineOutput,
+            ScriptOutput,
+            StoryboardOutput,
+        )
 
         self.calls.append(request)
         output: BaseModel
@@ -35,7 +40,7 @@ class FixtureModelClient:
             case "ingest":
                 output = sample.sample_source_brief()
             case "outline":
-                output = sample.sample_story_bible()
+                output = OutlineOutput(story_bible=sample.sample_story_bible())
             case "script":
                 output = ScriptOutput(episodes=sample.sample_episodes())
             case "storyboard":

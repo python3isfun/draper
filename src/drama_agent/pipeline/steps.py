@@ -6,6 +6,7 @@ and the deterministic gate that must pass before the next step runs.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,14 +32,35 @@ from ..models.package import StageName
 from ..prompts import ORCHESTRATOR_PROMPT_VERSION
 from ..validation import PackageIndex
 from ..validation import hard_checks as hc
+from ..validation.prose import entity_names, find_prose_leaks, normalize_prose
 from .asset_aggregation import aggregate_asset_requirements
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Model output types per stage
 
 
+class StageNotes(BaseModel):
+    """The model's own working notes. Without this field the model wrote them into story
+    fields (e.g. a fake `_production_notes` key in an episode's end_state)."""
+
+    assumptions: list[str] = Field(
+        default_factory=list, description="Creative or technical assumptions you made."
+    )
+    open_questions: list[str] = Field(
+        default_factory=list, description="Unresolved questions for the user or later steps."
+    )
+
+
+class OutlineOutput(BaseModel):
+    story_bible: StoryBible
+    notes: StageNotes = Field(default_factory=StageNotes)
+
+
 class ScriptOutput(BaseModel):
     episodes: list[Episode]
+    notes: StageNotes = Field(default_factory=StageNotes)
 
 
 class StoryboardOutput(BaseModel):
@@ -47,10 +69,12 @@ class StoryboardOutput(BaseModel):
     style_brief: StyleBrief
     # Optional richer design text keyed by requirement_id; structure stays program-owned.
     design_overrides: list[AssetRequirement] = Field(default_factory=list)
+    notes: StageNotes = Field(default_factory=StageNotes)
 
 
 class CreativeReviewOutput(BaseModel):
     issues: list[Issue] = Field(default_factory=list)
+    notes: StageNotes = Field(default_factory=StageNotes)
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +99,7 @@ class PipelineCheckpoint(BaseModel):
     qa_report: QAReport = Field(default_factory=QAReport)
     model_versions: dict[str, str] = Field(default_factory=dict)
     token_usage: dict[str, dict[str, int]] = Field(default_factory=dict)
+    notes: dict[str, StageNotes] = Field(default_factory=dict)
 
 
 @dataclass
@@ -91,6 +116,13 @@ class PipelineState:
     qa_report: QAReport = field(default_factory=QAReport)
     model_versions: dict[str, str] = field(default_factory=dict)
     token_usage: dict[str, dict[str, int]] = field(default_factory=dict)
+    notes: dict[str, StageNotes] = field(default_factory=dict)  # stage -> notes
+
+    @property
+    def language(self) -> str:
+        if self.source_brief:
+            return self.source_brief.language
+        return self.request.options.language or "zh-CN"
 
     def draft_package(self) -> ProductionPackage:
         """Assemble whatever exists so far; missing parts become empty placeholders."""
@@ -112,9 +144,14 @@ class PipelineState:
                 request=self.request,
                 model_versions=self.model_versions,
                 token_usage=self.token_usage,
-                prompt_versions={"orchestrator": ORCHESTRATOR_PROMPT_VERSION},
+                prompt_versions={
+                    "orchestrator": ORCHESTRATOR_PROMPT_VERSION,
+                    "output_rules": OUTPUT_RULES_VERSION,
+                },
             ),
             qa_report=self.qa_report,
+            assumptions=[a for n in self.notes.values() for a in n.assumptions],
+            open_questions=[q for n in self.notes.values() for q in n.open_questions],
         )
 
     def to_checkpoint(self, completed_stages: list[str]) -> str:
@@ -131,6 +168,7 @@ class PipelineState:
             qa_report=self.qa_report,
             model_versions=self.model_versions,
             token_usage=self.token_usage,
+            notes=self.notes,
         ).model_dump_json()
 
     @classmethod
@@ -149,6 +187,7 @@ class PipelineState:
             qa_report=cp.qa_report,
             model_versions=cp.model_versions,
             token_usage=cp.token_usage,
+            notes=cp.notes,
         )
         return state, cp.completed_stages
 
@@ -175,6 +214,29 @@ ID_CONVENTIONS = (
     "(e.g. sc_01_02), beats bt_<ep>_<scene>_<n>, dialogue dl_<ep>_<scene>_<n>, shots "
     "sh_<ep>_<scene>_<n>. Times are integer milliseconds."
 )
+
+# Bump when the rules below change; recorded in provenance.prompt_versions.
+OUTPUT_RULES_VERSION = "2"
+
+# Prose rules: the live gpt-6.1-sol run prefixed every action line with "成片[0,10000)ms。",
+# wrote prop IDs into actions, and put its working notes into story fields.
+PROSE_RULES = (
+    "Writing rules. Text that people read (actions, dialogue, sound, synopses, conflicts, "
+    "character and location descriptions, visual_action, narrative_function, continuity) "
+    "must be natural prose in the output language:\n"
+    "- Refer to characters, places and props by their names, never by ID (write 旧全家福, "
+    "not prop_photo). IDs belong only in *_id / *_ids / *_refs fields.\n"
+    "- Never put timecodes or milliseconds in prose (no [0,10000)ms, no 2300ms). Timing "
+    "lives only in integer fields such as target_duration_ms, start_ms, duration_ms and "
+    "dialogue cues; write durations people need as plain words (约两秒的停顿).\n"
+    "- Never mention schema field names (spoken_timing_verified, end_state, ...) in prose.\n"
+    "- Maps keyed by character (relationships, character_arcs, knowledge, possessions) use "
+    "only existing character IDs as keys.\n"
+    "- Put your own assumptions, open questions and checks in the `notes` field, not in "
+    "story fields."
+)
+
+OUTPUT_RULES = f"{ID_CONVENTIONS}\n\n{PROSE_RULES}"
 
 
 class Step:
@@ -214,14 +276,16 @@ class IngestStep(Step):
 
 class OutlineStep(Step):
     name = "outline"
-    output_model = StoryBible
+    output_model = OutlineOutput
     directive = (
         "Current step: design the story bible and a beat outline for all three episodes. "
         "Fix protagonist goal, opposing goal, obstacle, cost and causal progression first."
     )
 
-    def apply(self, state: PipelineState, output: StoryBible) -> None:
-        state.story_bible = output
+    def apply(self, state: PipelineState, output: OutlineOutput) -> None:
+        state.story_bible = output.story_bible
+        state.notes[self.name] = output.notes
+        _normalize(state, self.name, state.story_bible)
 
     def check(self, state: PipelineState) -> list[Issue]:
         bible = state.story_bible
@@ -236,6 +300,10 @@ class OutlineStep(Step):
             issues.append(
                 Issue(check="future_direction", object_id="story_bible", evidence="missing")
             )
+        pkg = state.draft_package()
+        idx = PackageIndex.build(pkg)
+        issues += hc.check_entity_keys(pkg, idx, state.request.options)
+        issues += find_prose_leaks(bible)
         return issues
 
 
@@ -244,11 +312,15 @@ class ScriptStep(Step):
     output_model = ScriptOutput
     directive = (
         "Current step: write all three episodes. Every scene must change the situation; later "
-        "episodes read the previous episode's end_state. Give every line a stable dialogue_id."
+        "episodes read the previous episode's end_state. Give every line a stable dialogue_id. "
+        "Scene length goes only in target_duration_ms: do not annotate beats with time "
+        "ranges; shot timing is planned in the storyboard step."
     )
 
     def apply(self, state: PipelineState, output: ScriptOutput) -> None:
         state.episodes = output.episodes
+        state.notes[self.name] = output.notes
+        _normalize(state, self.name, state.episodes)
 
     def check(self, state: PipelineState) -> list[Issue]:
         pkg = state.draft_package()
@@ -258,6 +330,8 @@ class ScriptStep(Step):
             hc.check_unique_ids(pkg, idx, opts)
             + hc.check_episode_structure(pkg, idx, opts)
             + hc.check_references(pkg, idx, opts)
+            + hc.check_entity_keys(pkg, idx, opts)
+            + find_prose_leaks(pkg.episodes)
         )
 
 
@@ -267,12 +341,16 @@ class StoryboardStep(Step):
     directive = (
         "Current step: break scripts into a text shot list and episode-level dialogue "
         "schedule. Each episode timeline must total exactly the episode duration. Shots must "
-        "not add plot. Mark needs_shot_reference only where a composition image is necessary."
+        "not add plot. Mark needs_shot_reference only where a composition image is necessary. "
+        "Timing goes only in start_ms, duration_ms and dialogue cues; sound and action "
+        "descriptions are prose."
     )
 
     def apply(self, state: PipelineState, output: StoryboardOutput) -> None:
         assert state.story_bible is not None
         state.shots = output.shots
+        state.notes[self.name] = output.notes
+        _normalize(state, self.name, state.shots)
         state.timing = output.timing
         state.asset_requirements = aggregate_asset_requirements(
             state.story_bible,
@@ -301,10 +379,19 @@ class ReviewStep(Step):
         # Hard checks already passed at the storyboard gate and review does not modify the
         # package, so they are not re-run here.
         state.qa_report = QAReport(hard_issues=[], creative_issues=output.issues)
+        state.notes[self.name] = output.notes
 
     def check(self, state: PipelineState) -> list[Issue]:
         # Creative issues are advisory (spec section 8): reported to the user, never a gate.
         return []
+
+
+def _normalize(state: PipelineState, stage: str, obj: object) -> None:
+    """Deterministically fix ID/timecode leaks in prose; anything left is a hard issue."""
+    names = entity_names(state.story_bible) if state.story_bible else {}
+    changed = normalize_prose(obj, names, state.language)
+    if changed:
+        log.info("%s: normalized %d prose fields", stage, changed)
 
 
 STEPS: tuple[Step, ...] = (
