@@ -193,6 +193,16 @@ class SqliteRepository:
             ).fetchall()
         return [Job.model_validate_json(r[0]) for r in rows]
 
+    def jobs_for_package(self, package_id: str) -> list[Job]:
+        """Jobs that made this package, newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM jobs WHERE json_extract(data, '$.package_id') = ? "
+                "ORDER BY created_at DESC",
+                (package_id,),
+            ).fetchall()
+        return [Job.model_validate_json(r[0]) for r in rows]
+
     def list_archive_candidates(self) -> list[Job]:
         """Jobs not archived whose language isn't en-US (see archive.py)."""
         with self._lock:

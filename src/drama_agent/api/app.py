@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from ..archive import archive_non_english
 from ..config import (
@@ -23,6 +27,7 @@ from ..config import (
     repo_from_env,
     worker_settings,
 )
+from ..export import build_export
 from ..image_prompts import ImagePromptWriter
 from ..imagegen import FixtureImageClient, ImageClient
 from ..images import (
@@ -122,6 +127,25 @@ class ImagesView(BaseModel):
     running: int
     done: int
     failed: int
+
+
+EXPORT_DIR = Path(tempfile.gettempdir()) / "drama-exports"
+EXPORT_MAX_AGE_S = 3600
+
+
+def _new_export_file() -> Path:
+    """A fresh temp file for an export zip. Zips are deleted after they are sent; one left
+    behind by a cancelled download (the cleanup task doesn't run then) is swept here once
+    it is an hour old."""
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - EXPORT_MAX_AGE_S
+    for old in EXPORT_DIR.glob("drama-export-*.zip"):
+        with contextlib.suppress(OSError):
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+    fd, path = tempfile.mkstemp(prefix="drama-export-", suffix=".zip", dir=EXPORT_DIR)
+    os.close(fd)  # build_export reopens it by path
+    return Path(path)
 
 
 def _seed_label(job: Job, assets: dict[str, dict]) -> str:
@@ -267,14 +291,20 @@ def create_app(
         image_wakeup.set()
         return _images_view(pkg)
 
-    def _package_job(package_id: str, job_id: str | None) -> Job | None:
+    def _package_job(
+        package_id: str, job_id: str | None, revision_id: str | None = None
+    ) -> Job | None:
         """The job that made a package; refuses archived stories."""
         if job_id is not None:
             job = repo.get_job(job_id)
             if job is None or job.package_id != package_id:
                 raise HTTPException(422, f"job {job_id} did not make package {package_id}")
         else:
-            job = next((j for j in repo.list_jobs(1000) if j.package_id == package_id), None)
+            # Prefer the job that made this exact revision, else the newest for the package.
+            jobs = repo.jobs_for_package(package_id)
+            job = next((j for j in jobs if j.revision_id == revision_id), None) or next(
+                iter(jobs), None
+            )
         if job is not None and job.archived:
             raise HTTPException(409, "this story is archived")
         return job
@@ -514,6 +544,33 @@ def create_app(
             # copied) instead of downloading it.
             return PlainTextResponse(render_markdown(pkg), media_type="text/plain")
         return pkg
+
+    @app.get("/v1/drama-packages/{package_id}/export", response_class=FileResponse)
+    async def export_package(
+        package_id: str, revision_id: str | None = None, job_id: str | None = None
+    ) -> FileResponse:
+        """Everything a production team needs, as one zip: story bible, scripts, storyboard
+        and shot list (CSV), cast/set/prop sheets, asset requirements with the generated
+        reference images, QA report, sources and the full package JSON."""
+        pkg = _package_or_404(package_id, revision_id)
+        job = _package_job(pkg.package_id, job_id, pkg.revision_id)
+        images = repo.list_images(pkg.package_id, pkg.revision_id)
+        ids = [s.asset_id for s in job.request.sources if s.asset_id] if job else []
+        assets = {k: SourceAsset.model_validate(v) for k, v in repo.get_source_assets(ids).items()}
+        tmp = _new_export_file()
+        try:
+            name = await asyncio.to_thread(
+                build_export, pkg, tmp, job=job, images=images, assets=assets, media=media
+            )
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return FileResponse(
+            tmp,
+            media_type="application/zip",
+            filename=name,
+            background=BackgroundTask(tmp.unlink, missing_ok=True),
+        )
 
     @app.get("/v1/drama-packages/{package_id}/{sheet}", response_model=None)
     async def get_sheet(

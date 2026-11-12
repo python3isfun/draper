@@ -205,6 +205,26 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
 The image route needs an MCPHub key from a `newsbreak.com` account; it is sent as
 `X-API-Key`.
 
+### Production hand-off zip
+
+**Download zip** on a job page (or `GET /v1/drama-packages/{id}/export?job_id=…`) gives the
+team one file to produce and shoot from. Inside a folder named after the title and revision:
+
+| Folder | Contents |
+| --- | --- |
+| `00_README.md` | Title, logline, counts, hard-check status, and a guide to the folders |
+| `01_story/` | Story bible: synopsis, characters (goals, relationships, arcs), locations, props, episode outline |
+| `02_script/` | One screenplay-style script per episode (scene headings, action, CHARACTER cues, V.O.) + JSON |
+| `03_storyboard/` | `shot_list.csv` (one row per shot: timing, framing, camera, who and what is on screen, dialogue with times, sound, continuity, asset IDs), `storyboard.md`, `dialogue_schedule.csv`, JSON |
+| `04_design/` | Cast, set and prop sheets (Markdown + JSON) |
+| `05_assets/` | Asset requirements (CSV + JSON) and the newest finished reference image per deliverable, with `index.csv` (prompt, seed, size, model) |
+| `06_qa/` | Hard checks and creative review |
+| `07_sources/` | The idea text and uploaded photos/videos with their prompts |
+| `package.json` | The whole package |
+
+Everything uses names, not IDs, where people read it. CSVs are UTF-8 with a BOM so Excel
+and Google Sheets open them correctly. Archived stories can't be exported.
+
 ### Storage
 
 The server stores everything in SQLite by default, at `data/drama.db` relative to the

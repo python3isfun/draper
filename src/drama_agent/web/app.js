@@ -444,7 +444,10 @@ function renderJobHeader(job) {
   if (pkg) {
     const q = new URLSearchParams({ revision_id: pkg.revision_id });
     const base = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}`;
+    const zipQ = new URLSearchParams({ revision_id: pkg.revision_id, job_id: job.job_id });
     actions.push(
+      h("a", { class: "btn small primary-outline", href: `${base}/export?${zipQ}`,
+        title: "Production hand-off: story bible, scripts, storyboard and shot list (CSV), cast/set/prop sheets, asset requirements with reference images, QA report and sources, in one zip" }, "Download zip"),
       h("a", { class: "btn small", href: `${base}?${q}&format=markdown`, target: "_blank", rel: "noopener" }, "Markdown"),
       h("a", { class: "btn small", href: `${base}?${q}`, download: `${pkg.package_id}.json` }, "JSON"),
     );

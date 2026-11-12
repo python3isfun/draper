@@ -18,6 +18,7 @@ class Repository(Protocol):
     def get_job(self, job_id: str) -> Job | None: ...
     def list_jobs(self, limit: int = 50, include_archived: bool = True) -> list[Job]: ...
     def list_archive_candidates(self) -> list[Job]: ...
+    def jobs_for_package(self, package_id: str) -> list[Job]: ...
     def list_active_jobs(self) -> list[Job]: ...
     def save_package(self, pkg: ProductionPackage, published: bool) -> None: ...
     def get_package(
@@ -80,6 +81,11 @@ class InMemoryRepository:
         """Newest first."""
         jobs = [j for j in self.jobs.values() if include_archived or not j.archived]
         return sorted(jobs, key=lambda j: j.created_at, reverse=True)[:limit]
+
+    def jobs_for_package(self, package_id: str) -> list[Job]:
+        """Jobs that made this package, newest first."""
+        jobs = [j for j in self.jobs.values() if j.package_id == package_id]
+        return sorted(jobs, key=lambda j: j.created_at, reverse=True)
 
     def list_archive_candidates(self) -> list[Job]:
         """Jobs not archived whose language isn't en-US (see archive.py)."""
