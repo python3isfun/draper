@@ -389,14 +389,24 @@ function selectingIn(el) {
 }
 
 // Background updates wait until the selection is released; user actions render at once.
+function typingIn(el) {
+  const a = document.activeElement;
+  return a && el.contains(a) && (a.tagName === "INPUT" || a.tagName === "TEXTAREA") && a.type !== "checkbox";
+}
+
 function renderWhenNotSelecting() {
-  if (selectingIn($("#main"))) {
+  if (selectingIn($("#main")) || typingIn($("#main"))) {
     state.renderPending = true;
     return;
   }
   state.renderPending = false;
   renderMain();
 }
+
+// A redraw postponed while typing runs once the field loses focus.
+document.addEventListener("focusout", () => setTimeout(() => {
+  if (state.renderPending && !typingIn($("#main")) && !selectingIn($("#main"))) renderWhenNotSelecting();
+}, 0));
 
 document.addEventListener("selectionchange", () => {
   if (state.renderPending && !selectingIn($("#main"))) renderWhenNotSelecting();
@@ -1016,17 +1026,19 @@ async function loadImages(pkg) {
   } finally {
     im.loading = false;
   }
-  const busy = im.view && (im.view.pending || im.view.running);
+  const busy = im.view && im.view.queued > 0;
   if (busy && state.tab === "assets" && state.pkg && imagesKey(state.pkg) === key) {
     im.timer = setTimeout(() => loadImages(state.pkg), 2000);
   }
 }
 
-async function imageAction(url, button) {
-  button.disabled = true;
+async function imageAction(url, button, body) {
+  if (button) button.disabled = true;
   state.images.error = "";
   try {
-    await api(url, { method: "POST" });
+    const out = await api(url, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) });
+    // Develop/Explore notes (e.g. "pick an image for X first") stay until the next run.
+    if (out && Array.isArray(out.notes)) state.images.notes = out.notes;
   } catch (e) {
     state.images.error = e.message;
   }
@@ -1034,74 +1046,206 @@ async function imageAction(url, button) {
   renderMain();
 }
 
-function renderImagesPanel(pkg) {
-  const im = state.images;
-  const stale = im.key === imagesKey(pkg) && im.view && (im.view.pending || im.view.running) && !im.timer && !im.loading;
-  if (im.key !== imagesKey(pkg) || stale) loadImages(pkg);  // first load, or resume polling
-  const v = im.key === imagesKey(pkg) ? im.view : null;
-  const wanted = pkg.asset_requirements.items.filter((r) => IMAGE_TYPES.has(r.asset_type))
-    .reduce((n, r) => n + r.deliverables.filter((d) => d.required).length, 0);
-  const busy = v && (v.pending || v.running);
-  const have = v ? v.pending + v.running + v.done : 0;
-  const missing = v ? wanted - have : wanted;
+// Design board: takes x draws per anchor (faces, first location/prop states), pick one,
+// then develop looks and other states from the picks. ------------------------------------
+
+const DRAFT_S = 3, FULL_S = 10, WRITER_S = 60;  // rough seconds per image / per writer call
+const design = { takes: 4, draws: 3, draft: true, scope: { cast: true, sets: true, props: true }, devDraws: 3, directions: {}, edits: {} };
+const SCOPE_OF = { character_identity: "cast", character_look: "cast", location: "sets", prop: "props" };
+const keyOf = (x) => `${x.requirement_id}|${x.deliverable_id}`;
+const thumbUrl = (img, v = "thumb") => `/v1/generated-images/${encodeURIComponent(img.image_id)}/${v}`;
+
+function chosenImage(images, key) {
+  const done = images.filter((i) => keyOf(i) === key && i.status === "done");
+  const sel = done.filter((i) => i.selected);
+  const pool = sel.length ? sel : done;
+  return pool.sort((a, b) => b.created_at.localeCompare(a.created_at))[0] || null;
+}
+
+function numberSelect(value, max, onchange, label) {
+  return h("select", { "aria-label": label, onchange: (e) => onchange(Number(e.target.value)) },
+    Array.from({ length: max }, (_, i) => i + 1).map((n) => h("option", { value: n, selected: n === value }, String(n))));
+}
+
+function renderDesignControls(pkg, v) {
   const base = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/images`;
-  const draft = h("input", { type: "checkbox", id: "img-draft" });
-  const start = (e) => {
-    const q = new URLSearchParams({ revision_id: pkg.revision_id, draft: String(draft.checked), job_id: state.job.job_id });
-    imageAction(`${base}?${q}`, e.currentTarget);
-  };
-  let label = "Generate images";
-  if (v && v.done + v.pending + v.running > 0) label = `Generate missing (${missing})`;
-  const progress = !v ? (im.error ? "Couldn't load images." : "Loading…")
-    : [`${v.done} of ${wanted} done`, v.running && "1 generating", v.pending && `${v.pending} waiting`,
-       v.failed && `${v.failed} failed`].filter(Boolean).join(" · ");
-  return h("section", { class: "card images-panel" },
-    h("div", {},
-      h("h3", {}, "Reference images"),
-      h("p", { class: "muted small" },
-        `Characters, looks, locations and props, made with ${v?.image_model || "the image model"} one at a time `
-        + "(~10 s each at full size). Looks reuse the character's face so the same person appears in every look."),
-      h("p", { class: "small" }, progress),
-      im.error && h("p", { class: "form-error" }, im.error),
-      !v && im.error && h("button", { type: "button", class: "btn small", onclick: () => { im.error = ""; loadImages(pkg); renderMain(); } }, "Retry"),
+  const ids = { revision_id: pkg.revision_id, job_id: state.job.job_id };
+  const anchors = v ? v.slots.filter((s) => s.anchor && design.scope[SCOPE_OF[s.asset_type]]) : [];
+  const n = anchors.length * design.takes * design.draws;
+  const mins = Math.max(1, Math.round((n * (design.draft ? DRAFT_S : FULL_S) + WRITER_S) / 60));
+  const selectedAnchors = v ? v.slots.filter((s) => s.anchor && v.images.some((i) => keyOf(i) === keyOf(s) && i.selected)).length : 0;
+  const busy = v && v.queued > 0;
+  const check = (name, label) => h("label", { class: "check small" },
+    h("input", { type: "checkbox", checked: design.scope[name], onchange: (e) => { design.scope[name] = e.target.checked; renderMain(); } }), ` ${label}`);
+  return h("section", { class: "card design-controls" },
+    h("h3", {}, "Casting & design"),
+    h("p", { class: "muted small" }, "1. Explore several takes of every face, set and prop, with a few draws each. 2. Pick one image per item (a draft pick is re-rendered at full size). 3. Develop looks, other states and plan views from your picks."),
+    h("div", { class: "design-row" },
+      h("strong", { class: "small" }, "Explore"),
+      h("span", { class: "small muted" }, "takes"), numberSelect(design.takes, 6, (x) => { design.takes = x; renderMain(); }, "Takes per item"),
+      h("span", { class: "small muted" }, "draws"), numberSelect(design.draws, 6, (x) => { design.draws = x; renderMain(); }, "Draws per take"),
+      h("select", { "aria-label": "Size", onchange: (e) => { design.draft = e.target.value === "draft"; renderMain(); } },
+        h("option", { value: "draft", selected: design.draft }, "Draft (fast)"), h("option", { value: "full", selected: !design.draft }, "Full size")),
+      check("cast", "Cast"), check("sets", "Sets"), check("props", "Props"),
+      h("span", { class: "small muted" }, n ? `${n} images, about ${mins} min` : "nothing in scope"),
+      h("button", { type: "button", class: "btn small primary-outline", disabled: !n,
+        onclick: (e) => imageAction(`${base}/explore`, e.currentTarget, { ...ids, takes: design.takes, draws: design.draws, draft: design.draft, scope: Object.keys(design.scope).filter((k) => design.scope[k]) }) }, "Explore"),
     ),
-    h("div", { class: "job-actions" },
-      h("label", { class: "small muted check", for: "img-draft", title: "About 1024 px instead of ~16 MP: much faster, rougher" }, draft, " Draft size"),
-      busy ? h("button", { type: "button", class: "btn small", disabled: true }, "Generating…")
-        : h("button", { type: "button", class: "btn small primary-outline", disabled: missing <= 0, onclick: start }, missing > 0 ? label : "All generated"),
+    h("div", { class: "design-row" },
+      h("strong", { class: "small" }, "Develop"),
+      h("span", { class: "small muted" }, "draws"), numberSelect(design.devDraws, 6, (x) => { design.devDraws = x; renderMain(); }, "Draws per look or state"),
+      h("span", { class: "small muted" }, `${selectedAnchors} of ${v ? v.slots.filter((s) => s.anchor).length : 0} anchors picked`),
+      h("button", { type: "button", class: "btn small", disabled: !selectedAnchors,
+        onclick: (e) => imageAction(`${base}/develop`, e.currentTarget, { ...ids, draws: design.devDraws, draft: design.draft }) }, "Develop looks & states"),
     ),
+    h("p", { class: "small" }, !v ? (state.images.error ? "Couldn't load images." : "Loading…") : busy ? `${v.queued} images in the queue…` : "Idle."),
+    (state.images.notes || []).length > 0 && h("ul", { class: "small" }, state.images.notes.map((t) => h("li", {}, t))),
+    state.images.error && h("p", { class: "form-error" }, state.images.error),
+    !v && state.images.error && h("button", { type: "button", class: "btn small", onclick: () => { state.images.error = ""; loadImages(pkg); renderMain(); } }, "Retry"),
   );
 }
 
+function renderDraw(img) {
+  const status = { pending: "waiting", running: img.prompt_source === "pending" ? "writing…" : "generating…", failed: "failed" }[img.status];
+  const selected = img.selected;  // only an explicit pick gets the check mark
+  const label = `Draw ${img.draw}${img.finalizes ? " · full size" : ""}`;
+  return h("figure", { class: `draw ${img.status}${selected ? " selected" : ""}` },
+    img.status === "done"
+      ? h("button", { type: "button", class: "draw-pick", title: selected ? "Selected" : "Select this image",
+          onclick: (e) => imageAction(`/v1/generated-images/${encodeURIComponent(img.image_id)}/select`, e.currentTarget) },
+          h("img", { src: thumbUrl(img), alt: label, loading: "lazy" }))
+      : h("div", { class: "draw-placeholder", title: img.error || "" }, status,
+          img.status === "failed" && h("button", { type: "button", class: "btn ghost small", title: img.error || "Try this draw again (same prompt and seed)",
+            onclick: (e) => imageAction(`/v1/generated-images/${encodeURIComponent(img.image_id)}/retry`, e.currentTarget) }, "Retry")),
+    h("figcaption", {}, label, selected ? " ✓" : "",
+      img.status === "done" && h("a", { href: thumbUrl(img, "content"), target: "_blank", rel: "noopener", class: "muted" }, " open")),
+  );
+}
+
+function renderTakeRows(v, slot) {
+  const key = keyOf(slot);
+  const opts = v.options.filter((o) => keyOf(o) === key).sort((a, b) => a.index - b.index);
+  if (!opts.length) return [h("p", { class: "muted small" }, slot.anchor ? "No takes yet: use Explore." : "Not developed yet.")];
+  return opts.map((o) => {
+    const draws = v.images.filter((i) => i.option_id === o.option_id).sort((a, b) => a.draw - b.draw || (a.finalizes ? 1 : -1));
+    return h("div", { class: "take" },
+      h("div", { class: "take-head" },
+        h("strong", {}, o.status === "pending" ? `Take ${o.index}: being written…`
+          : o.label && o.label !== `Take ${o.index}` ? `Take ${o.index}: ${o.label}` : `Take ${o.index}`),
+        o.direction && h("span", { class: "chip" }, `“${o.direction}”`),
+        o.status === "edited" && h("span", { class: "chip" }, "your prompt"),
+        h("button", { type: "button", class: "btn ghost small",
+          onclick: (e) => imageAction(`/v1/image-options/${encodeURIComponent(o.option_id)}/draws`, e.currentTarget, { draws: design.draws }) }, "+ draws"),
+      ),
+      o.profile && h("p", { class: "small muted take-profile" }, o.profile),
+      h("div", { class: "draws" }, draws.map((img) => renderDraw(img))),
+      o.status !== "pending" && renderPromptEditor(v, o, draws),
+    );
+  });
+}
+
+const PROMPT_SOURCE = (o) => ({ written: `written by ${o.prompt_model || "the text model"}`, edited: "edited by you" }[o.status] || "built-in template");
+
+// A take's prompt, editable: "Draw edited take" makes a new take with this wording, drawn
+// with the same seeds as this take's draws, so the images differ only by the change.
+function renderPromptEditor(v, o, draws) {
+  const id = o.option_id;
+  const box = h("textarea", { class: "prompt-edit", rows: 8, spellcheck: "false",
+    oninput: (e) => { design.edits[id] = e.target.value; sync(); } });
+  box.value = design.edits[id] ?? o.prompt;
+  const n = draws.filter((i) => !i.finalizes).length || design.draws;
+  const drawBtn = h("button", { type: "button", class: "btn small", onclick: (e) => {
+    const prompt = box.value;
+    imageAction(`/v1/image-options/${encodeURIComponent(id)}/edit`, e.currentTarget, { prompt, draws: Math.min(6, n) })
+      .then(() => { if (!state.images.error) delete design.edits[id]; renderMain(); });
+  } }, `Draw edited take (${Math.min(6, n)})`);
+  const resetBtn = h("button", { type: "button", class: "btn ghost small",
+    onclick: () => { delete design.edits[id]; box.value = o.prompt; sync(); } }, "Reset");
+  const counter = h("span", { class: "muted small" });
+  function sync() {
+    const changed = box.value.trim() !== o.prompt.trim();
+    drawBtn.disabled = !changed || !box.value.trim();
+    resetBtn.disabled = !changed;
+    counter.textContent = `${box.value.length.toLocaleString()} characters${changed ? " · edited" : ""}`;
+  }
+  sync();
+  const source = o.edited_from && v.options.find((x) => x.option_id === o.edited_from);
+  return stickyDetails(`prompt:${id}`, `Prompt (${PROMPT_SOURCE(o)}${source ? `, from take ${source.index}` : ""})`,
+    o.warnings && o.warnings.length > 0 && h("p", { class: "small warn-text" }, `Doesn't follow the H3 rules: ${o.warnings.join("; ")}.`),
+    box,
+    h("div", { class: "prompt-edit-actions" }, drawBtn, resetBtn, counter),
+    h("p", { class: "muted small" }, "Drawing an edit adds a new take with the same seeds as this one, so you can compare the images draw for draw."));
+}
+
+function renderNewTake(pkg, slot) {
+  const key = keyOf(slot);
+  const input = h("input", { type: "text", placeholder: slot.asset_type === "character_identity" ? "Direction for a new take, e.g. older, kinder eyes" : "Direction for a new take (optional)",
+    oninput: (e) => { design.directions[key] = e.target.value; } });
+  input.value = design.directions[key] || "";
+  const base = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/images/takes`;
+  return h("div", { class: "new-take" }, input,
+    h("button", { type: "button", class: "btn small", onclick: (e) => {
+      const direction = (design.directions[key] || "").trim();
+      imageAction(base, e.currentTarget, { requirement_id: slot.requirement_id, deliverable_id: slot.deliverable_id, direction: direction || null, draws: design.draws, draft: design.draft, revision_id: pkg.revision_id, job_id: state.job.job_id })
+        .then(() => { if (!state.images.error) { design.directions[key] = ""; renderMain(); } });  // keep it if the request failed
+    } }, "New take"));
+}
+
+function renderDesignBoard(pkg) {
+  const im = state.images;
+  if (im.key !== imagesKey(pkg)) loadImages(pkg);
+  const v = im.key === imagesKey(pkg) ? im.view : null;
+  const stale = v && v.queued && !im.timer && !im.loading;
+  if (stale) loadImages(pkg);  // resume polling after coming back to the tab
+  const pickedKeys = new Set(!v ? [] : v.images.filter((i) => i.selected && i.status === "done").map(keyOf));
+  const titleOf = (k) => { const x = v.slots.find((s) => keyOf(s) === k); return x ? `${x.entity}${x.variant ? ` (${x.variant})` : ""}, ${x.view}` : k; };
+  const renderDependent = (d) => {
+    const parent = d.parent_key && `${d.parent_key[0]}|${d.parent_key[1]}`;
+    const blocked = parent && !pickedKeys.has(parent);
+    return h("div", { class: "dependent" },
+      h("div", { class: "small" }, h("strong", {}, d.variant || d.view), h("span", { class: "muted" }, ` · ${d.view}`)),
+      renderTakeRows(v, d),
+      blocked ? h("p", { class: "muted small" }, `Drawn from ${titleOf(parent)}: pick an image for it first.`) : renderNewTake(pkg, d));
+  };
+  // Items with no anchor to be drawn from (e.g. a look of a character with no face image).
+  const others = !v ? [] : v.slots.filter((s) => !s.anchor && !s.anchor_key);
+  const otherCard = others.length > 0 && h("section", { class: "card design-card" },
+    h("div", { class: "design-card-head" }, h("h3", {}, "Other items")),
+    others.map((d) => h("div", { class: "dependent" },
+      h("div", { class: "small" }, h("strong", {}, d.entity), h("span", { class: "muted" }, ` · ${d.variant ? `${d.variant}, ` : ""}${d.view}`)),
+      renderTakeRows(v, d), renderNewTake(pkg, d))));
+  const cards = !v ? [] : v.slots.filter((s) => s.anchor).map((anchor) => {
+    const chosen = chosenImage(v.images, keyOf(anchor));
+    const opt = chosen && v.options.find((o) => o.option_id === chosen.option_id);
+    const deps = v.slots.filter((s) => s.anchor_key && `${s.anchor_key[0]}|${s.anchor_key[1]}` === keyOf(anchor));
+    return h("section", { class: "card design-card" },
+      h("div", { class: "design-card-head" },
+        h("h3", {}, anchor.entity, h("span", { class: "muted small" }, ` · ${anchor.variant ? `${anchor.variant}, ` : ""}${anchor.view}`)),
+        chosen && chosen.selected
+          ? h("span", { class: "chip ok" }, opt ? `Selected: take ${opt.index}, draw ${chosen.draw}` : "Selected")
+          : h("span", { class: "chip warn" }, "Pick one"),
+      ),
+      renderTakeRows(v, anchor),
+      renderNewTake(pkg, anchor),
+      deps.length > 0 && h("div", { class: "dependents" },
+        h("h4", {}, "Drawn from the pick"),
+        deps.map(renderDependent)),
+    );
+  });
+  return h("div", {}, renderDesignControls(pkg, v), cards, otherCard);
+}
+
 function renderReqImages(r) {
+  // On a requirement card: the chosen image of each deliverable (selected, else newest).
   const v = state.images.view;
   if (!v || !IMAGE_TYPES.has(r.asset_type)) return null;
-  const mine = v.images.filter((i) => i.requirement_id === r.requirement_id);
-  if (!mine.length) return null;
-  const latest = {};
-  for (const i of mine) if (!latest[i.deliverable_id] || i.version > latest[i.deliverable_id].version) latest[i.deliverable_id] = i;
-  return h("div", { class: "req-images" }, r.deliverables.filter((d) => latest[d.deliverable_id]).map((d) => {
-    const img = latest[d.deliverable_id];
-    const url = (variant) => `/v1/generated-images/${encodeURIComponent(img.image_id)}/${variant}`;
-    const status = img.status === "running" && img.prompt_source === "pending" ? "writing prompt…"
-      : { pending: "waiting", running: "generating…", failed: "failed", done: null }[img.status];
-    const by = { model: `written by ${img.prompt_model || "the text model"}`, template: "built-in template",
-      pending: "draft; rewritten before generating" }[img.prompt_source];
-    return h("figure", { class: `req-image ${img.status}` },
-      img.status === "done"
-        ? h("a", { href: url("content"), target: "_blank", rel: "noopener", title: "Open full size" },
-            h("img", { src: url("thumb"), alt: `${r.requirement_id} ${d.view}`, loading: "lazy" }))
-        : h("div", { class: "req-image-placeholder" }, status),
-      h("figcaption", {},
-        h("span", {}, d.view, img.version > 1 ? ` · v${img.version}` : ""),
-        img.status === "done" || img.status === "failed"
-          ? h("button", { type: "button", class: "btn ghost small", title: "New version with a new seed",
-              onclick: (e) => imageAction(`/v1/generated-images/${encodeURIComponent(img.image_id)}/regenerate`, e.currentTarget) }, "Regenerate")
-          : null),
-      img.error && h("p", { class: `small ${img.status === "failed" ? "form-error" : "muted"}` }, img.error),
-      h("details", { class: "small" }, h("summary", {}, `Prompt (${by})`), h("pre", { class: "call-body" }, img.prompt)),
-    );
-  }));
+  const shown = r.deliverables.map((d) => [d, chosenImage(v.images, `${r.requirement_id}|${d.deliverable_id}`)]).filter(([, img]) => img);
+  if (!shown.length) return null;
+  return h("div", { class: "req-images" }, shown.map(([d, img]) =>
+    h("figure", { class: "req-image done" },
+      h("a", { href: thumbUrl(img, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
+        h("img", { src: thumbUrl(img), alt: `${r.requirement_id} ${d.view}`, loading: "lazy" })),
+      h("figcaption", {}, h("span", {}, d.view, img.selected ? " · selected" : "")))));
 }
 
 function renderAssets(pkg) {
@@ -1110,7 +1254,7 @@ function renderAssets(pkg) {
   const count = (t) => ar.items.filter((r) => r.asset_type === t).length;
   const sb = ar.style_brief;
   return h("div", {},
-    renderImagesPanel(pkg),
+    renderDesignBoard(pkg),
     h("section", { class: "card", style: "margin-top:12px" },
       h("h3", {}, "Style brief"),
       h("dl", { class: "kv", style: "margin-top:8px" },

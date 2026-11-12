@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
-from ..models.images import GeneratedImage
+from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 
 
@@ -41,6 +41,13 @@ class Repository(Protocol):
         self, package_id: str, revision_id: str | None = None
     ) -> list[GeneratedImage]: ...
     def claim_next_image(self) -> GeneratedImage | None: ...
+    def set_selected(self, image_id: str) -> bool: ...
+    def move_selection(self, from_id: str, to_id: str) -> bool: ...
+    def save_option(self, option: DesignOption) -> None: ...
+    def get_option(self, option_id: str) -> DesignOption | None: ...
+    def list_options(
+        self, package_id: str, revision_id: str | None = None
+    ) -> list[DesignOption]: ...
     def requeue_running_images(self, older_than_s: float = 0.0) -> int: ...
 
 
@@ -61,6 +68,7 @@ class InMemoryRepository:
         self.events: list[TraceEvent] = []
         self.llm_calls: dict[str, LLMCall] = {}
         self.images: dict[str, GeneratedImage] = {}
+        self.options: dict[str, DesignOption] = {}
 
     def save_source_asset(self, asset_id: str, meta: dict[str, Any]) -> None:
         self.source_assets[asset_id] = meta
@@ -166,6 +174,44 @@ class InMemoryRepository:
             i.model_copy(deep=True)
             for i in sorted(self.images.values(), key=lambda i: (i.created_at, i.image_id))
             if i.package_id == package_id and revision_id in (None, i.revision_id)
+        ]
+
+    def set_selected(self, image_id: str) -> bool:
+        """Pick this image for its deliverable and unpick the others."""
+        return self._select(image_id, None)
+
+    def move_selection(self, from_id: str, to_id: str) -> bool:
+        """Move the pick from `from_id` to `to_id` only if `from_id` is still the pick."""
+        return self._select(to_id, from_id)
+
+    def _select(self, image_id: str, only_if: str | None) -> bool:
+        target = self.images.get(image_id)
+        if target is None:
+            return False
+        same = [
+            i
+            for i in self.images.values()
+            if (i.package_id, i.revision_id, i.requirement_id, i.deliverable_id)
+            == (target.package_id, target.revision_id, target.requirement_id, target.deliverable_id)
+        ]
+        if only_if is not None and not any(i.image_id == only_if and i.selected for i in same):
+            return False
+        for i in same:
+            i.selected = i.image_id == image_id
+        return True
+
+    def save_option(self, option: DesignOption) -> None:
+        self.options[option.option_id] = option.model_copy(deep=True)
+
+    def get_option(self, option_id: str) -> DesignOption | None:
+        opt = self.options.get(option_id)
+        return opt.model_copy(deep=True) if opt else None
+
+    def list_options(self, package_id: str, revision_id: str | None = None) -> list[DesignOption]:
+        return [
+            o.model_copy(deep=True)
+            for o in sorted(self.options.values(), key=lambda o: (o.created_at, o.option_id))
+            if o.package_id == package_id and revision_id in (None, o.revision_id)
         ]
 
     def claim_next_image(self) -> GeneratedImage | None:

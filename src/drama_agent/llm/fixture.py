@@ -69,9 +69,13 @@ class FixtureModelClient:
             case "review":
                 output = CreativeReviewOutput()
             case "image_prompts":
-                from ..image_prompts import fixture_prompts
+                from ..image_prompts import ImageTakesOutput, fixture_prompts, fixture_takes
 
-                output = fixture_prompts(request)
+                output = (
+                    fixture_takes(request)
+                    if output_model is ImageTakesOutput
+                    else fixture_prompts(request)
+                )
             case _:
                 raise ValueError(f"unknown stage {request.stage}")
 

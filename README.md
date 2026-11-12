@@ -205,6 +205,47 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
 The image route needs an MCPHub key from a `newsbreak.com` account; it is sent as
 `X-API-Key`.
 
+### Casting & design: takes, draws and picks
+
+The Assets tab's **Casting & design** board explores several designs per item before
+anything else is drawn, so the team chooses from options instead of accepting one image:
+
+1. **Explore** (`POST /v1/drama-packages/{id}/images/explore`, default 4 takes x 3 draws,
+   draft size): for every *anchor* (each character's face, each location's first state and
+   each prop's first state), one text-model call writes K distinct **takes**. Each take has
+   a label, a one-sentence profile and its own H3 prompt. Takes vary only what the design
+   sheets leave open; they never change stated facts, must-keep items, or any age,
+   gender or heritage the story gives. Each take is drawn N times (different seeds).
+2. **Pick** (`POST /v1/generated-images/{id}/select`): one image per item. A draft pick
+   is re-rendered at full size (~16 MP) as an *edit of the draft* ("fully preserved"),
+   which keeps the face; re-running the prompt at a new size drew a different person. The
+   full-size image takes over the pick when it's done (if you haven't picked another
+   image meanwhile). Picking that draft again later picks its full-size render; if the
+   render failed, picking the draft again queues a new one.
+3. **Develop** (`.../images/develop`): every other item is drawn from one **picked**
+   parent image, referenced as `<Picture 1>`, with the picked take's label and profile in
+   the brief: a look from the face, another location or prop state from the first state,
+   and a location state's plan view from that state's wide view. Items whose parent isn't
+   picked yet are listed and left for later (run Develop again after picking); New take
+   on such an item is refused until then.
+4. Refine any item: **+ draws** (`POST /v1/image-options/{id}/draws`) for more of a take,
+   **New take** with your direction (`.../images/takes`, e.g. "older, kinder eyes"); the
+   writer is told which takes exist so the new one differs.
+   A failed draw has **Retry** (`POST /v1/generated-images/{id}/retry`: same prompt and
+   seed).
+5. Try your own wording: open a take's **Prompt**, edit it and click **Draw edited take**
+   (`POST /v1/image-options/{id}/edit`). That makes a new take next to the original with
+   the same references and the same seeds as its draws, so draw N of each differs only by
+   your change. The prompt goes to the image model as written (no text-model rewrite). A
+   prompt citing a `<Picture N>` the take doesn't have is refused; other H3 rule misses
+   (e.g. no "The image contains no text..." sentence) are shown as warnings.
+
+Takes are stored as `design_options` (schema v5); images record their take, draw and
+pick. The export puts each item's pick in `05_assets/reference_images/`, writes the
+chosen takes to `04_design/selected_designs.md`, and puts every other option in
+`05_assets/options/` with `options.csv` (label, profile, edited_from, draw, seed,
+prompt). A picked take with a hand-edited prompt has that prompt in `selected_designs.md`.
+
 ### Production hand-off zip
 
 **Download zip** on a job page (or `GET /v1/drama-packages/{id}/export?job_id=…`) gives the

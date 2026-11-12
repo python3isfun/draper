@@ -132,6 +132,7 @@ def test_references_keep_people_places_and_props_consistent(package):
     night_wide = p["ar_location_loc_shop_ls_shop_night:wide"]
     night_plan = p["ar_location_loc_shop_ls_shop_night:layout"]
     assert day_wide.reference_ids == [] and night_wide.reference_ids == [day_wide.image_id]
+    # A state's plan view is drawn from that state's wide view (same room, same dressing).
     assert night_plan.reference_ids == [night_wide.image_id]
 
     props = [i for k, i in p.items() if k.startswith("ar_prop_prop_photo")]

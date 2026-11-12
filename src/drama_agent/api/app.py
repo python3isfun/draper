@@ -16,7 +16,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from ..archive import archive_non_english
@@ -28,16 +28,26 @@ from ..config import (
     worker_settings,
 )
 from ..export import build_export
-from ..image_prompts import ImagePromptWriter
+from ..image_prompts import MAX_PROMPT_CHARS, ImagePromptWriter, problems
 from ..imagegen import FixtureImageClient, ImageClient
 from ..images import (
     SIZES,
     STALE_RUNNING_S,
     ImageWorker,
+    NeedsPick,
+    design_slots,
+    draws_for,
     image_client_from_env,
     latest_images,
     plan_images,
+    slot_title,
+    take_draws,
 )
+from ..images import develop as develop_plan
+from ..images import edit_take as edit_take_plan
+from ..images import explore as explore_plan
+from ..images import new_take as new_take_plan
+from ..images import select as select_plan
 from ..jobqueue import InMemoryJobQueue, JobQueue
 from ..llm import FixtureModelClient, ModelClient
 from ..media import MediaError, MediaStore, UploadTooLarge, media_from_env
@@ -55,7 +65,7 @@ from ..models import (
     TraceEvent,
 )
 from ..models.design_sheets import SHEET_SCHEMAS
-from ..models.images import GeneratedImage
+from ..models.images import DesignOption, GeneratedImage
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
@@ -127,6 +137,47 @@ class ImagesView(BaseModel):
     running: int
     done: int
     failed: int
+    # Design exploration: the takes, the deliverables (anchor or drawn from one), and the
+    # whole queue (every draw counts).
+    options: list[DesignOption] = []
+    slots: list[dict] = []
+    queued: int = 0  # pending + running images of any version or draw
+    notes: list[str] = []
+
+
+class ExploreRequest(BaseModel):
+    takes: int = Field(4, ge=1, le=6)
+    draws: int = Field(3, ge=1, le=6)
+    draft: bool = True
+    scope: list[Literal["cast", "sets", "props"]] = ["cast", "sets", "props"]
+    revision_id: str | None = None
+    job_id: str | None = None
+
+
+class DevelopRequest(BaseModel):
+    draws: int = Field(3, ge=1, le=6)
+    draft: bool = True
+    revision_id: str | None = None
+    job_id: str | None = None
+
+
+class NewTakeRequest(BaseModel):
+    requirement_id: str
+    deliverable_id: str
+    direction: str | None = Field(None, max_length=500)
+    draws: int = Field(3, ge=1, le=6)
+    draft: bool = True
+    revision_id: str | None = None
+    job_id: str | None = None
+
+
+class DrawsRequest(BaseModel):
+    draws: int = Field(3, ge=1, le=6)
+
+
+class EditTakeRequest(BaseModel):
+    prompt: str = Field(..., max_length=MAX_PROMPT_CHARS)
+    draws: int | None = Field(None, ge=1, le=6)  # default: as many as the source take has
 
 
 EXPORT_DIR = Path(tempfile.gettempdir()) / "drama-exports"
@@ -252,7 +303,7 @@ def create_app(
             raise HTTPException(404, "package not found")
         return pkg
 
-    def _images_view(pkg: ProductionPackage) -> ImagesView:
+    def _images_view(pkg: ProductionPackage, notes: list[str] | None = None) -> ImagesView:
         imgs = repo.list_images(pkg.package_id, pkg.revision_id)
         latest = latest_images(imgs)
         counts = {s: 0 for s in ("pending", "running", "done", "failed")}
@@ -263,6 +314,10 @@ def create_app(
             revision_id=pkg.revision_id,
             image_model=images.model_id,
             images=imgs,
+            options=repo.list_options(pkg.package_id, pkg.revision_id),
+            slots=design_slots(pkg),
+            queued=sum(1 for i in imgs if i.status in ("pending", "running")),
+            notes=notes or [],
             **counts,
         )
 
@@ -309,6 +364,164 @@ def create_app(
             raise HTTPException(409, "this story is archived")
         return job
 
+    def _save_new(opts: list[DesignOption], imgs: list[GeneratedImage]) -> None:
+        for o in opts:
+            repo.save_option(o)
+        for i in imgs:
+            repo.save_image(i)
+        image_wakeup.set()
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/images/explore",
+        status_code=202,
+        response_model=ImagesView,
+    )
+    async def explore_designs(package_id: str, req: ExploreRequest) -> ImagesView:
+        """Phase 1: `takes` distinct designs x `draws` images for every anchor (each
+        character's face, each location's and prop's first state) in scope. Pick one image
+        per anchor with /select, then /develop the rest from your picks."""
+        pkg = _package_or_404(package_id, req.revision_id)
+        job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
+        opts, imgs = explore_plan(
+            pkg,
+            repo.list_options(pkg.package_id, pkg.revision_id),
+            takes=req.takes,
+            draws=req.draws,
+            draft=req.draft,
+            scope=list(req.scope),
+            job_id=job and job.job_id,
+        )
+        _save_new(opts, imgs)
+        return _images_view(pkg)
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/images/develop",
+        status_code=202,
+        response_model=ImagesView,
+    )
+    async def develop_designs(package_id: str, req: DevelopRequest) -> ImagesView:
+        """Phase 2: looks, other states and plan views, drawn from the selected anchor
+        images and their takes, `draws` images each. Deliverables whose anchor has no
+        selection yet are left for later (listed in `notes`)."""
+        pkg = _package_or_404(package_id, req.revision_id)
+        job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
+        opts, imgs, waiting = develop_plan(
+            pkg,
+            repo.list_options(pkg.package_id, pkg.revision_id),
+            repo.list_images(pkg.package_id, pkg.revision_id),
+            draws=req.draws,
+            draft=req.draft,
+            job_id=job and job.job_id,
+        )
+        _save_new(opts, imgs)
+        notes = [f"Pick an image for {slot_title(pkg, k)} first." for k in waiting]
+        return _images_view(pkg, notes)
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/images/takes",
+        status_code=202,
+        response_model=list[DesignOption],
+    )
+    async def add_take(package_id: str, req: NewTakeRequest) -> list[DesignOption]:
+        """One more take on a deliverable, optionally steered (`direction`)."""
+        pkg = _package_or_404(package_id, req.revision_id)
+        job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
+        try:
+            opts, imgs = new_take_plan(
+                pkg,
+                repo.list_options(pkg.package_id, pkg.revision_id),
+                repo.list_images(pkg.package_id, pkg.revision_id),
+                (req.requirement_id, req.deliverable_id),
+                direction=(req.direction or "").strip() or None,
+                draws=req.draws,
+                draft=req.draft,
+                job_id=job and job.job_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from None
+        except NeedsPick as exc:
+            raise HTTPException(
+                409, f"Pick an image for {slot_title(pkg, exc.key)} first."
+            ) from None
+        _save_new(opts, imgs)
+        return opts
+
+    @app.post(
+        "/v1/image-options/{option_id}/draws",
+        status_code=202,
+        response_model=list[GeneratedImage],
+    )
+    async def more_draws(option_id: str, req: DrawsRequest) -> list[GeneratedImage]:
+        """More images of an existing take (new seeds, same prompt)."""
+        opt = repo.get_option(option_id)
+        if opt is None:
+            raise HTTPException(404, "take not found")
+        pkg = _package_or_404(opt.package_id, opt.revision_id)
+        _package_job(pkg.package_id, opt.job_id, pkg.revision_id)
+        mine = take_draws(repo.list_images(pkg.package_id, pkg.revision_id), option_id)
+        refs = mine[0].reference_ids if mine else []
+        first = 1 + max((i.draw for i in mine), default=0)
+        imgs = draws_for(opt, req.draws, refs, first=first)
+        _save_new([], imgs)
+        return imgs
+
+    @app.post(
+        "/v1/image-options/{option_id}/edit",
+        status_code=202,
+        response_model=DesignOption,
+    )
+    async def edit_take(option_id: str, req: EditTakeRequest) -> DesignOption:
+        """A new take with your own wording of this take's prompt, drawn with the same seeds
+        (and references) as this take's draws, so the images show what the wording changed.
+        A prompt that would break the render (cites a picture the take doesn't have) is
+        refused; other H3 rule misses are kept as `warnings` on the new take."""
+        source = repo.get_option(option_id)
+        if source is None:
+            raise HTTPException(404, "take not found")
+        if source.status == "pending":
+            raise HTTPException(409, "this take is still being written")
+        pkg = _package_or_404(source.package_id, source.revision_id)
+        _package_job(pkg.package_id, source.job_id, pkg.revision_id)
+        images = repo.list_images(pkg.package_id, pkg.revision_id)
+        mine = take_draws(images, option_id)
+        prompt = req.prompt.strip()
+        n_refs = len(mine[0].reference_ids) if mine else 0
+        found = problems(prompt, n_refs)
+        fatal = [p for p in found if p == "empty" or p.startswith("cites a picture")]
+        if fatal:
+            raise HTTPException(422, f"prompt {'; '.join(fatal)}")
+        opt, imgs = edit_take_plan(
+            source,
+            repo.list_options(pkg.package_id, pkg.revision_id),
+            images,
+            prompt,
+            draws=req.draws or max(1, min(6, len(mine))),
+            warnings=found,
+        )
+        _save_new([opt], imgs)
+        return opt
+
+    @app.post(
+        "/v1/generated-images/{image_id}/select",
+        status_code=202,
+        response_model=GeneratedImage,
+    )
+    async def select_image(image_id: str) -> GeneratedImage:
+        """Choose this image for its deliverable. A draft is re-rendered at full size; the
+        full-size image takes over the selection when it's done (picking a draft whose
+        full-size render is already done picks the render, which is returned)."""
+        img = _image_or_404(image_id)
+        pkg = _package_or_404(img.package_id, img.revision_id)
+        _package_job(pkg.package_id, img.job_id, pkg.revision_id)
+        try:
+            pick, final = select_plan(repo.list_images(pkg.package_id, pkg.revision_id), image_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        repo.set_selected(pick)
+        if final is not None:
+            _save_new([], [final])
+        return repo.get_image(pick)
+
     def _image_or_404(image_id: str) -> GeneratedImage:
         img = repo.get_image(image_id)
         if img is None:
@@ -337,6 +550,26 @@ def create_app(
         repo.save_image(new)
         image_wakeup.set()
         return new
+
+    @app.post(
+        "/v1/generated-images/{image_id}/retry",
+        status_code=202,
+        response_model=GeneratedImage,
+    )
+    async def retry_image(image_id: str) -> GeneratedImage:
+        """Queue a failed image again as it was: same prompt, seed, size and references (a
+        failed draw of a take stays that draw)."""
+        img = _image_or_404(image_id)
+        pkg = _package_or_404(img.package_id, img.revision_id)
+        _package_job(pkg.package_id, img.job_id, pkg.revision_id)
+        if img.status != "failed":
+            raise HTTPException(
+                409, f"only a failed image can be retried (this one is {img.status})"
+            )
+        img.status, img.error, img.started_at, img.finished_at = "pending", None, None, None
+        repo.save_image(img)
+        image_wakeup.set()
+        return img
 
     @app.get("/v1/generated-images/{image_id}", response_model=GeneratedImage)
     async def get_image(image_id: str) -> GeneratedImage:
@@ -560,7 +793,14 @@ def create_app(
         tmp = _new_export_file()
         try:
             name = await asyncio.to_thread(
-                build_export, pkg, tmp, job=job, images=images, assets=assets, media=media
+                build_export,
+                pkg,
+                tmp,
+                job=job,
+                images=images,
+                assets=assets,
+                media=media,
+                options=repo.list_options(pkg.package_id, pkg.revision_id),
             )
         except BaseException:
             tmp.unlink(missing_ok=True)

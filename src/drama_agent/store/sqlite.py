@@ -14,12 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
-from ..models.images import GeneratedImage
+from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
-# v4: generated_images. Each step is additive, so older files upgrade in place (see _migrate).
-SCHEMA_VERSION = 4
+# v4: generated_images. v5: design_options. Each step is additive, so older files upgrade in
+# place (see _migrate).
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -93,6 +94,14 @@ CREATE TABLE IF NOT EXISTS generated_images (
 );
 CREATE INDEX IF NOT EXISTS generated_images_pkg ON generated_images (package_id, created_at);
 CREATE INDEX IF NOT EXISTS generated_images_status ON generated_images (status, created_at);
+CREATE TABLE IF NOT EXISTS design_options (
+    option_id   TEXT PRIMARY KEY,
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS design_options_pkg ON design_options (package_id, revision_id);
 """
 
 
@@ -410,6 +419,84 @@ class SqliteRepository:
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
+
+    def set_selected(self, image_id: str) -> bool:
+        """Pick this image for its deliverable and unpick the others, atomically."""
+        return self._select(image_id, None)
+
+    def move_selection(self, from_id: str, to_id: str) -> bool:
+        """Move the pick from `from_id` to `to_id` (same deliverable), atomically, only if
+        `from_id` is still the pick."""
+        return self._select(to_id, from_id)
+
+    def _select(self, image_id: str, only_if: str | None) -> bool:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT data FROM generated_images WHERE image_id = ?", (image_id,)
+                ).fetchone()
+                if row is None:
+                    self._conn.execute("COMMIT")
+                    return False
+                target = GeneratedImage.model_validate_json(row[0])
+                rows = self._conn.execute(
+                    "SELECT data FROM generated_images WHERE package_id = ? AND revision_id = ?",
+                    (target.package_id, target.revision_id),
+                ).fetchall()
+                same = [
+                    i
+                    for i in (GeneratedImage.model_validate_json(r[0]) for r in rows)
+                    if (i.requirement_id, i.deliverable_id)
+                    == (target.requirement_id, target.deliverable_id)
+                ]
+                if only_if is not None and not any(
+                    i.image_id == only_if and i.selected for i in same
+                ):
+                    self._conn.execute("COMMIT")
+                    return False
+                for i in same:
+                    want = i.image_id == image_id
+                    if i.selected != want:
+                        i.selected = want
+                        self._conn.execute(
+                            "UPDATE generated_images SET data = ? WHERE image_id = ?",
+                            (i.model_dump_json(), i.image_id),
+                        )
+                self._conn.execute("COMMIT")
+                return True
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    # Design options (takes) -------------------------------------------------
+
+    def save_option(self, option: DesignOption) -> None:
+        self._exec(
+            "INSERT INTO design_options (option_id, package_id, revision_id, created_at, data) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (option_id) DO UPDATE SET data = excluded.data",
+            (
+                option.option_id,
+                option.package_id,
+                option.revision_id,
+                option.created_at.isoformat(),
+                option.model_dump_json(),
+            ),
+        )
+
+    def get_option(self, option_id: str) -> DesignOption | None:
+        raw = self._one("SELECT data FROM design_options WHERE option_id = ?", (option_id,))
+        return DesignOption.model_validate_json(raw) if raw else None
+
+    def list_options(self, package_id: str, revision_id: str | None = None) -> list[DesignOption]:
+        sql = "SELECT data FROM design_options WHERE package_id = ?"
+        params: tuple[Any, ...] = (package_id,)
+        if revision_id is not None:
+            sql += " AND revision_id = ?"
+            params += (revision_id,)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY created_at, option_id", params).fetchall()
+        return [DesignOption.model_validate_json(r[0]) for r in rows]
 
     def requeue_running_images(self, older_than_s: float = 0.0) -> int:
         """Queue again images left running for longer than older_than_s (interrupted).

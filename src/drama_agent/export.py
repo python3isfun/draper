@@ -28,10 +28,10 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from .images import latest_images
+from .images import design_slots, selected_image
 from .media import MediaError, MediaStore
 from .models import Job, ProductionPackage, SourceAsset
-from .models.images import GeneratedImage
+from .models.images import DesignOption, GeneratedImage
 from .render import sheet_md, timestamp
 
 MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".webm"}
@@ -319,12 +319,17 @@ ASSET_COLUMNS = [
 ]  # fmt: skip
 
 
-def image_name(img: GeneratedImage) -> str:
-    """Unique per deliverable: the deliverable's own suffix (face, full, wide, ...) is in
-    the name, so two deliverables of one requirement never share a file name."""
+def image_name(img: GeneratedImage, take: int | None = None) -> str:
+    """Unique per image: the deliverable's own suffix (face, full, wide, ...), then the
+    take and draw for an image drawn from a take (`_full` for a full-size render of a
+    selected draft), else the version."""
     ext = Path(img.file or "").suffix or ".jpg"
     key = img.deliverable_id.removeprefix(f"d_{img.requirement_id}_")
-    return f"{img.requirement_id}__{slug(key, 'image')}_v{img.version}{ext}"
+    if img.option_id:
+        tail = f"take{take or 0}_draw{img.draw}" + ("_full" if img.finalizes else "")
+    else:
+        tail = f"v{img.version}"
+    return f"{img.requirement_id}__{slug(key, 'image')}_{tail}{ext}"
 
 
 def qa_md(pkg: ProductionPackage) -> str:
@@ -380,8 +385,22 @@ def build_export(
     images: list[GeneratedImage],
     assets: dict[str, SourceAsset],
     media: MediaStore | None,
+    options: list[DesignOption] | None = None,
 ) -> str:
     """Write the hand-off zip to `dest`; returns the download file name."""
+    takes = {o.option_id: o for o in options or []}
+
+    def take_of(img: GeneratedImage) -> DesignOption | None:
+        return takes.get(img.option_id or "")
+
+    def edited_from(opt: DesignOption | None) -> str:
+        src = takes.get(opt.edited_from or "") if opt else None
+        return f"take {src.index}" if src else ""
+
+    def name_of(img: GeneratedImage) -> str:
+        opt = take_of(img)
+        return image_name(img, opt.index if opt else None)
+
     n = Names(pkg)
     root = f"{slug(pkg.story_bible.title)}-{pkg.revision_id}"
     rows = shot_rows(pkg, n)
@@ -402,14 +421,24 @@ def build_export(
             return None
         return path if path.is_file() else None
 
-    done = [i for i in latest_images(images).values() if i.status == "done" and i.file]
-    done.sort(key=lambda i: (i.requirement_id, i.deliverable_id))
+    # The chosen image per deliverable: the selected one, else the newest finished one.
+    keys = sorted({(i.requirement_id, i.deliverable_id) for i in images})
+    done = [img for k in keys if (img := selected_image(images, k)) and img.file]
+    chosen_ids = {i.image_id for i in done}
     # Only images whose file is really there: everything that lists them uses this.
     added: list[tuple[GeneratedImage, str, str, Path]] = []
     for img in done:
         if (src := safe_path(img.file)) is not None:
             view = deliverable_view.get((img.requirement_id, img.deliverable_id), "image")
-            added.append((img, view, image_name(img), src))
+            added.append((img, view, name_of(img), src))
+    # Every other finished image drawn from a take: the options the team can revisit.
+    alternatives = [
+        (img, src)
+        for img in sorted(images, key=lambda i: (i.requirement_id, i.deliverable_id,
+                                                 take_of(i).index if take_of(i) else 0, i.draw))
+        if img.option_id and img.status == "done" and img.image_id not in chosen_ids
+        and (src := safe_path(img.file)) is not None
+    ]  # fmt: skip
     files_by_req: dict[str, list[str]] = {}
     for img, _, name, _ in added:
         files_by_req.setdefault(img.requirement_id, []).append(name)
@@ -527,6 +556,95 @@ def build_export(
                 ),
             )
 
+        # Design takes: the chosen take per deliverable, and every other option
+        slot_names = {
+            (s["requirement_id"], s["deliverable_id"]): (s["entity"], s["view"], s["variant"])
+            for s in design_slots(pkg)
+        }
+        if takes:
+            lines = [
+                "# Selected designs",
+                "",
+                (
+                    "The take chosen for each image, with what makes it distinct. Other takes "
+                    "are in `05_assets/options/`."
+                ),
+                "",
+            ]
+            for img, view, name, _ in added:
+                opt = take_of(img)
+                if opt is None:
+                    continue
+                entity, _, variant = slot_names.get(
+                    (img.requirement_id, img.deliverable_id), ("", view, "")
+                )
+                title = entity + (f" ({variant})" if variant else "") + f", {view}"
+                picked = "selected" if img.selected else "newest (nothing selected)"
+                lines += [
+                    f"## {title}",
+                    f"- Take {opt.index}: **{opt.label}** ({picked})",
+                    *([f"- {opt.profile}"] if opt.profile else []),
+                    *(
+                        [
+                            f"- Prompt edited by hand from {edited_from(opt)}:",
+                            "",
+                            "  ```text",
+                            *(f"  {line}" for line in opt.prompt.splitlines()),
+                            "  ```",
+                        ]
+                        if opt.status == "edited"
+                        else []
+                    ),
+                    f"- Image: `05_assets/reference_images/{name}`",
+                    "",
+                ]
+            text("04_design/selected_designs.md", "\n".join(lines))
+        option_rows = []
+        for img, src in alternatives:
+            opt = take_of(img)
+            name = name_of(img)
+            media_file(f"05_assets/options/{name}", src)
+            entity, view, variant = slot_names.get(
+                (img.requirement_id, img.deliverable_id), ("", "", "")
+            )
+            option_rows.append(
+                {
+                    "file": name,
+                    "entity": entity,
+                    "variant": variant,
+                    "view": view,
+                    "take": opt.index if opt else "",
+                    "label": opt.label if opt else "",
+                    "profile": opt.profile if opt else "",
+                    "edited_from": edited_from(opt),
+                    "draw": img.draw,
+                    "size": img.size,
+                    "seed": img.seed,
+                    "prompt": img.prompt,
+                }
+            )
+        if option_rows:
+            text(
+                "05_assets/options/options.csv",
+                _csv(
+                    option_rows,
+                    [
+                        "file",
+                        "entity",
+                        "variant",
+                        "view",
+                        "take",
+                        "label",
+                        "profile",
+                        "edited_from",
+                        "draw",
+                        "size",
+                        "seed",
+                        "prompt",
+                    ],
+                ),
+            )
+
         # QA
         text("06_qa/qa_report.md", qa_md(pkg))
 
@@ -602,7 +720,8 @@ def readme_md(pkg: ProductionPackage, job: Job | None, rows: list, n_images: int
             ),
             (
                 "| `05_assets/` | art department | Asset requirements (design brief, must keep, "
-                "deliverables, which shots use each) and the generated reference images |"
+                "deliverables, which shots use each), the chosen reference images, and every "
+                "other design option in `options/` |"
             ),
             "| `06_qa/` | producer | Hard-check results and the creative review |",
             "| `07_sources/` | everyone | The original idea and any uploaded photos or videos |",
