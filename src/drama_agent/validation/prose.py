@@ -1,6 +1,6 @@
 """Keep human-facing text free of internal IDs, field names and timecodes.
 
-Models sometimes write `成片[0,10000)ms。` timeline prefixes or `prop_rentfile` into action
+Models sometimes write `Shot [0,10000)ms:` timeline prefixes or `prop_rentfile` into action
 lines. `normalize_prose` fixes what can be fixed safely and deterministically (no extra
 model calls); `find_prose_leaks` reports what is left so the step can be repaired.
 
@@ -22,17 +22,17 @@ from ..models.story import StoryBible
 # Not prose: tooling notes and closed-vocabulary fields.
 SKIP_FIELDS = {"generation_notes", "speech_rate_assumption", "int_ext", "voice_only"}
 
-_SPAN = r"[\[(]\s*\d+\s*[,，]\s*\d+\s*[)\]]\s*ms"
-# A timeline span at the very start of a field, e.g. "成片[0,10000)ms。" or "[0, 10000)ms:".
-LEADING_SPAN_RE = re.compile(rf"^\s*(?:成片|片段|镜头|shot|Shot)?\s*{_SPAN}\s*[。.:：、,，]?\s*")
+_SPAN = r"[\[(]\s*\d+\s*,\s*\d+\s*[)\]]\s*ms"
+# A timeline span at the very start of a field, e.g. "Shot [0,10000)ms:" or "[0, 10000)ms.".
+LEADING_SPAN_RE = re.compile(rf"^\s*(?:[Ss]hot|[Cc]lip)?\s*{_SPAN}\s*[.:,;]?\s*")
 SPAN_RE = re.compile(_SPAN)
 # A bare duration such as "2300ms" (not part of a span).
-DURATION_RE = re.compile(r"(?<![\d.,，\[(])(\d+(?:\.\d+)?)\s*ms(?![A-Za-z])")
+DURATION_RE = re.compile(r"(?<![\d.,\[(])(\d+(?:\.\d+)?)\s*ms(?![A-Za-z])")
 # ASCII snake_case tokens: IDs (prop_phone) and field names (spoken_timing_verified).
-# The lookbehind is ASCII-only because CJK characters count as \w, so \b misses
-# "将prop_rentfile".
+# The lookbehind is ASCII-only so an ID glued to non-ASCII text ("—prop_rentfile") is still
+# found; \b would miss it.
 SNAKE_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+")
-# Episode IDs used as labels ("ep_01：..."), rewritten as 第1集 / Episode 1.
+# Episode IDs used as labels ("ep_01: ..."), rewritten as "Episode 1".
 EPISODE_RE = re.compile(r"(?<![A-Za-z0-9_])ep_(\d+)(?![A-Za-z0-9_])")
 
 
@@ -48,12 +48,11 @@ def entity_names(bible: StoryBible) -> dict[str, str]:
     return names
 
 
-def _seconds(ms_text: str, language: str) -> str:
-    secs = f"{float(ms_text) / 1000:g}"
-    return f"{secs}秒" if language.lower().startswith("zh") else f"{secs}s"
+def _seconds(ms_text: str) -> str:
+    return f"{float(ms_text) / 1000:g}s"
 
 
-def normalize_text(text: str, names: dict[str, str], language: str) -> str:
+def normalize_text(text: str, names: dict[str, str]) -> str:
     out = LEADING_SPAN_RE.sub("", text)
     if names:
         # Longest first so "prop_photo_torn"-style IDs aren't half-replaced by "prop_photo".
@@ -63,11 +62,8 @@ def normalize_text(text: str, names: dict[str, str], language: str) -> str:
             lambda m: names[m.group(0)],
             out,
         )
-    zh = language.lower().startswith("zh")
-    out = EPISODE_RE.sub(
-        lambda m: f"第{int(m.group(1))}集" if zh else f"Episode {int(m.group(1))}", out
-    )
-    return DURATION_RE.sub(lambda m: _seconds(m.group(1), language), out)
+    out = EPISODE_RE.sub(lambda m: f"Episode {int(m.group(1))}", out)
+    return DURATION_RE.sub(lambda m: _seconds(m.group(1)), out)
 
 
 def _is_id_field(name: str) -> bool:
@@ -100,7 +96,7 @@ def iter_prose(obj: Any, owner: str = "", path: str = "") -> Iterator[tuple[str,
             yield from iter_prose(value, owner, f"{path}[{key}]")
 
 
-def normalize_prose(obj: Any, names: dict[str, str], language: str) -> int:
+def normalize_prose(obj: Any, names: dict[str, str]) -> int:
     """Rewrite prose fields in place. Returns how many fields changed."""
     changed = 0
     if isinstance(obj, BaseModel):
@@ -109,30 +105,30 @@ def normalize_prose(obj: Any, names: dict[str, str], language: str) -> int:
                 continue
             value = getattr(obj, name)
             if isinstance(value, str):
-                new = normalize_text(value, names, language)
+                new = normalize_text(value, names)
                 if new != value:
                     setattr(obj, name, new)
                     changed += 1
             else:
-                changed += normalize_prose(value, names, language)
+                changed += normalize_prose(value, names)
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
             if isinstance(item, str):
-                new = normalize_text(item, names, language)
+                new = normalize_text(item, names)
                 if new != item:
                     obj[i] = new
                     changed += 1
             else:
-                changed += normalize_prose(item, names, language)
+                changed += normalize_prose(item, names)
     elif isinstance(obj, dict):
         for key, value in obj.items():
             if isinstance(value, str):
-                new = normalize_text(value, names, language)
+                new = normalize_text(value, names)
                 if new != value:
                     obj[key] = new
                     changed += 1
             else:
-                changed += normalize_prose(value, names, language)
+                changed += normalize_prose(value, names)
     return changed
 
 

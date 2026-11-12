@@ -60,12 +60,13 @@ STAGE_MODEL_PREFIX = "MCPHUB_MODEL_"
 
 
 def stage_models_from_env() -> dict[str, str]:
-    """Per-step model overrides: MCPHUB_MODEL_INGEST, _OUTLINE, _SCRIPT, _STORYBOARD,
-    _REVIEW. Steps without one use MCPHUB_MODEL. A misspelt variable is an error rather
-    than a silently ignored setting."""
+    """Per-step model overrides: MCPHUB_MODEL_<STEP> for each pipeline step (INGEST, OUTLINE,
+    SCRIPT, CAST, SETS, PROPS, STORYBOARD, REVIEW) and IMAGE_PROMPTS (the call that writes
+    image prompts). Steps without one use MCPHUB_MODEL. A misspelt variable is an error
+    rather than a silently ignored setting."""
     from .models.package import STAGES
 
-    known = {f"{STAGE_MODEL_PREFIX}{s.upper()}": s for s in STAGES}
+    known = {f"{STAGE_MODEL_PREFIX}{s.upper()}": s for s in (*STAGES, "image_prompts")}
     overrides: dict[str, str] = {}
     for key, value in os.environ.items():
         if not key.startswith(STAGE_MODEL_PREFIX):

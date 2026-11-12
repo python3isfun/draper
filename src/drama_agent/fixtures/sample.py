@@ -1,9 +1,9 @@
-"""A complete, hard-check-passing sample built from the spec's example seed.
+"""A complete, hard-check-passing sample drama: "The Last Month's Rent".
 
 Used by FixtureModelClient so the whole pipeline and API run without a real model, and by
-tests as a known-good baseline to mutate.
-
-Story content is in zh-CN because it is the product output language for this seed.
+tests as a known-good baseline to mutate. The story is in American English and set in a
+small Ohio river town today: Maya Collins is about to lose her used bookstore, and the
+landlord who comes for the last month's rent is the father who left fifteen years ago.
 """
 
 from __future__ import annotations
@@ -49,16 +49,19 @@ from ..models.design_sheets import (
     SetState,
 )
 
-SAMPLE_SEED = "一个即将失去店铺的年轻人，发现前来收租的老人是失踪多年的父亲。"
+SAMPLE_SEED = (
+    "A young woman about to lose her bookstore discovers that the old man who comes to collect "
+    "the rent is the father who disappeared years ago."
+)
 SHOT_MS = 15_000
-MS_PER_CHAR = 250  # Text-stage speech-rate estimate; not a measured voice track.
+MS_PER_WORD = 380  # Text-stage speech-rate estimate; not a measured voice track.
 
 
 def sample_request() -> JobRequest:
     return JobRequest.model_validate(
         {
             "sources": [{"type": "text", "text": SAMPLE_SEED, "use_as": "story_seed"}],
-            "options": {"language": "zh-CN"},
+            "options": {"language": "en-US"},
         }
     )
 
@@ -66,13 +69,16 @@ def sample_request() -> JobRequest:
 def sample_source_brief(request: JobRequest | None = None) -> SourceBrief:
     request = request or sample_request()
     return SourceBrief(
-        language=request.options.language or "zh-CN",
-        observed_facts=["主角即将失去店铺", "收租老人是主角失踪多年的父亲"],
-        user_constraints=["三集，每集120秒，每集2-3场、3-5人"],
+        language=request.options.language or "en-US",
+        observed_facts=[
+            "The protagonist is about to lose her shop",
+            "The old man collecting the rent is her long-missing father",
+        ],
+        user_constraints=["Three episodes, 120 seconds each, 2-3 scenes and 3-5 characters each"],
         creative_assumptions=[
-            "主角为女性店主林晓，经营一家旧书店",
-            "父亲失踪原因与母亲当年的医药债务有关",
-            "开发商经理赵经理为外部压力来源",
+            "The protagonist is Maya Collins, who runs a used bookstore in a small Ohio river town",
+            "Her father left to pay off her mother's old hospital bills",
+            "Derek Ross, a developer's agent, is the outside pressure",
         ],
         source_coverage=[
             SourceCoverage(
@@ -81,148 +87,189 @@ def sample_source_brief(request: JobRequest | None = None) -> SourceBrief:
             for i in range(len(request.sources))
         ],
         creative_brief=CreativeBrief(
-            genre="家庭情感",
-            audience_assumption="25-45岁短剧观众",
-            core_conflict="保住店铺 vs. 面对抛家多年的父亲",
-            emotional_experience="怀疑 → 愤怒 → 和解前的拉扯",
-            reusable_assets=["书店", "父亲出租屋", "旧全家福"],
+            genre="Family drama",
+            audience_assumption="US short-drama viewers aged 25-45",
+            core_conflict="Saving the store vs. facing the father who walked out",
+            emotional_experience="Suspicion, then anger, then the pull toward forgiveness",
+            reusable_assets=["the bookstore", "the father's rented room", "the old family photo"],
         ),
     )
 
 
 def sample_story_bible() -> StoryBible:
     return StoryBible(
-        title="最后一个月房租",
-        logline="即将失去书店的林晓，发现来收最后一个月房租的房东是失踪十五年的父亲。",
-        genre="家庭情感",
-        audience_assumption="25-45岁短剧观众",
-        emotional_goal="从怀疑到愿意并肩",
-        core_conflict="店铺被开发商收走的期限 vs. 父女十五年的隔阂",
-        series_synopsis="第一集认出伤疤；第二集父亲否认、委托书出现；第三集真相揭开，父女联手对抗开发商。",
-        future_direction="父亲债务的真正债主浮出水面；母亲回城，三人关系重组。",
-        character_arcs={"ch_lin": "从独自硬扛到接受父亲的帮助", "ch_zhou": "从逃避到承担"},
+        title="The Last Month's Rent",
+        logline=(
+            "About to lose her used bookstore, Maya Collins discovers that the landlord collecting "
+            "the last month's rent is the father who vanished fifteen years ago."
+        ),
+        genre="Family drama",
+        audience_assumption="US short-drama viewers aged 25-45",
+        emotional_goal="From suspicion to standing side by side",
+        core_conflict="The developer's eviction deadline vs. fifteen years of silence",
+        series_synopsis=(
+            "Episode 1: Maya recognizes the scar. Episode 2: her father denies it and a signed "
+            "authorization surfaces. Episode 3: the truth comes out and father and daughter face "
+            "the developer together."
+        ),
+        future_direction=(
+            "The real holder of the father's debt surfaces; Maya's mother comes back to town "
+            "and the three of them have to rebuild."
+        ),
+        character_arcs={
+            "ch_maya": "From carrying everything alone to accepting her father's help",
+            "ch_frank": "From hiding to taking responsibility",
+        },
         characters=[
             Character(
-                character_id="ch_lin",
-                name="林晓",
-                role="主角",
-                relationships={"ch_zhou": "父亲（未知）", "ch_mei": "店员兼好友", "ch_mom": "母亲"},
-                goal="保住书店",
-                motivation="书店是她独自撑起的唯一依靠",
-                knowledge=["父亲十五年前失踪", "父亲手背有烫伤疤"],
+                character_id="ch_maya",
+                name="Maya Collins",
+                role="Protagonist",
+                relationships={
+                    "ch_frank": "Father (she doesn't know at first)",
+                    "ch_jess": "Employee and best friend",
+                    "ch_mom": "Mother",
+                },
+                goal="Keep the bookstore",
+                motivation="The store is the one thing she built on her own",
+                knowledge=[
+                    "Her father disappeared fifteen years ago",
+                    "Her father had a burn scar on the back of his hand",
+                ],
             ),
             Character(
-                character_id="ch_zhou",
-                name="周叔（林建国）",
-                role="主角的父亲，隐藏身份的房东",
-                relationships={"ch_lin": "女儿"},
-                goal="还清旧债而不让女儿知道",
-                motivation="愧疚",
-                knowledge=["自己是林晓的父亲", "店铺已被抵押给赵经理"],
+                character_id="ch_frank",
+                name="Frank Collins",
+                role="Maya's father, posing as the landlord Frank Hale",
+                relationships={"ch_maya": "Daughter"},
+                goal="Pay off the old debt without his daughter finding out",
+                motivation="Guilt",
+                knowledge=[
+                    "He is Maya's father",
+                    "The store's building is mortgaged to Derek Ross's company",
+                ],
             ),
             Character(
-                character_id="ch_mei",
-                name="阿梅",
-                role="主角的好友与帮手",
-                relationships={"ch_lin": "好友"},
-                goal="帮林晓保住店",
-                motivation="书店也是她的工作",
+                character_id="ch_jess",
+                name="Jess Parker",
+                role="Maya's best friend and right hand",
+                relationships={"ch_maya": "Best friend"},
+                goal="Help Maya keep the store",
+                motivation="The store is her job too",
             ),
             Character(
-                character_id="ch_zhao",
-                name="赵经理",
-                role="对手，开发商代表",
-                goal="按期收回整栋楼",
-                motivation="开发项目的业绩",
-                knowledge=["周叔把店铺抵押给他"],
+                character_id="ch_ross",
+                name="Derek Ross",
+                role="Antagonist, the developer's agent",
+                goal="Clear the whole building on schedule",
+                motivation="His numbers on the development project",
+                knowledge=["Frank mortgaged the building to his company"],
             ),
             Character(
                 character_id="ch_mom",
-                name="林母",
-                role="仅电话出场的母亲",
-                relationships={"ch_lin": "女儿"},
-                goal="不让女儿被父亲再次伤害",
-                motivation="当年被抛下",
+                name="Linda Collins",
+                role="Maya's mother, heard only on the phone",
+                relationships={"ch_maya": "Daughter"},
+                goal="Keep her daughter from being hurt by Frank again",
+                motivation="She was the one he left behind",
             ),
         ],
         looks=[
-            CharacterLook(look_id="lk_lin_apron", character_id="ch_lin", description="毛衣配围裙"),
             CharacterLook(
-                look_id="lk_zhou_rain",
-                character_id="ch_zhou",
-                description="雨夜赶来时被淋湿",
+                look_id="lk_maya_apron",
+                character_id="ch_maya",
+                description="Sweater and shop apron",
+            ),
+            CharacterLook(
+                look_id="lk_frank_rain",
+                character_id="ch_frank",
+                description="Soaked from walking over on a rainy night",
                 applies_to_scene_ids=["sc_01_02"],
             ),
-            CharacterLook(look_id="lk_zhou_home", character_id="ch_zhou", description="居家旧毛衫"),
-            CharacterLook(look_id="lk_mei_work", character_id="ch_mei", description="书店工作服"),
-            CharacterLook(look_id="lk_zhao_suit", character_id="ch_zhao", description="深灰西装"),
+            CharacterLook(
+                look_id="lk_frank_home",
+                character_id="ch_frank",
+                description="Worn cardigan at home",
+            ),
+            CharacterLook(
+                look_id="lk_jess_work", character_id="ch_jess", description="Bookstore work shirt"
+            ),
+            CharacterLook(
+                look_id="lk_ross_suit", character_id="ch_ross", description="Charcoal suit"
+            ),
         ],
         locations=[
             Location(
                 location_id="loc_shop",
-                name="林晓的旧书店",
-                summary="林晓独自经营、即将被收走的旧书店",
+                name="Collins Used Books",
+                summary="Maya's used bookstore on Main Street, about to be taken from her",
             ),
             Location(
                 location_id="loc_room",
-                name="周叔的出租屋",
-                summary="周叔独居的简陋出租屋，藏着他的过去",
+                name="Frank's rented room",
+                summary="The bare room Frank rents above a hardware store, full of his past",
             ),
         ],
         location_states=[
             LocationState(
-                location_state_id="ls_shop_day", location_id="loc_shop", description="白天营业"
+                location_state_id="ls_shop_day",
+                location_id="loc_shop",
+                description="Open for business",
             ),
             LocationState(
-                location_state_id="ls_shop_night", location_id="loc_shop", description="雨夜打烊"
+                location_state_id="ls_shop_night",
+                location_id="loc_shop",
+                description="Closing up on a rainy night",
             ),
             LocationState(
-                location_state_id="ls_room_day", location_id="loc_room", description="白天"
+                location_state_id="ls_room_day", location_id="loc_room", description="Daytime"
             ),
             LocationState(
-                location_state_id="ls_room_night", location_id="loc_room", description="夜晚台灯"
+                location_state_id="ls_room_night",
+                location_id="loc_room",
+                description="Night, lit by one desk lamp",
             ),
         ],
         props=[
             Prop(
                 prop_id="prop_photo",
-                name="旧全家福",
-                story_function="照片上父亲手背的烫伤疤让林晓认出周叔",
-                owner_character_id="ch_lin",
+                name="the old family photo",
+                story_function="The burn scar on her father's hand in the photo lets Maya recognize Frank",
+                owner_character_id="ch_maya",
             )
         ],
         prop_states=[
-            PropState(prop_state_id="ps_photo_intact", prop_id="prop_photo", description="完整"),
+            PropState(prop_state_id="ps_photo_intact", prop_id="prop_photo", description="Intact"),
             PropState(
                 prop_state_id="ps_photo_torn",
                 prop_id="prop_photo",
-                description="争吵中被撕成两半",
+                description="Torn in half during the argument",
             ),
         ],
         beat_outlines=[
             BeatOutline(
                 episode_id="ep_01",
-                opening="开发商限期搬走",
-                protagonist_action="林晓等房东当面对质",
-                cost_or_reversal="房东手上的疤与父亲一致",
-                ending_change="林晓怀疑房东就是父亲",
+                opening="The developer gives Maya a deadline to move out",
+                protagonist_action="Maya waits to confront the landlord in person",
+                cost_or_reversal="The landlord's scar matches her father's",
+                ending_change="Maya suspects the landlord is her father",
                 cliffhanger_setup_refs=["prop_photo"],
             ),
             BeatOutline(
                 episode_id="ep_02",
-                opening="林晓上门认亲",
-                protagonist_action="林晓挡住拆店工人",
-                cost_or_reversal="父亲否认，委托书出现",
-                ending_change="委托书日期指向十五年前",
-                cliffhanger_setup_refs=["ch_zhao"],
+                opening="Maya confronts Frank at his rented room",
+                protagonist_action="Maya blocks the demolition crew",
+                cost_or_reversal="Frank denies it, and a signed authorization appears",
+                ending_change="The authorization is dated fifteen years ago",
+                cliffhanger_setup_refs=["ch_ross"],
             ),
             BeatOutline(
                 episode_id="ep_03",
-                opening="阿梅发现抵押真相",
-                protagonist_action="林晓撕掉合同",
-                cost_or_reversal="父亲撕照片想推开女儿",
-                ending_change="父女并肩，推土机已到门口",
-                cliffhanger_setup_refs=["ch_zhao", "prop_photo"],
+                opening="Jess uncovers the mortgage",
+                protagonist_action="Maya tears up the contract",
+                cost_or_reversal="Frank tears the photo to push his daughter away",
+                ending_change="Father and daughter stand together as the excavator arrives",
+                cliffhanger_setup_refs=["ch_ross", "prop_photo"],
             ),
         ],
     )
@@ -258,38 +305,56 @@ class EpisodeRow:
     scenes: list[SceneRow]
 
 
+MAYA = {"ch_maya": "lk_maya_apron"}
+
 EPISODES: list[EpisodeRow] = [
     EpisodeRow(
         "ep_01",
-        "最后一个月房租",
-        "赵经理限期搬店",
-        "林晓要见房东",
-        "房东手上的疤",
+        "The Last Month's Rent",
+        "Derek Ross gives Maya a deadline to move out",
+        "Maya insists on meeting the landlord",
+        "The scar on the landlord's hand",
         [
             SceneRow(
                 "sc_01_01",
                 "INT",
                 "loc_shop",
                 "ls_shop_day",
-                "日",
-                {"ch_lin": "lk_lin_apron", "ch_mei": "lk_mei_work", "ch_zhao": "lk_zhao_suit"},
+                "DAY",
+                {**MAYA, "ch_jess": "lk_jess_work", "ch_ross": "lk_ross_suit"},
                 beats=[
                     (
-                        "赵经理推门进店，把通知拍在柜台上。",
-                        ("ch_zhao", "月底前搬走，房东已经签字了。", False),
+                        "Derek Ross pushes through the door and slaps a notice on the counter.",
+                        (
+                            "ch_ross",
+                            "You're out by the end of the month. The landlord signed.",
+                            False,
+                        ),
                         None,
                     ),
                     (
-                        "林晓攥紧通知，看向阿梅。",
-                        ("ch_lin", "房东从没露过面，凭什么替我签？", False),
+                        "Maya crumples the notice and looks at Jess.",
+                        (
+                            "ch_maya",
+                            "The landlord's never shown his face. How can he sign for me?",
+                            False,
+                        ),
                         None,
                     ),
                     (
-                        "阿梅翻出租约，指着签名。",
-                        ("ch_mei", "租约上写着，房东今晚亲自来收最后一个月房租。", False),
+                        "Jess pulls out the lease and points at the signature.",
+                        (
+                            "ch_jess",
+                            "It says he's coming tonight to collect the last month's rent himself.",
+                            False,
+                        ),
                         None,
                     ),
-                    ("林晓把旧全家福塞进围裙口袋，盯着门口。", None, "ps_photo_intact"),
+                    (
+                        "Maya slips the old family photo into her apron pocket and watches the door.",
+                        None,
+                        "ps_photo_intact",
+                    ),
                 ],
             ),
             SceneRow(
@@ -297,23 +362,27 @@ EPISODES: list[EpisodeRow] = [
                 "INT",
                 "loc_shop",
                 "ls_shop_night",
-                "夜",
-                {"ch_lin": "lk_lin_apron", "ch_zhou": "lk_zhou_rain", "ch_mei": "lk_mei_work"},
+                "NIGHT",
+                {**MAYA, "ch_frank": "lk_frank_rain", "ch_jess": "lk_jess_work"},
                 beats=[
                     (
-                        "周叔推门进来，雨水顺着帽檐滴落。",
-                        ("ch_zhou", "最后一个月，现金。", False),
+                        "Frank pushes the door open, rain dripping from the brim of his cap.",
+                        ("ch_frank", "Last month. Cash.", False),
                         None,
                     ),
                     (
-                        "林晓递钱时，看见周叔手背上的烫伤疤。",
-                        ("ch_lin", "这道疤……你是怎么烫的？", False),
+                        "As Maya hands over the money, she sees the burn scar on the back of his hand.",
+                        ("ch_maya", "That scar... how did you get it?", False),
                         None,
                     ),
-                    ("周叔迅速缩回手，转身要走。", ("ch_zhou", "跟你没关系。", False), None),
                     (
-                        "林晓举起全家福，照片上父亲的手背有同样的疤。",
-                        ("ch_mei", "晓晓，照片上的人……", False),
+                        "Frank pulls his hand back and turns to leave.",
+                        ("ch_frank", "None of your business.", False),
+                        None,
+                    ),
+                    (
+                        "Maya holds up the family photo; the father in it has the same scar.",
+                        ("ch_jess", "Maya, the man in that picture...", False),
                         "ps_photo_intact",
                     ),
                 ],
@@ -323,36 +392,40 @@ EPISODES: list[EpisodeRow] = [
     ),
     EpisodeRow(
         "ep_02",
-        "他不认",
-        "林晓上门认亲",
-        "父亲否认，开发商逼拆",
-        "委托书日期是十五年前",
+        "He Won't Admit It",
+        "Maya confronts Frank at his room",
+        "Frank denies it while the developer pushes to demolish",
+        "The authorization is dated fifteen years ago",
         [
             SceneRow(
                 "sc_02_01",
                 "INT",
                 "loc_room",
                 "ls_room_day",
-                "日",
-                {"ch_lin": "lk_lin_apron", "ch_zhou": "lk_zhou_home"},
+                "DAY",
+                {**MAYA, "ch_frank": "lk_frank_home"},
                 voice_only=["ch_mom"],
                 beats=[
                     (
-                        "林晓敲开出租屋的门，举起全家福。",
-                        ("ch_lin", "你就是林建国。", False),
+                        "Maya knocks on the door of the rented room and holds up the family photo.",
+                        ("ch_maya", "You're Frank Collins.", False),
                         "ps_photo_intact",
                     ),
                     (
-                        "周叔看着照片沉默，墙上挂着同款旧外套。",
-                        ("ch_zhou", "林建国十五年前就死了。", False),
+                        "Frank stares at the photo in silence; the same old jacket hangs on the wall.",
+                        ("ch_frank", "Frank Collins died fifteen years ago.", False),
                         "ps_photo_intact",
                     ),
                     (
-                        "林晓手机响起，是母亲来电。",
-                        ("ch_mom", "晓晓，你是不是去找他了？别信他。", True),
+                        "Maya's phone rings. It's her mother.",
+                        (
+                            "ch_mom",
+                            "Maya, did you go looking for him? Don't believe a word he says.",
+                            True,
+                        ),
                         None,
                     ),
-                    ("林晓挂断电话，周叔背过身。", None, None),
+                    ("Maya hangs up. Frank turns his back to her.", None, None),
                 ],
             ),
             SceneRow(
@@ -360,56 +433,68 @@ EPISODES: list[EpisodeRow] = [
                 "EXT",
                 "loc_shop",
                 "ls_shop_day",
-                "日",
-                {"ch_lin": "lk_lin_apron", "ch_zhao": "lk_zhao_suit"},
+                "DAY",
+                {**MAYA, "ch_ross": "lk_ross_suit"},
                 beats=[
                     (
-                        "赵经理带工人在店门口量尺寸。",
-                        ("ch_zhao", "房东改主意了，明天就拆。", False),
+                        "Derek Ross has a crew measuring the storefront.",
+                        (
+                            "ch_ross",
+                            "The landlord changed his mind. We start demolition tomorrow.",
+                            False,
+                        ),
                         None,
                     ),
-                    ("林晓挡在门口。", ("ch_lin", "他是我爸，他不会这么做。", False), None),
                     (
-                        "赵经理掏出一份签字的委托书。",
-                        ("ch_zhao", "白纸黑字，你自己看。", False),
+                        "Maya plants herself in the doorway.",
+                        ("ch_maya", "He's my father. He wouldn't do this.", False),
                         None,
                     ),
-                    ("林晓看到签名旁的日期是十五年前。", None, None),
+                    (
+                        "Ross pulls out a signed authorization.",
+                        ("ch_ross", "It's all in writing. See for yourself.", False),
+                        None,
+                    ),
+                    ("Maya sees the date next to the signature: fifteen years ago.", None, None),
                 ],
             ),
         ],
     ),
     EpisodeRow(
         "ep_03",
-        "一起还",
-        "阿梅带来抵押真相",
-        "父亲想推开女儿",
-        "推土机到门口",
+        "We Pay It Together",
+        "Jess brings the truth about the mortgage",
+        "Frank tries to push his daughter away",
+        "The excavator arrives at the door",
         [
             SceneRow(
                 "sc_03_01",
                 "INT",
                 "loc_room",
                 "ls_room_night",
-                "夜",
-                {"ch_lin": "lk_lin_apron", "ch_zhou": "lk_zhou_home", "ch_mei": "lk_mei_work"},
+                "NIGHT",
+                {**MAYA, "ch_frank": "lk_frank_home", "ch_jess": "lk_jess_work"},
                 beats=[
                     (
-                        "阿梅带林晓冲进出租屋，桌上摊着旧医院账单。",
-                        ("ch_mei", "他把店抵押给赵经理，是为了还你妈当年的医药费。", False),
+                        "Jess and Maya burst into the room; old hospital bills cover the table.",
+                        (
+                            "ch_jess",
+                            "He mortgaged the building to pay your mom's hospital bills.",
+                            False,
+                        ),
                         None,
                     ),
                     (
-                        "周叔从林晓手中拿过全家福，撕成两半。",
-                        ("ch_zhou", "就当我没回来过。", False),
+                        "Frank takes the family photo from Maya and tears it in half.",
+                        ("ch_frank", "Pretend I never came back.", False),
                         "ps_photo_torn",
                     ),
                     (
-                        "林晓把撕开的照片拼回桌上。",
-                        ("ch_lin", "你欠我的，不是钱。", False),
+                        "Maya fits the torn halves back together on the table.",
+                        ("ch_maya", "What you owe me isn't money.", False),
                         "ps_photo_torn",
                     ),
-                    ("周叔的手按在照片的裂缝上。", None, "ps_photo_torn"),
+                    ("Frank presses his hand over the tear in the photo.", None, "ps_photo_torn"),
                 ],
             ),
             SceneRow(
@@ -417,17 +502,29 @@ EPISODES: list[EpisodeRow] = [
                 "INT",
                 "loc_shop",
                 "ls_shop_day",
-                "日",
-                {"ch_lin": "lk_lin_apron", "ch_zhou": "lk_zhou_home", "ch_zhao": "lk_zhao_suit"},
+                "DAY",
+                {**MAYA, "ch_frank": "lk_frank_home", "ch_ross": "lk_ross_suit"},
                 beats=[
                     (
-                        "赵经理把合同推到柜台上。",
-                        ("ch_zhao", "签了这份，你爸的债一笔勾销。", False),
+                        "Derek Ross slides a contract across the counter.",
+                        ("ch_ross", "Sign this and your dad's debt goes away.", False),
                         None,
                     ),
-                    ("周叔挡在林晓前面。", ("ch_zhou", "店是她的，债我来还。", False), None),
-                    ("林晓撕掉合同。", ("ch_lin", "我们一起还。", False), None),
-                    ("门外传来推土机声，三人同时看向门口。", None, None),
+                    (
+                        "Frank steps in front of Maya.",
+                        ("ch_frank", "The store is hers. The debt is mine.", False),
+                        None,
+                    ),
+                    (
+                        "Maya tears up the contract.",
+                        ("ch_maya", "We pay it together.", False),
+                        None,
+                    ),
+                    (
+                        "An excavator rumbles outside; all three turn toward the door.",
+                        None,
+                        None,
+                    ),
                 ],
             ),
         ],
@@ -436,7 +533,7 @@ EPISODES: list[EpisodeRow] = [
 
 
 def _line_ms(text: str) -> int:
-    return min(1000 + len(text) * MS_PER_CHAR, SHOT_MS - 2000)
+    return min(1000 + len(text.split()) * MS_PER_WORD, SHOT_MS - 2000)
 
 
 def sample_episodes() -> list[Episode]:
@@ -523,12 +620,12 @@ def sample_storyboard() -> tuple[list[Shot], list[EpisodeTiming]]:
                             if prop_state
                             else []
                         ),
-                        framing="中景" if b_no % 2 else "近景",
-                        camera="固定机位，平视",
+                        framing="Medium shot" if b_no % 2 else "Close-up",
+                        camera="Static camera at eye level",
                         visual_action=action,
                         dialogue_cues=cues,
-                        sound="环境声",
-                        continuity="服装与站位延续上一镜",
+                        sound="Room tone",
+                        continuity="Wardrobe and positions continue from the previous shot",
                         narrative_function=action,
                         source_beat_ids=[f"bt_{suffix}"],
                         needs_shot_reference=sr.shot_reference_at == b_no - 1,
@@ -539,7 +636,7 @@ def sample_storyboard() -> tuple[list[Shot], list[EpisodeTiming]]:
             EpisodeTiming(
                 episode_id=er.episode_id,
                 dialogue_schedule=schedule,
-                speech_rate_assumption=f"zh-CN estimate {MS_PER_CHAR}ms/char, unmeasured",
+                speech_rate_assumption=f"en-US estimate {MS_PER_WORD}ms/word, unmeasured",
             )
         )
     return shots, timings
@@ -549,111 +646,117 @@ def sample_cast_sheet() -> CastSheet:
     return CastSheet(
         characters=[
             CastMember(
-                character_id="ch_lin",
-                age_range="二十八岁左右",
-                gender_presentation="女性",
-                build_and_height="中等身高，偏瘦，肩背挺直",
-                face="鹅蛋脸，眉眼清晰，习惯抿嘴，眼神倔强",
-                hair="齐耳短发，深棕色，常别在耳后",
-                default_wardrobe="深色粗针毛衣，外系帆布店铺围裙",
-                wardrobe_palette="墨绿、深灰与米白",
-                posture_and_mannerisms="说话时双手撑着柜台；紧张时整理书脊",
-                voice="中音，语速偏快，北方口音",
-                must_keep=["短发", "店铺围裙"],
-                design_freedom=["毛衣的具体款式"],
+                character_id="ch_maya",
+                age_range="About 28",
+                gender_presentation="Woman",
+                build_and_height="Average height, slim, straight-backed",
+                face="Oval face, clear brows, a stubborn set to her mouth",
+                hair="Chin-length dark brown hair, usually tucked behind her ears",
+                default_wardrobe="Chunky dark knit sweater under a canvas shop apron",
+                wardrobe_palette="Forest green, charcoal and off-white",
+                posture_and_mannerisms="Leans on the counter with both hands; straightens book spines when nervous",
+                voice="Mid-range, quick, plain Midwestern accent",
+                must_keep=["Chin-length hair", "The shop apron"],
+                design_freedom=["The sweater's exact pattern"],
             ),
             CastMember(
-                character_id="ch_zhou",
-                age_range="六十岁左右",
-                gender_presentation="男性",
-                build_and_height="偏高，略驼背，手掌粗大",
-                face="面颊消瘦，皱纹深，目光躲闪",
-                hair="灰白短发，略显凌乱",
-                distinguishing_features="右手背一块旧烫伤疤，与全家福中父亲的疤一致",
-                default_wardrobe="洗旧的棕色夹克，深色长裤",
-                wardrobe_palette="褪色的棕与灰",
-                posture_and_mannerisms="习惯把右手插进口袋遮住伤疤",
-                voice="低沉沙哑，说话慢，常停顿",
-                must_keep=["右手背烫伤疤的位置与形状", "旧夹克"],
-                design_freedom=["皱纹与发型细节"],
+                character_id="ch_frank",
+                age_range="About 60",
+                gender_presentation="Man",
+                build_and_height="Tall with a slight stoop, big hands",
+                face="Hollow cheeks, deep lines, eyes that avoid yours",
+                hair="Short gray hair, a little unkempt",
+                distinguishing_features=(
+                    "An old burn scar on the back of his right hand, matching the father's scar "
+                    "in the family photo"
+                ),
+                default_wardrobe="A faded brown canvas work jacket and dark trousers",
+                wardrobe_palette="Faded browns and grays",
+                posture_and_mannerisms="Keeps his right hand in his pocket to hide the scar",
+                voice="Low and rough, slow, with long pauses",
+                must_keep=[
+                    "The position and shape of the scar on his right hand",
+                    "The old work jacket",
+                ],
+                design_freedom=["Wrinkles and hairstyle details"],
             ),
             CastMember(
-                character_id="ch_mei",
-                age_range="二十六岁左右",
-                gender_presentation="女性",
-                build_and_height="娇小，动作利落",
-                face="圆脸，笑容明显",
-                hair="高马尾",
-                default_wardrobe="书店统一的藏青工作服",
-                wardrobe_palette="藏青与白",
-                posture_and_mannerisms="走路快，总抱着一摞书",
-                voice="清亮，语速快",
-                must_keep=["马尾", "工作服颜色与林晓的围裙区分"],
+                character_id="ch_jess",
+                age_range="About 26",
+                gender_presentation="Woman",
+                build_and_height="Petite and quick-moving",
+                face="Round face, an easy smile",
+                hair="High ponytail",
+                default_wardrobe="The store's navy work shirt",
+                wardrobe_palette="Navy and white",
+                posture_and_mannerisms="Walks fast, always carrying a stack of books",
+                voice="Bright and fast",
+                must_keep=["Ponytail", "A work shirt color distinct from Maya's apron"],
             ),
             CastMember(
-                character_id="ch_zhao",
-                age_range="四十岁左右",
-                gender_presentation="男性",
-                build_and_height="中等身材，略发福",
-                face="方脸，常带客套的笑",
-                hair="梳得一丝不苟的背头",
-                default_wardrobe="合身的深灰西装，白衬衫，无领带",
-                wardrobe_palette="深灰与白，与书店的暖色对立",
-                posture_and_mannerisms="站姿笔直，习惯看表",
-                voice="中音，礼貌但不容商量",
-                must_keep=["深灰西装"],
+                character_id="ch_ross",
+                age_range="About 40",
+                gender_presentation="Man",
+                build_and_height="Medium build, a little heavy",
+                face="Square face with a practiced, polite smile",
+                hair="Neatly combed back",
+                default_wardrobe="A fitted charcoal suit, white shirt, no tie",
+                wardrobe_palette="Charcoal and white, against the store's warm colors",
+                posture_and_mannerisms="Stands very straight; checks his watch",
+                voice="Mid-range, polite but final",
+                must_keep=["The charcoal suit"],
             ),
             CastMember(
                 character_id="ch_mom",
                 on_screen=False,
-                age_range="五十多岁",
-                gender_presentation="女性",
-                build_and_height="不出镜",
-                face="不出镜",
-                hair="不出镜",
-                default_wardrobe="不出镜",
-                wardrobe_palette="不出镜",
-                posture_and_mannerisms="不出镜",
-                voice="温和但疲惫，南方口音，只在电话中出现",
+                age_range="Mid-fifties",
+                gender_presentation="Woman",
+                build_and_height="Not seen",
+                face="Not seen",
+                hair="Not seen",
+                default_wardrobe="Not seen",
+                wardrobe_palette="Not seen",
+                posture_and_mannerisms="Not seen",
+                voice="Warm but tired, heard only on the phone",
             ),
         ],
         looks=[
             CastLook(
-                look_id="lk_lin_apron",
-                character_id="ch_lin",
-                wardrobe="深色毛衣配帆布围裙",
-                hair_and_makeup="素颜，短发别在耳后",
-                changes_from_base="无，即基础造型",
+                look_id="lk_maya_apron",
+                character_id="ch_maya",
+                wardrobe="Dark knit sweater and canvas apron",
+                hair_and_makeup="No makeup, hair tucked behind her ears",
+                changes_from_base="None; this is the base look",
             ),
             CastLook(
-                look_id="lk_zhou_rain",
-                character_id="ch_zhou",
-                wardrobe="湿透的旧夹克，加一顶深色鸭舌帽",
-                hair_and_makeup="头发贴在额头，脸上有雨水",
-                condition="全身被雨淋湿",
-                changes_from_base="淋湿，加鸭舌帽",
-                must_keep=["鸭舌帽遮住半张脸"],
+                look_id="lk_frank_rain",
+                character_id="ch_frank",
+                wardrobe="The old work jacket, soaked through, and a dark flat cap",
+                hair_and_makeup="Hair plastered to his forehead, rain on his face",
+                condition="Soaked by rain",
+                changes_from_base="Wet through, with a flat cap",
+                must_keep=["The cap brim shading half his face"],
             ),
             CastLook(
-                look_id="lk_zhou_home",
-                character_id="ch_zhou",
-                wardrobe="起球的灰色旧毛衫",
-                hair_and_makeup="头发凌乱，未刮胡子",
-                changes_from_base="脱下夹克，换居家毛衫",
+                look_id="lk_frank_home",
+                character_id="ch_frank",
+                wardrobe="A pilled gray cardigan",
+                hair_and_makeup="Unkempt hair, unshaven",
+                changes_from_base="Jacket off, cardigan on",
             ),
             CastLook(
-                look_id="lk_mei_work",
-                character_id="ch_mei",
-                wardrobe="书店藏青工作服",
-                hair_and_makeup="高马尾，淡妆",
-                changes_from_base="无，即基础造型",
+                look_id="lk_jess_work",
+                character_id="ch_jess",
+                wardrobe="The store's navy work shirt",
+                hair_and_makeup="High ponytail, light makeup",
+                changes_from_base="None; this is the base look",
             ),
             CastLook(
-                look_id="lk_zhao_suit",
-                character_id="ch_zhao",
-                wardrobe="深灰西装",
-                hair_and_makeup="背头，整洁",
-                changes_from_base="无，即基础造型",
+                look_id="lk_ross_suit",
+                character_id="ch_ross",
+                wardrobe="Charcoal suit",
+                hair_and_makeup="Hair combed back, clean-shaven",
+                changes_from_base="None; this is the base look",
             ),
         ],
     )
@@ -665,61 +768,67 @@ def sample_set_sheet() -> SetSheet:
             SetLocation(
                 location_id="loc_shop",
                 interior_exterior="INT",
-                era_and_region="当代中国南方老城区",
-                layout="狭长店面，入口玻璃门正对收银柜台，两侧高至天花板的书架",
-                key_furnishings="木质收银柜台、旧书架、门口风铃、柜台上的台灯",
-                materials_and_textures="磨旧的实木、泛黄纸张、斑驳的水磨石地面",
-                color_palette="暖棕与米黄",
-                lighting="白天自然光从门口进入；夜晚暖色吊灯与柜台台灯",
-                entrances_and_blocking="唯一入口为临街玻璃门；人物从门口走向柜台，柜台后是林晓的固定位置",
-                ambient_sound="门口风铃、街道车声",
-                must_keep=["玻璃门正对柜台的布局", "门口风铃"],
-                design_freedom=["书架上书籍的具体摆放"],
+                era_and_region="Present-day small river town in Ohio, an old Main Street storefront",
+                layout=(
+                    "A long, narrow store; the glass front door faces the checkout counter at the "
+                    "back, with floor-to-ceiling bookshelves down both sides"
+                ),
+                key_furnishings="Wooden checkout counter, old bookshelves, a bell over the door, a desk lamp on the counter",
+                materials_and_textures="Worn hardwood, yellowed paper, scuffed hardwood floor",
+                color_palette="Warm browns and cream",
+                lighting="Daylight through the front door by day; warm pendant lights and the counter lamp at night",
+                entrances_and_blocking=(
+                    "The glass front door is the only entrance; people walk from the door to the "
+                    "counter, and Maya's place is behind the counter"
+                ),
+                ambient_sound="The door bell, traffic on Main Street",
+                must_keep=["The front door facing the counter", "The bell over the door"],
+                design_freedom=["How the books are arranged on the shelves"],
             ),
             SetLocation(
                 location_id="loc_room",
                 interior_exterior="INT",
-                era_and_region="当代中国南方老旧居民楼",
-                layout="单间，门对窗，左侧单人床，右侧小方桌",
-                key_furnishings="方桌、单人床、墙上挂着的旧外套、桌上的饭盒",
-                materials_and_textures="剥落的墙皮、旧木家具",
-                color_palette="灰绿与暗黄",
-                lighting="窗户为主光；夜晚只有一盏台灯",
-                entrances_and_blocking="走廊一侧的木门；进门后正面是窗",
-                ambient_sound="楼道脚步声、远处电视声",
-                must_keep=["门对窗的布局"],
+                era_and_region="Present-day small Ohio town, a room above a hardware store",
+                layout="One room; the door faces the window, a single bed on the left, a small table on the right",
+                key_furnishings="Small table, single bed, an old jacket on a wall hook, a takeout container on the table",
+                materials_and_textures="Peeling paint, old wooden furniture",
+                color_palette="Gray-green and dull yellow",
+                lighting="The window is the main light; at night only a desk lamp",
+                entrances_and_blocking="A wooden door from the hallway; the window is straight ahead as you enter",
+                ambient_sound="Footsteps on the stairs, a TV through the wall",
+                must_keep=["The door facing the window"],
             ),
         ],
         states=[
             SetState(
                 location_state_id="ls_shop_day",
                 location_id="loc_shop",
-                time_of_day="白天",
-                lighting="门口进来的自然光",
-                changes_from_base="营业中，门口挂着营业牌",
+                time_of_day="Day",
+                lighting="Daylight through the front door",
+                changes_from_base='Open for business, with an "OPEN" sign hanging on the door',
             ),
             SetState(
                 location_state_id="ls_shop_night",
                 location_id="loc_shop",
-                time_of_day="雨夜",
-                lighting="只开柜台台灯，玻璃门外有雨水反光",
-                condition="窗外下雨",
-                changes_from_base="打烊，卷帘半拉，门外下雨",
-                must_keep=["玻璃门上的雨水"],
+                time_of_day="Rainy night",
+                lighting="Only the counter lamp on; rain reflections on the glass door",
+                condition="Raining outside",
+                changes_from_base="Closing up, the blind half down, rain outside",
+                must_keep=["Rain on the glass door"],
             ),
             SetState(
                 location_state_id="ls_room_day",
                 location_id="loc_room",
-                time_of_day="白天",
-                lighting="窗户的自然光",
-                changes_from_base="无，即基础状态",
+                time_of_day="Day",
+                lighting="Daylight from the window",
+                changes_from_base="None; this is the base state",
             ),
             SetState(
                 location_state_id="ls_room_night",
                 location_id="loc_room",
-                time_of_day="夜晚",
-                lighting="只有桌上台灯，房间大部分在暗处",
-                changes_from_base="夜晚，仅台灯照明",
+                time_of_day="Night",
+                lighting="Only the desk lamp; most of the room in shadow",
+                changes_from_base="Night, lit only by the desk lamp",
             ),
         ],
     )
@@ -730,29 +839,29 @@ def sample_prop_sheet() -> PropSheet:
         props=[
             PropItem(
                 prop_id="prop_photo",
-                size_and_scale="五寸相片，装在巴掌大的旧相框里",
-                materials="相纸，木质相框",
-                color_and_finish="褪色的彩色照片，边缘泛黄",
-                condition_and_wear="相框边角磨损",
-                distinguishing_marks="照片上父亲的右手背可见烫伤疤",
-                handling="林晓收在柜台抽屉里；近景时必须看清父亲的手",
-                must_keep=["父亲右手背的烫伤疤清晰可见"],
-                design_freedom=["一家三口的站位"],
+                size_and_scale="A 4x6 print in a palm-sized old frame",
+                materials="Photo paper, wooden frame",
+                color_and_finish="A faded color print with yellowed edges",
+                condition_and_wear="Worn frame corners",
+                distinguishing_marks="The burn scar on the back of the father's right hand is visible in the photo",
+                handling="Maya keeps it in the counter drawer; close-ups must show the father's hand clearly",
+                must_keep=["The burn scar on the father's right hand, clearly visible"],
+                design_freedom=["How the family of three is posed"],
             )
         ],
         states=[
             PropVariant(
                 prop_state_id="ps_photo_intact",
                 prop_id="prop_photo",
-                condition="完整",
-                changes_from_base="无，即基础状态",
+                condition="Intact",
+                changes_from_base="None; this is the base state",
             ),
             PropVariant(
                 prop_state_id="ps_photo_torn",
                 prop_id="prop_photo",
-                condition="从中间撕成两半",
-                changes_from_base="被撕开，裂口正好穿过父亲和林晓之间",
-                must_keep=["裂口位置"],
+                condition="Torn in half down the middle",
+                changes_from_base="Torn, the tear running exactly between the father and Maya",
+                must_keep=["Where the tear runs"],
             ),
         ],
     )
@@ -760,11 +869,11 @@ def sample_prop_sheet() -> PropSheet:
 
 def sample_style_brief() -> StyleBrief:
     return StyleBrief(
-        medium="真人写实",
-        era_region="当代中国南方小城",
-        color_and_light="暖黄室内光与冷色雨夜对比",
+        medium="Live-action, naturalistic",
+        era_region="Present-day small-town Ohio",
+        color_and_light="Warm interior light against cool rainy nights",
         aspect_ratio="9:16",
-        assumptions=["纯文字种子，视觉风格为创作设定"],
+        assumptions=["Text-only seed; the visual style is a creative choice"],
     )
 
 
@@ -776,12 +885,15 @@ def sample_design_overrides() -> dict[str, AssetRequirement]:
         subject_refs=[
             {"entity_type": "location", "entity_id": "loc_shop", "variant_id": "ls_shop_night"}
         ],
-        design_brief="雨夜打烊的旧书店。玻璃门正对柜台，门外雨幕可见。",
+        design_brief=(
+            "The used bookstore closing up on a rainy night. The glass front door faces the "
+            "counter, with rain visible outside."
+        ),
         must_keep=[
-            "玻璃门到柜台之间无遮挡，周叔进门动作可被柜台后的林晓看见",
-            "柜台、书架、门的相对位置与白天状态一致",
+            "A clear line from the front door to the counter, so Maya behind the counter sees Frank come in",
+            "Counter, shelves and door in the same positions as in the daytime state",
         ],
-        design_freedom=["书脊颜色与吊灯样式可在统一风格内选择"],
+        design_freedom=["Book spine colors and pendant lamp style, within one consistent look"],
         used_by=[{"episode_id": "ep_01", "scene_id": "sc_01_02", "shot_id": "sh_01_02_01"}],
     )
     return {shop_night.requirement_id: shop_night}

@@ -446,7 +446,7 @@ def check_entity_keys(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) 
 
     def state(owner: str, label: str, st) -> None:
         keys(owner, f"{label}.knowledge", st.knowledge)
-        # Values are prose ("现金信封已收回内袋"), not prop IDs: the spec registers only
+        # Values are prose ("the cash envelope is back in his inside pocket"), not prop IDs: the spec registers only
         # plot-relevant props, so requiring IDs here failed a valid live script.
         keys(owner, f"{label}.possessions", st.possessions)
 

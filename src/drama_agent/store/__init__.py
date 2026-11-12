@@ -6,6 +6,8 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
+from ..models.images import GeneratedImage
+from ..models.package import utcnow
 
 
 class Repository(Protocol):
@@ -14,7 +16,8 @@ class Repository(Protocol):
     def get_source_assets(self, asset_ids: list[str]) -> dict[str, dict[str, Any]]: ...
     def save_job(self, job: Job) -> None: ...
     def get_job(self, job_id: str) -> Job | None: ...
-    def list_jobs(self, limit: int = 50) -> list[Job]: ...
+    def list_jobs(self, limit: int = 50, include_archived: bool = True) -> list[Job]: ...
+    def list_archive_candidates(self) -> list[Job]: ...
     def list_active_jobs(self) -> list[Job]: ...
     def save_package(self, pkg: ProductionPackage, published: bool) -> None: ...
     def get_package(
@@ -31,6 +34,13 @@ class Repository(Protocol):
     def save_llm_call(self, call: LLMCall) -> None: ...
     def get_llm_call(self, call_id: str) -> LLMCall | None: ...
     def list_llm_calls(self, job_id: str) -> list[LLMCall]: ...
+    def save_image(self, image: GeneratedImage) -> None: ...
+    def get_image(self, image_id: str) -> GeneratedImage | None: ...
+    def list_images(
+        self, package_id: str, revision_id: str | None = None
+    ) -> list[GeneratedImage]: ...
+    def claim_next_image(self) -> GeneratedImage | None: ...
+    def requeue_running_images(self, older_than_s: float = 0.0) -> int: ...
 
 
 class InMemoryRepository:
@@ -49,6 +59,7 @@ class InMemoryRepository:
         self.evaluation_reports: dict[tuple[str, str], QAReport] = {}
         self.events: list[TraceEvent] = []
         self.llm_calls: dict[str, LLMCall] = {}
+        self.images: dict[str, GeneratedImage] = {}
 
     def save_source_asset(self, asset_id: str, meta: dict[str, Any]) -> None:
         self.source_assets[asset_id] = meta
@@ -65,9 +76,18 @@ class InMemoryRepository:
     def get_job(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)
 
-    def list_jobs(self, limit: int = 50) -> list[Job]:
+    def list_jobs(self, limit: int = 50, include_archived: bool = True) -> list[Job]:
         """Newest first."""
-        return sorted(self.jobs.values(), key=lambda j: j.created_at, reverse=True)[:limit]
+        jobs = [j for j in self.jobs.values() if include_archived or not j.archived]
+        return sorted(jobs, key=lambda j: j.created_at, reverse=True)[:limit]
+
+    def list_archive_candidates(self) -> list[Job]:
+        """Jobs not archived whose language isn't en-US (see archive.py)."""
+        return [
+            j
+            for j in self.jobs.values()
+            if not j.archived and j.request.options.language != "en-US"
+        ]
 
     def list_active_jobs(self) -> list[Job]:
         """Jobs not yet finished (queued or running), oldest first."""
@@ -125,6 +145,41 @@ class InMemoryRepository:
             c.model_copy(update={"request": {}, "output": "", "output_chars": len(c.output)})
             for c in sorted(calls, key=lambda c: (c.started_at, c.call_id))
         ]
+
+    # Generated images ---------------------------------------------------
+
+    def save_image(self, image: GeneratedImage) -> None:
+        self.images[image.image_id] = image.model_copy(deep=True)
+
+    def get_image(self, image_id: str) -> GeneratedImage | None:
+        img = self.images.get(image_id)
+        return img.model_copy(deep=True) if img else None
+
+    def list_images(self, package_id: str, revision_id: str | None = None) -> list[GeneratedImage]:
+        return [
+            i.model_copy(deep=True)
+            for i in sorted(self.images.values(), key=lambda i: (i.created_at, i.image_id))
+            if i.package_id == package_id and revision_id in (None, i.revision_id)
+        ]
+
+    def claim_next_image(self) -> GeneratedImage | None:
+        """The oldest pending image, marked running (one worker processes images)."""
+        pending = [i for i in self.images.values() if i.status == "pending"]
+        if not pending:
+            return None
+        img = min(pending, key=lambda i: (i.created_at, i.image_id))
+        img.status, img.started_at = "running", utcnow()
+        return img.model_copy(deep=True)
+
+    def requeue_running_images(self, older_than_s: float = 0.0) -> int:
+        """Queue again images left running for longer than older_than_s (interrupted)."""
+        n = 0
+        cutoff = utcnow().timestamp() - older_than_s
+        for img in self.images.values():
+            started = img.started_at.timestamp() if img.started_at else 0.0
+            if img.status == "running" and started <= cutoff:
+                img.status, img.started_at, n = "pending", None, n + 1
+        return n
 
 
 def __getattr__(name: str) -> Any:

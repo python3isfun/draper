@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
+from ..models.images import GeneratedImage
+from ..models.package import utcnow
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
-# Each step is additive, so older files upgrade in place (see _migrate).
-SCHEMA_VERSION = 3
+# v4: generated_images. Each step is additive, so older files upgrade in place (see _migrate).
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -81,7 +83,21 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     output            TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS llm_calls_job ON llm_calls (job_id, started_at);
+CREATE TABLE IF NOT EXISTS generated_images (
+    image_id    TEXT PRIMARY KEY,
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    status      TEXT NOT NULL,              -- pending | running | done | failed
+    created_at  TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS generated_images_pkg ON generated_images (package_id, created_at);
+CREATE INDEX IF NOT EXISTS generated_images_status ON generated_images (status, created_at);
 """
+
+
+# Jobs saved before the `archived` field existed have no key: not archived.
+_NOT_ARCHIVED = "coalesce(json_extract(data, '$.archived'), 0) = 0"
 
 
 class SqliteRepository:
@@ -169,10 +185,20 @@ class SqliteRepository:
         raw = self._one("SELECT data FROM jobs WHERE job_id = ?", (job_id,))
         return Job.model_validate_json(raw) if raw else None
 
-    def list_jobs(self, limit: int = 50) -> list[Job]:
+    def list_jobs(self, limit: int = 50, include_archived: bool = True) -> list[Job]:
+        where = "" if include_archived else f"WHERE {_NOT_ARCHIVED} "
         with self._lock:
             rows = self._conn.execute(
-                "SELECT data FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+                f"SELECT data FROM jobs {where}ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [Job.model_validate_json(r[0]) for r in rows]
+
+    def list_archive_candidates(self) -> list[Job]:
+        """Jobs not archived whose language isn't en-US (see archive.py)."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT data FROM jobs WHERE {_NOT_ARCHIVED} AND "
+                "coalesce(json_extract(data, '$.request.options.language'), '') != 'en-US'"
             ).fetchall()
         return [Job.model_validate_json(r[0]) for r in rows]
 
@@ -319,3 +345,77 @@ class SqliteRepository:
             )
             for meta, c, r, n in rows
         ]
+
+    # Generated images -------------------------------------------------------
+
+    def save_image(self, image: GeneratedImage) -> None:
+        self._exec(
+            "INSERT INTO generated_images (image_id, package_id, revision_id, status, created_at, "
+            "data) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (image_id) DO UPDATE SET "
+            "status = excluded.status, data = excluded.data",
+            (
+                image.image_id,
+                image.package_id,
+                image.revision_id,
+                image.status,
+                image.created_at.isoformat(),
+                image.model_dump_json(),
+            ),
+        )
+
+    def get_image(self, image_id: str) -> GeneratedImage | None:
+        raw = self._one("SELECT data FROM generated_images WHERE image_id = ?", (image_id,))
+        return GeneratedImage.model_validate_json(raw) if raw else None
+
+    def list_images(self, package_id: str, revision_id: str | None = None) -> list[GeneratedImage]:
+        sql = "SELECT data FROM generated_images WHERE package_id = ?"
+        params: tuple[Any, ...] = (package_id,)
+        if revision_id is not None:
+            sql += " AND revision_id = ?"
+            params += (revision_id,)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY created_at, image_id", params).fetchall()
+        return [GeneratedImage.model_validate_json(r[0]) for r in rows]
+
+    def claim_next_image(self) -> GeneratedImage | None:
+        """The oldest pending image, marked running, atomically."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT data FROM generated_images WHERE status = 'pending' "
+                    "ORDER BY created_at, image_id LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    self._conn.execute("COMMIT")
+                    return None
+                img = GeneratedImage.model_validate_json(row[0])
+                img.status, img.started_at = "running", utcnow()
+                self._conn.execute(
+                    "UPDATE generated_images SET status = ?, data = ? WHERE image_id = ?",
+                    (img.status, img.model_dump_json(), img.image_id),
+                )
+                self._conn.execute("COMMIT")
+                return img
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def requeue_running_images(self, older_than_s: float = 0.0) -> int:
+        """Queue again images left running for longer than older_than_s (interrupted).
+        Several processes may share the database, so a younger running image belongs to
+        someone still working on it."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM generated_images WHERE status = 'running'"
+            ).fetchall()
+        cutoff = utcnow().timestamp() - older_than_s
+        n = 0
+        for (raw,) in rows:
+            img = GeneratedImage.model_validate_json(raw)
+            if img.started_at and img.started_at.timestamp() > cutoff:
+                continue
+            img.status, img.started_at = "pending", None
+            self.save_image(img)
+            n += 1
+        return n

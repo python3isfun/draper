@@ -6,12 +6,12 @@ from drama_agent.pipeline.impact import analyze_impact
 def test_reuse_across_episodes(package):
     """Acceptance 9: one requirement per character look / location state across episodes."""
     reqs = package.asset_requirements.by_id()
-    apron = reqs["ar_character_look_ch_lin_lk_lin_apron"]
+    apron = reqs["ar_character_look_ch_maya_lk_maya_apron"]
     assert {u.episode_id for u in apron.used_by} == {"ep_01", "ep_02", "ep_03"}
     # A costume change gets its own look under the same character identity.
-    rain = reqs["ar_character_look_ch_zhou_lk_zhou_rain"]
-    home = reqs["ar_character_look_ch_zhou_lk_zhou_home"]
-    assert rain.depends_on == home.depends_on == ["ar_character_identity_ch_zhou"]
+    rain = reqs["ar_character_look_ch_frank_lk_frank_rain"]
+    home = reqs["ar_character_look_ch_frank_lk_frank_home"]
+    assert rain.depends_on == home.depends_on == ["ar_character_identity_ch_frank"]
 
 
 def test_voice_only_character_has_no_visual_requirement(package):
@@ -42,12 +42,12 @@ def test_shot_reference_depends_on_its_assets(package):
 
 def test_look_change_marks_look_and_shot_reference_stale(package):
     """Acceptance 11: look change invalidates its image and dependent compositions only."""
-    impact = analyze_impact(package, ["lk_zhou_rain"], [])
+    impact = analyze_impact(package, ["lk_frank_rain"], [])
     assert impact.stale_requirement_ids == [
-        "ar_character_look_ch_zhou_lk_zhou_rain",
+        "ar_character_look_ch_frank_lk_frank_rain",
         "ar_shot_sh_01_02_04",
     ]
-    assert "ar_character_identity_ch_zhou" not in impact.stale_requirement_ids
+    assert "ar_character_identity_ch_frank" not in impact.stale_requirement_ids
 
 
 def test_dialogue_only_change_keeps_images(package):
@@ -58,7 +58,7 @@ def test_dialogue_only_change_keeps_images(package):
 
 
 def test_character_story_change_reaches_later_scenes(package):
-    impact = analyze_impact(package, ["ch_zhou"], [])
+    impact = analyze_impact(package, ["ch_frank"], [])
     assert {"sc_01_02", "sc_03_02"} <= set(impact.impacted_ids)
     assert impact.stale_requirement_ids == []
 

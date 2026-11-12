@@ -143,6 +143,10 @@ class Job(BaseModel):
     # Set on API responses from the queue's pause flag; not authoritative when stored
     # (the flag lives in the queue so a running worker can't overwrite it).
     pause_requested: bool = False
+    # Archived: hidden from the job list and never run again (e.g. a Chinese-language story
+    # from before the app became English-only). The data is kept.
+    archived: bool = False
+    archive_reason: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

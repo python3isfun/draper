@@ -60,7 +60,7 @@ const isActive = (s) => s === "queued" || s === "running";
 // ---------------------------------------------------------------------------
 // State + routing (hash: #job=<id>&tab=<tab>)
 
-const state = { jobs: [], job: null, pkg: null, tab: "overview", pollTimer: null, assetFilter: "all", revise: null, offline: false, attachments: [], assets: {}, sourcesOpen: null, openDetails: new Set() };
+const state = { jobs: [], job: null, pkg: null, tab: "overview", pollTimer: null, assetFilter: "all", revise: null, offline: false, attachments: [], assets: {}, sourcesOpen: null, openDetails: new Set(), images: { key: null, view: null, error: "", timer: null } };
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
@@ -93,6 +93,8 @@ async function route() {
     stopActivity();
     state.revise = null;
     state.sourcesOpen = null;
+    clearTimeout(state.images.timer);
+    state.images = { key: null, view: null, error: "", timer: null };
     renderMain();
   } else if (state.job) {
     // Same job, different tab: a user action, so redraw now. (loadJob below only redraws
@@ -143,14 +145,14 @@ async function loadJob(jobId) {
     const prev = state.job?.job_id === jobId ? state.job : null;
     const changed = !prev || prev.status !== job.status || prev.revision_id !== job.revision_id;
     let pkg = prev ? state.pkg : null;
-    if (job.package_id && (changed || !pkg)) {
+    if (job.package_id && !job.archived && (changed || !pkg)) {
       const q = new URLSearchParams({ revision_id: job.revision_id || "" });
       pkg = await api(`/v1/drama-packages/${encodeURIComponent(job.package_id)}?${q}`);
       if (!stillCurrent()) return;
     }
     // Polling must not rebuild the page when nothing changed: rebuilding destroys any text
     // the user has selected, which made running jobs impossible to copy from.
-    await loadAssets(job);
+    if (!job.archived) await loadAssets(job);
     if (!stillCurrent()) return;
     const sig = JSON.stringify(job) + "|" + (pkg?.revision_id || "") + "|" + assetSig(job);
     const unchanged = sig === state.renderedSig;
@@ -270,7 +272,7 @@ function renderAttachments() {
     const select = h("select", { "aria-label": "Use as", onchange: (e) => { a.use_as = e.target.value; } },
       USE_AS.map(([v, label]) => h("option", { value: v, selected: v === a.use_as }, label)));
     const prompt = h("textarea", {
-      rows: 2, placeholder: isVideo ? "Optional: what to take from this video, e.g. 保留父女重逢的情节" : "Optional: what to do with this image, e.g. 让她成为女主角，复仇题材",
+      rows: 2, placeholder: isVideo ? "Optional: what to take from this video, e.g. keep the father-daughter reunion" : "Optional: what to do with this image, e.g. make her the lead in a revenge story",
       oninput: (e) => { a.text = e.target.value; },
     });
     prompt.value = a.text;
@@ -355,7 +357,7 @@ $("#new-job").addEventListener("submit", async (ev) => {
     const body = {
       sources,
       options: {
-        language: f.get("language") || null,
+        language: "en-US",
         story_scope: f.get("story_scope"),
         reference_mode: f.get("reference_mode"),
         genre: f.get("genre").trim() || null,
@@ -415,6 +417,19 @@ function renderMain() {
   }
   if (!job) {
     main.replaceChildren(h("div", { class: "loading" }, "Loading…"));
+    return;
+  }
+  if (job.archived) {
+    // Archived stories (e.g. Chinese-language ones from before the app was English-only) are
+    // kept in the database but not shown.
+    main.replaceChildren(
+      h("div", { class: "card placeholder" },
+        h("h2", {}, "Archived story"),
+        h("p", {}, job.archive_reason || "This story is archived."),
+        h("p", { class: "muted small" }, "It is kept in the database but not shown, and it can't be retried or resumed."),
+        h("code", { class: "muted" }, job.job_id),
+      ),
+    );
     return;
   }
   main.replaceChildren(renderJobHeader(job), state.pkg ? renderPackage(state.pkg) : renderWaiting(job));
@@ -964,13 +979,131 @@ function renderProps(pkg, L) {
 
 const ASSET_TYPES = ["character_identity", "character_look", "location", "prop", "shot_reference"];
 
+// Reference images (generated on demand) ----------------------------------------
+
+const imagesKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
+const IMAGE_TYPES = new Set(["character_identity", "character_look", "location", "prop"]);
+
+// Loads the package's images; polls while any are waiting or generating, as long as the
+// Assets tab of this package stays open.
+async function loadImages(pkg) {
+  const key = imagesKey(pkg);
+  const im = state.images;
+  if (im.key !== key) Object.assign(im, { key, view: null, error: "" });
+  clearTimeout(im.timer);
+  im.timer = null;
+  im.loading = true;
+  try {
+    const q = new URLSearchParams({ revision_id: pkg.revision_id });
+    const view = await api(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/images?${q}`);
+    if (state.images.key !== key) return;
+    const changed = JSON.stringify(view) !== JSON.stringify(im.view);
+    im.view = view;
+    im.error = "";
+    if (changed && state.tab === "assets") renderWhenNotSelecting();
+  } catch (e) {
+    if (state.images.key !== key) return;
+    im.error = e.message;
+    if (state.tab === "assets") renderWhenNotSelecting();  // otherwise "Loading…" forever
+  } finally {
+    im.loading = false;
+  }
+  const busy = im.view && (im.view.pending || im.view.running);
+  if (busy && state.tab === "assets" && state.pkg && imagesKey(state.pkg) === key) {
+    im.timer = setTimeout(() => loadImages(state.pkg), 2000);
+  }
+}
+
+async function imageAction(url, button) {
+  button.disabled = true;
+  state.images.error = "";
+  try {
+    await api(url, { method: "POST" });
+  } catch (e) {
+    state.images.error = e.message;
+  }
+  await loadImages(state.pkg);
+  renderMain();
+}
+
+function renderImagesPanel(pkg) {
+  const im = state.images;
+  const stale = im.key === imagesKey(pkg) && im.view && (im.view.pending || im.view.running) && !im.timer && !im.loading;
+  if (im.key !== imagesKey(pkg) || stale) loadImages(pkg);  // first load, or resume polling
+  const v = im.key === imagesKey(pkg) ? im.view : null;
+  const wanted = pkg.asset_requirements.items.filter((r) => IMAGE_TYPES.has(r.asset_type))
+    .reduce((n, r) => n + r.deliverables.filter((d) => d.required).length, 0);
+  const busy = v && (v.pending || v.running);
+  const have = v ? v.pending + v.running + v.done : 0;
+  const missing = v ? wanted - have : wanted;
+  const base = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/images`;
+  const draft = h("input", { type: "checkbox", id: "img-draft" });
+  const start = (e) => {
+    const q = new URLSearchParams({ revision_id: pkg.revision_id, draft: String(draft.checked), job_id: state.job.job_id });
+    imageAction(`${base}?${q}`, e.currentTarget);
+  };
+  let label = "Generate images";
+  if (v && v.done + v.pending + v.running > 0) label = `Generate missing (${missing})`;
+  const progress = !v ? (im.error ? "Couldn't load images." : "Loading…")
+    : [`${v.done} of ${wanted} done`, v.running && "1 generating", v.pending && `${v.pending} waiting`,
+       v.failed && `${v.failed} failed`].filter(Boolean).join(" · ");
+  return h("section", { class: "card images-panel" },
+    h("div", {},
+      h("h3", {}, "Reference images"),
+      h("p", { class: "muted small" },
+        `Characters, looks, locations and props, made with ${v?.image_model || "the image model"} one at a time `
+        + "(~10 s each at full size). Looks reuse the character's face so the same person appears in every look."),
+      h("p", { class: "small" }, progress),
+      im.error && h("p", { class: "form-error" }, im.error),
+      !v && im.error && h("button", { type: "button", class: "btn small", onclick: () => { im.error = ""; loadImages(pkg); renderMain(); } }, "Retry"),
+    ),
+    h("div", { class: "job-actions" },
+      h("label", { class: "small muted check", for: "img-draft", title: "About 1024 px instead of ~16 MP: much faster, rougher" }, draft, " Draft size"),
+      busy ? h("button", { type: "button", class: "btn small", disabled: true }, "Generating…")
+        : h("button", { type: "button", class: "btn small primary-outline", disabled: missing <= 0, onclick: start }, missing > 0 ? label : "All generated"),
+    ),
+  );
+}
+
+function renderReqImages(r) {
+  const v = state.images.view;
+  if (!v || !IMAGE_TYPES.has(r.asset_type)) return null;
+  const mine = v.images.filter((i) => i.requirement_id === r.requirement_id);
+  if (!mine.length) return null;
+  const latest = {};
+  for (const i of mine) if (!latest[i.deliverable_id] || i.version > latest[i.deliverable_id].version) latest[i.deliverable_id] = i;
+  return h("div", { class: "req-images" }, r.deliverables.filter((d) => latest[d.deliverable_id]).map((d) => {
+    const img = latest[d.deliverable_id];
+    const url = (variant) => `/v1/generated-images/${encodeURIComponent(img.image_id)}/${variant}`;
+    const status = img.status === "running" && img.prompt_source === "pending" ? "writing prompt…"
+      : { pending: "waiting", running: "generating…", failed: "failed", done: null }[img.status];
+    const by = { model: `written by ${img.prompt_model || "the text model"}`, template: "built-in template",
+      pending: "draft; rewritten before generating" }[img.prompt_source];
+    return h("figure", { class: `req-image ${img.status}` },
+      img.status === "done"
+        ? h("a", { href: url("content"), target: "_blank", rel: "noopener", title: "Open full size" },
+            h("img", { src: url("thumb"), alt: `${r.requirement_id} ${d.view}`, loading: "lazy" }))
+        : h("div", { class: "req-image-placeholder" }, status),
+      h("figcaption", {},
+        h("span", {}, d.view, img.version > 1 ? ` · v${img.version}` : ""),
+        img.status === "done" || img.status === "failed"
+          ? h("button", { type: "button", class: "btn ghost small", title: "New version with a new seed",
+              onclick: (e) => imageAction(`/v1/generated-images/${encodeURIComponent(img.image_id)}/regenerate`, e.currentTarget) }, "Regenerate")
+          : null),
+      img.error && h("p", { class: `small ${img.status === "failed" ? "form-error" : "muted"}` }, img.error),
+      h("details", { class: "small" }, h("summary", {}, `Prompt (${by})`), h("pre", { class: "call-body" }, img.prompt)),
+    );
+  }));
+}
+
 function renderAssets(pkg) {
   const ar = pkg.asset_requirements;
   const items = state.assetFilter === "all" ? ar.items : ar.items.filter((r) => r.asset_type === state.assetFilter);
   const count = (t) => ar.items.filter((r) => r.asset_type === t).length;
   const sb = ar.style_brief;
   return h("div", {},
-    h("section", { class: "card" },
+    renderImagesPanel(pkg),
+    h("section", { class: "card", style: "margin-top:12px" },
       h("h3", {}, "Style brief"),
       h("dl", { class: "kv", style: "margin-top:8px" },
         kv("Medium", sb.medium), kv("Era / region", sb.era_region), kv("Color & light", sb.color_and_light), kv("Aspect ratio", sb.aspect_ratio)),
@@ -987,6 +1120,7 @@ function renderAssets(pkg) {
             h("span", { class: "chip info" }, r.asset_type), statusChip(r.requirement_status),
             h("span", { class: "chip" }, r.priority),
             h("span", { class: "chip", title: r.used_by.map((u) => u.shot_id).join(", ") }, `${r.used_by.length} shots`)),
+          renderReqImages(r),
           h("p", { class: "brief small" }, r.design_brief),
           h("div", { class: "lists" },
             h("div", {}, h("h4", {}, "Must keep"), bullet(r.must_keep)),
@@ -1114,7 +1248,7 @@ function renderRevise(pkg) {
     renderMain();
   };
 
-  const instruction = h("textarea", { rows: 3, required: true, placeholder: "第二集父亲的动机更可信，但不要提前揭示他的身份", oninput: (e) => { r.instruction = e.target.value; } });
+  const instruction = h("textarea", { rows: 3, required: true, placeholder: "Make the father's motive in episode 2 more believable, without revealing who he is too early", oninput: (e) => { r.instruction = e.target.value; } });
   instruction.value = r.instruction;
   const visual = h("input", { type: "checkbox", onchange: (e) => { r.visual = e.target.checked; } });
   visual.checked = r.visual;

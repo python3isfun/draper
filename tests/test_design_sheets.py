@@ -39,14 +39,15 @@ def test_full_run_produces_three_standalone_sheets(package: ProductionPackage):
     assert {c.name for c in package.cast_sheet.characters} == {
         c.name for c in package.story_bible.characters
     }
-    assert package.set_sheet.locations[0].name == "林晓的旧书店"
+    assert package.set_sheet.locations[0].name == "Collins Used Books"
     # Asset requirements now draw their design text and must_keep from the sheets.
     reqs = package.asset_requirements.by_id()
-    scar = reqs["ar_character_identity_ch_zhou"]
-    assert "右手背一块旧烫伤疤" in scar.design_brief
-    assert "右手背烫伤疤的位置与形状" in scar.must_keep
+    scar = reqs["ar_character_identity_ch_frank"]
+    assert "burn scar on the back of his right hand" in scar.design_brief
+    assert "The position and shape of the scar on his right hand" in scar.must_keep
     day = reqs["ar_location_loc_shop_ls_shop_day"]  # (the night one has a storyboard override)
-    assert "门口风铃" in day.must_keep and "书架上书籍的具体摆放" in day.design_freedom
+    assert "The bell over the door" in day.must_keep
+    assert "How the books are arranged on the shelves" in day.design_freedom
 
 
 def test_sheet_steps_see_the_script_but_not_each_other_and_feed_the_storyboard():
@@ -225,13 +226,13 @@ def test_old_packages_without_sheets_still_load_and_pass_checks(package):
     for key in ("cast_sheet", "set_sheet", "prop_sheet"):
         raw.pop(key)
     lin = raw["story_bible"]["characters"][0]
-    lin["appearance"], lin["costume"] = "28岁女性，短发", "深色毛衣配店铺围裙"
-    raw["story_bible"]["locations"][0]["layout"] = "狭长店面，玻璃门正对柜台"
+    lin["appearance"], lin["costume"] = "Woman about 28, short hair", "Sweater and shop apron"
+    raw["story_bible"]["locations"][0]["layout"] = "Narrow store, glass door facing the counter"
     old = ProductionPackage.model_validate(raw)
     assert old.cast_sheet is None
     # The old visual text is kept (not dropped) and survives a save/load round trip.
     kept = old.story_bible.characters[0].legacy
-    assert kept == {"appearance": "28岁女性，短发", "costume": "深色毛衣配店铺围裙"}
+    assert kept == {"appearance": "Woman about 28, short hair", "costume": "Sweater and shop apron"}
     again = ProductionPackage.model_validate(old.model_dump(mode="json"))
     assert again.story_bible.characters[0].legacy == kept
     # Asset briefs fall back to it when there's no sheet.
@@ -240,8 +241,8 @@ def test_old_packages_without_sheets_still_load_and_pass_checks(package):
     reqs = aggregate_asset_requirements(
         old.story_bible, [s.model_copy() for s in old.shot_list], old.asset_requirements.style_brief
     ).by_id()
-    assert "28岁女性，短发" in reqs["ar_character_identity_ch_lin"].design_brief
-    assert "玻璃门正对柜台" in reqs["ar_location_loc_shop_ls_shop_day"].design_brief
+    assert "Woman about 28, short hair" in reqs["ar_character_identity_ch_maya"].design_brief
+    assert "glass door facing the counter" in reqs["ar_location_loc_shop_ls_shop_day"].design_brief
     idx = PackageIndex.build(old)
     opts = sample_request().options
     assert hc.check_cast_sheet(old, idx, opts) == hc.check_set_sheet(old, idx, opts) == []
@@ -256,25 +257,25 @@ def test_coverage_checks_report_missing_unknown_duplicate_and_misparented(packag
     pkg = package.model_copy(deep=True)
     cast = pkg.cast_sheet
     cast.characters.append(cast.characters[0].model_copy(update={"character_id": "ch_ghost"}))
-    cast.characters.append(cast.characters[1].model_copy())  # duplicate ch_zhou
-    cast.looks = [lk for lk in cast.looks if lk.look_id != "lk_mei_work"]
-    cast.looks[0].character_id = "ch_zhou"  # lk_lin_apron under the wrong character
+    cast.characters.append(cast.characters[1].model_copy())  # duplicate ch_frank
+    cast.looks = [lk for lk in cast.looks if lk.look_id != "lk_jess_work"]
+    cast.looks[0].character_id = "ch_frank"  # lk_maya_apron under the wrong character
     found = {
         (i.object_id, i.evidence)
         for i in hc.check_cast_sheet(pkg, PackageIndex.build(pkg), sample_request().options)
     }
     assert ("ch_ghost", "cast_sheet: character is not in the story bible") in found
-    assert ("ch_zhou", "cast_sheet: character described twice") in found
-    assert ("lk_mei_work", "cast_sheet: look has no entry") in found
+    assert ("ch_frank", "cast_sheet: character described twice") in found
+    assert ("lk_jess_work", "cast_sheet: look has no entry") in found
     assert (
-        "lk_lin_apron",
-        "cast_sheet: look belongs to ch_lin, not ch_zhou (character_id)",
+        "lk_maya_apron",
+        "cast_sheet: look belongs to ch_maya, not ch_frank (character_id)",
     ) in found
 
 
 def test_off_screen_character_must_not_appear_in_a_shot(package):
     pkg = package.model_copy(deep=True)
-    lin = next(c for c in pkg.cast_sheet.characters if c.character_id == "ch_lin")
+    lin = next(c for c in pkg.cast_sheet.characters if c.character_id == "ch_maya")
     lin.on_screen = False
     issues = hc.check_cast_sheet(pkg, PackageIndex.build(pkg), sample_request().options)
     assert issues and all("on_screen=false" in i.evidence for i in issues)
@@ -282,19 +283,19 @@ def test_off_screen_character_must_not_appear_in_a_shot(package):
 
 def test_prose_leaks_in_sheets_are_hard_issues(package):
     pkg = package.model_copy(deep=True)
-    pkg.prop_sheet.props[0].handling = "收在 prop_photo 旁边"
+    pkg.prop_sheet.props[0].handling = "Kept next to prop_photo"
     issues = hc.check_prose(pkg, PackageIndex.build(pkg), sample_request().options)
     assert any(i.object_id == "prop_photo" for i in issues)
 
 
 def test_a_lock_covers_the_design_sheet_entry(package):
     base = package.model_copy(deep=True)
-    base.locked_ids = ["ch_zhou"]
+    base.locked_ids = ["ch_frank"]
     new = base.model_copy(deep=True)
-    zhou = next(c for c in new.cast_sheet.characters if c.character_id == "ch_zhou")
-    zhou.hair = "染黑的短发"
+    frank = next(c for c in new.cast_sheet.characters if c.character_id == "ch_frank")
+    frank.hair = "Short hair dyed black"
     [issue] = check_locks(base, new)
-    assert issue.object_id == "ch_zhou" and "design sheet" in issue.evidence
+    assert issue.object_id == "ch_frank" and "design sheet" in issue.evidence
 
 
 # ---------------------------------------------------------------------------
@@ -343,11 +344,12 @@ def test_legacy_fields_are_hidden_from_the_model_and_absent_from_new_packages(pa
 def test_asset_briefs_carry_what_designers_need(package):
     reqs = package.asset_requirements.by_id()
     day = reqs["ar_location_loc_shop_ls_shop_day"].design_brief
-    assert "唯一入口为临街玻璃门" in day  # entrances, for the top-down blocking view
-    assert "白天自然光从门口进入" in day  # base lighting
-    look = reqs["ar_character_look_ch_zhou_lk_zhou_rain"]
-    assert "右手背一块旧烫伤疤" in look.design_brief  # same person: identifying traits
-    assert "右手背烫伤疤的位置与形状" in look.must_keep and "鸭舌帽遮住半张脸" in look.must_keep
+    assert "The glass front door is the only entrance" in day  # entrances, for blocking
+    assert "Daylight through the front door by day" in day  # base lighting
+    look = reqs["ar_character_look_ch_frank_lk_frank_rain"]
+    assert "burn scar on the back of his right hand" in look.design_brief  # same person
+    assert "The position and shape of the scar on his right hand" in look.must_keep
+    assert "The cap brim shading half his face" in look.must_keep
 
 
 def test_a_variant_without_a_sheet_entry_keeps_its_own_description(package):
@@ -362,7 +364,7 @@ def test_a_variant_without_a_sheet_entry_keeps_its_own_description(package):
         package.asset_requirements.style_brief,
         sheets=DesignSheets(cast=package.cast_sheet, sets=sets, props=package.prop_sheet),
     ).by_id()
-    assert "雨夜打烊" in reqs["ar_location_loc_shop_ls_shop_night"].design_brief
+    assert "Closing up on a rainy night" in reqs["ar_location_loc_shop_ls_shop_night"].design_brief
 
 
 def test_recorder_finish_is_idempotent():

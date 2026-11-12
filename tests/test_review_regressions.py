@@ -108,9 +108,9 @@ def test_prop_target_impacts_scenes_using_it(package):
 
 # 7. Locked objects inside the scope are reported (but are not conflicts).
 def test_locked_object_in_scope_is_reported(package):
-    impact = analyze_impact(package, ["ch_zhou"], ["dl_01_02_01", "dl_01_01_01"])
+    impact = analyze_impact(package, ["ch_frank"], ["dl_01_02_01", "dl_01_01_01"])
     assert impact.conflicts == []
-    assert impact.locked_in_scope == ["dl_01_02_01"]  # sc_01_01 precedes ch_zhou's entrance
+    assert impact.locked_in_scope == ["dl_01_02_01"]  # sc_01_01 precedes ch_frank's entrance
 
 
 # 8. An episode with no scenes does not crash impact analysis.

@@ -34,7 +34,7 @@ class CastMember(BaseModel):
     on_screen: bool = Field(
         True, description="False for characters only heard (phone, voice-over)."
     )
-    age_range: str = Field(description="Apparent age, e.g. 二十八岁左右.")
+    age_range: str = Field(description="Apparent age, e.g. about 28.")
     gender_presentation: str
     build_and_height: str
     face: str = Field(description="Face shape, features and default expression.")

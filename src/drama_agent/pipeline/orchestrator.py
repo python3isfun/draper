@@ -53,7 +53,7 @@ class Orchestrator:
         job = self.repo.get_job(job_id)
         if job is None:
             raise KeyError(job_id)
-        if job.status == "cancelled":
+        if job.status == "cancelled" or job.archived:
             return job
 
         trace = Tracer(self.repo, job_id)

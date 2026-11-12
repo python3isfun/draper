@@ -150,7 +150,7 @@ class PipelineState:
     def language(self) -> str:
         if self.source_brief:
             return self.source_brief.language
-        return self.request.options.language or "zh-CN"
+        return self.request.options.language or "en-US"
 
     def draft_package(self) -> ProductionPackage:
         """Assemble whatever exists so far; missing parts become empty placeholders."""
@@ -261,19 +261,19 @@ ID_CONVENTIONS = (
 )
 
 # Bump when the rules below change; recorded in provenance.prompt_versions.
-OUTPUT_RULES_VERSION = "2"
+OUTPUT_RULES_VERSION = "3"
 
-# Prose rules: the live gpt-6.1-sol run prefixed every action line with "成片[0,10000)ms。",
-# wrote prop IDs into actions, and put its working notes into story fields.
+# Prose rules: a live gpt-6.1-sol run prefixed every action line with a timeline span such as
+# "[0,10000)ms", wrote prop IDs into actions, and put its working notes into story fields.
 PROSE_RULES = (
     "Writing rules. Text that people read (actions, dialogue, sound, synopses, conflicts, "
     "character and location descriptions, visual_action, narrative_function, continuity) "
-    "must be natural prose in the output language:\n"
-    "- Refer to characters, places and props by their names, never by ID (write 旧全家福, "
-    "not prop_photo). IDs belong only in *_id / *_ids / *_refs fields.\n"
+    "must be natural American English prose:\n"
+    "- Refer to characters, places and props by their names, never by ID (write the old "
+    "family photo, not prop_photo). IDs belong only in *_id / *_ids / *_refs fields.\n"
     "- Never put timecodes or milliseconds in prose (no [0,10000)ms, no 2300ms). Timing "
     "lives only in integer fields such as target_duration_ms, start_ms, duration_ms and "
-    "dialogue cues; write durations people need as plain words (约两秒的停顿).\n"
+    "dialogue cues; write durations people need as plain words (a two-second pause).\n"
     "- Never mention schema field names (spoken_timing_verified, end_state, ...) in prose.\n"
     "- Maps keyed by character (relationships, character_arcs, knowledge, possessions) use "
     "only existing character IDs as keys.\n"
@@ -432,7 +432,7 @@ _SHEET_RULES = (
     "Describe every {kinds} registered in story_bible exactly once, using its ID; do not "
     "add, rename or drop any. Ground descriptions in source_brief (observed facts from "
     "uploaded photos and videos come first) and in how the script actually uses each one. "
-    "Write concrete, visual, designer-ready prose in the output language; leave `name` "
+    "Write concrete, visual, designer-ready prose in American English; leave `name` "
     "empty (it is filled from the story bible). must_keep lists only what the story "
     "depends on (e.g. a scar that identifies someone); design_freedom lists what a "
     "designer may decide. These are text descriptions, not generated images."
@@ -581,7 +581,7 @@ class ReviewStep(Step):
 def _normalize(state: PipelineState, stage: str, obj: object) -> None:
     """Deterministically fix ID/timecode leaks in prose; anything left is a hard issue."""
     names = entity_names(state.story_bible) if state.story_bible else {}
-    changed = normalize_prose(obj, names, state.language)
+    changed = normalize_prose(obj, names)
     if changed:
         log.info("%s: normalized %d prose fields", stage, changed)
         if state.emit:

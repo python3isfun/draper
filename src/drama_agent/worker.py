@@ -187,6 +187,8 @@ def retry_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
     job = repo.get_job(job_id)
     if job is None:
         raise KeyError(job_id)
+    if job.archived:
+        raise ValueError("this job is archived")
     if job.status not in RETRYABLE:
         raise ValueError(f"only {' or '.join(RETRYABLE)} jobs can be retried, not {job.status}")
 
@@ -221,6 +223,8 @@ def pause_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
     job = repo.get_job(job_id)
     if job is None:
         raise KeyError(job_id)
+    if job.archived:
+        raise ValueError("this job is archived")
     if job.status not in PAUSABLE:
         raise ValueError(f"only queued or running jobs can be paused, not {job.status}")
     outcome = queue.request_pause(job_id)
@@ -240,6 +244,8 @@ def resume_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
     job = repo.get_job(job_id)
     if job is None:
         raise KeyError(job_id)
+    if job.archived:
+        raise ValueError("this job is archived")
     if job.status != "paused":
         raise ValueError(f"only paused jobs can be resumed, not {job.status}")
     queue.resume(job_id)

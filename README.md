@@ -5,7 +5,15 @@ script) into a text production package for a **3-episode, 120s-per-episode verti
 drama**: story bible, full scripts, text storyboards, and structured art asset requirements
 for downstream design.
 
-Design source: [`drama_agent_service_v0_1.md`](drama_agent_service_v0_1.md) (spec v0.2).
+Design source: [`drama_agent_service_v0_1.md`](drama_agent_service_v0_1.md) (spec v0.2). The
+spec is written in Chinese; the app itself is English-only.
+
+**Language and setting.** Stories are written in American English and set in the present-day
+United States, with American names, places and everyday details. Sources in another language
+or setting are adapted. `options.language` must be `en-US` (or left out); the API refuses
+anything else. Stories created before this change in Chinese are **archived** at startup:
+hidden from the job list (`GET /v1/drama-jobs?include_archived=true` lists them), never run
+again, and not rendered in the UI. Their data stays in the database.
 
 ## Quick start
 
@@ -63,7 +71,7 @@ DRAMA_FIXTURE_DELAY_S=4`: each sample step then takes about 4 seconds and stream
 
 A job can start from uploaded images and videos, alone or with a text idea. Each file can
 carry an optional **prompt** (the source's `text`), which the model treats as your
-direction for that file, for example "让她成为女主角，复仇题材". Text that appears inside
+direction for that file, for example "make her the lead in a revenge story". Text that appears inside
 an image, or is spoken in a video, is material to analyze, not an instruction.
 
 ```bash
@@ -73,7 +81,7 @@ curl -X POST --data-binary @street.jpg 'http://127.0.0.1:8000/v1/source-assets?f
 
 # 2. Use it as a source.
 curl -X POST http://127.0.0.1:8000/v1/drama-jobs -H 'content-type: application/json' -d '{
-  "sources": [{"type": "image", "asset_id": "asset_...", "text": "让她成为女主角，复仇题材"}]}'
+  "sources": [{"type": "image", "asset_id": "asset_...", "text": "make her the lead in a revenge story"}]}'
 ```
 
 - **Images** (JPEG, PNG, WebP, GIF): a copy downscaled to 1536 px goes to the model.
@@ -135,6 +143,62 @@ Every entry also lists `must_keep` (what the story depends on) and `design_freed
   ...) are kept under `legacy` on each story-bible entry: still shown in the Overview and
   used for asset briefs, but hidden from the model's schema. Completed jobs show the new steps as `skipped`. A
   retried or resumed old job runs the sheets, then re-runs storyboard and review.
+
+### Reference images
+
+On a finished package, **Generate images** (Assets tab, or `POST
+/v1/drama-packages/{id}/images`) makes reference images with **MiniMax-H3-Image** on
+MCPHub's GPU route, using the same `MCPHUB_KEY`:
+
+- **What gets an image:** one per required deliverable of each character identity (front
+  face), look (full body), location state (wide view and top-down plan) and prop state
+  (detail). Shot composition references are skipped. A sample-size package has about 20.
+- **Consistency:** a look uses the character's face image as a reference, so the same
+  person appears in every look. A location's top-down plan uses its wide view, and its other
+  states use the first state's wide view. A prop's other states use its first state's
+  image. Uploaded photos cited in a requirement's `source_refs` are added as references too.
+- **Prompts.** MCPHub's GPU server renders a prompt exactly as written: it doesn't expand it
+  first the way MiniMax's own API does. So the app writes the finished prompt. The planner makes
+  a structured brief per image: what it is, new image or edit, aspect ratio, each reference
+  picture's role, the sheet facts, must-keep items and style. Before the first image of a
+  batch, one text-model call (`MCPHUB_MODEL_IMAGE_PROMPTS`, else `MCPHUB_MODEL`) turns every
+  pending brief into an English prompt. Its instructions are
+  `src/drama_agent/prompts/h3_image_rules.md` and `h3_image_examples.md`, sent verbatim. These
+  are the same files the `minimax-h3-image-prompt` Claude Code skill uses, so change the rules
+  there. They're based on MiniMax's own prompt-writing skill (sources in the skill's
+  `references/sources.md`):
+  - say what the image is, then the layout, then visible style and light;
+  - quote any lettering, or end with "The image contains no text, letters or numbers.";
+  - write edits in MiniMax's form: each `<Picture N>` is defined as a `<Subject N>`, a
+    "The target image …" overview, a relationship such as "partially preserved", then the
+    changes;
+  - give exact counts.
+
+  A written prompt that fails the program's checks falls back to the built-in template, which
+  follows the same rules. The checks cover: picture citations, a subject definition for each
+  picture, the target overview and the text sentence. A failed call also falls back to the
+  template. Regenerate reuses the written prompt with a new seed. Each image shows its prompt
+  and who wrote it, and the writer's call appears in the job's Activity view.
+- **Running it:** images are generated in the background one at a time, as the GPU server
+  works, at about 16 MP (about 10 s each when nobody else is queued). `draft=true` makes
+  about 1024 px images, much faster. Progress is live in the Assets tab; interrupted images
+  resume after a restart. Images never block or fail a job.
+- **Versions:** Regenerate (`POST /v1/generated-images/{id}/regenerate`) makes a new
+  version with a fresh seed and keeps the old one. A failed image is retried by the next
+  Generate. If a reference failed, the image is made without it and says so.
+- **Storage:** images are stored under `DRAMA_MEDIA_DIR` as JPEG plus a 512 px thumbnail, as
+  records separate from the package (a revision is immutable), keyed by `requirement_id`
+  and `deliverable_id` like `fulfilled_by`. `GET /v1/drama-packages/{id}/images` lists them,
+  and `GET /v1/generated-images/{id}/content` or `/thumb` serves them.
+
+| variable | default | meaning |
+| --- | --- | --- |
+| `DRAMA_IMAGE_CLIENT` | follows `DRAMA_MODEL_CLIENT` | `minimax` (real) or `fixture` (local placeholder images) |
+| `MCPHUB_IMAGE_URL` | `https://api.mcphub.com/api/v3/gpu-images` | image route (note: not under `/v1`) |
+| `MCPHUB_IMAGE_MODEL` | `minimax-h3-image` | image model |
+
+The image route needs an MCPHub key from a `newsbreak.com` account; it is sent as
+`X-API-Key`.
 
 ### Storage
 
@@ -224,7 +288,7 @@ on validation errors. Token usage per stage is recorded in `provenance.token_usa
 
 ```bash
 curl -X POST localhost:8000/v1/drama-jobs -H 'content-type: application/json' \
-  -d '{"sources":[{"type":"text","text":"一个即将失去店铺的年轻人，发现前来收租的老人是失踪多年的父亲。","use_as":"story_seed"}]}'
+  -d '{"sources":[{"type":"text","text":"A young woman about to lose her bookstore discovers that the old man who comes to collect the rent is the father who disappeared years ago.","use_as":"story_seed"}]}'
 curl localhost:8000/v1/drama-jobs/<job_id>
 curl 'localhost:8000/v1/drama-packages/<package_id>?format=markdown'
 ```
@@ -252,6 +316,8 @@ src/drama_agent/
   store/           Repository protocol; SQLite (default) and in-memory backends
   jobqueue.py      Durable job queue (leases, retries, checkpoints)
   media.py         Uploaded images/videos: storage, type sniffing, keyframes, audio
+  imagegen.py      Image generation clients (MiniMax-H3-Image on MCPHub, offline fixture)
+  images.py        Reference image planning, prompts, references and the image worker
   worker.py        Job workers; `drama-worker` entry point
   api/             FastAPI routes (spec §9) + /v1/meta, job listing
   web/             Web UI (HTML/CSS/JS, served at /)

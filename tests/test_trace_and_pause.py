@@ -66,7 +66,7 @@ def test_gate_failures_and_cleanup_are_traced():
         return output
 
     def leaky(output, attempt):
-        output.episodes[0].scenes[0].beats[0].action = "成片[0,15000)ms。门开了。"
+        output.episodes[0].scenes[0].beats[0].action = "Shot [0,15000)ms: The door opens."
         return output
 
     job, repo = run_pipeline(
@@ -116,10 +116,10 @@ def test_llm_call_upsert_and_bodies(store):
         request={"messages": [{"role": "user", "content": "hi"}]},
     )
     repo.save_llm_call(call)
-    call.output, call.commentary, call.status = '{"a": 1}', "正在写第一集", "succeeded"
+    call.output, call.commentary, call.status = '{"a": 1}', "Writing episode one", "succeeded"
     repo.save_llm_call(call)
     [listed] = repo.list_llm_calls("j")
-    assert listed.status == "succeeded" and listed.commentary == "正在写第一集"
+    assert listed.status == "succeeded" and listed.commentary == "Writing episode one"
     assert listed.output == "" and listed.request == {} and listed.output_chars == 8
     full = repo.get_llm_call("c1")
     assert full.output == '{"a": 1}' and full.request["messages"][0]["content"] == "hi"

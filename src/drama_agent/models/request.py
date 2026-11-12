@@ -52,9 +52,9 @@ class IntRange(BaseModel):
 
 
 class JobOptions(BaseModel):
-    # None means: inherit from text input; visual-only input defaults to zh-CN (recorded as
-    # an assumption in the source brief).
-    language: str | None = None
+    # Stories are written in American English and set in the present-day US: en-US is the
+    # only output language the API accepts. (Jobs stored earlier may carry another value.)
+    language: str | None = "en-US"
     aspect_ratio: str = "9:16"
     story_scope: StoryScope = "series_opening"
     episode_count: Literal[3] = 3

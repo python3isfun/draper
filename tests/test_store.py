@@ -84,8 +84,8 @@ def test_revision_report_and_asset_roundtrip(repo):
     repo.save_revision(rev)
     assert repo.get_revision("rev_1") == rev
     repo.save_evaluation_report("pkg_1", "rev_1", QAReport())
-    repo.save_source_asset("asset_1", {"type": "image", "name": "照片.png"})
-    assert repo.get_source_asset("asset_1") == {"type": "image", "name": "照片.png"}
+    repo.save_source_asset("asset_1", {"type": "image", "name": "photo.png"})
+    assert repo.get_source_asset("asset_1") == {"type": "image", "name": "photo.png"}
     assert repo.get_source_asset("nope") is None
 
 

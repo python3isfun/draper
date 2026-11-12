@@ -57,7 +57,7 @@ def test_api_job_lifecycle_and_revision():
         rev_url = f"/v1/drama-packages/{pkg_id}/revisions"
         stale = client.post(
             rev_url,
-            json={"base_revision_id": "rev_old", "target_ids": ["ch_zhou"], "instruction": "x"},
+            json={"base_revision_id": "rev_old", "target_ids": ["ch_frank"], "instruction": "x"},
         )
         assert stale.status_code == 409
 
@@ -65,8 +65,8 @@ def test_api_job_lifecycle_and_revision():
             rev_url,
             json={
                 "base_revision_id": rev_id,
-                "target_ids": ["ch_zhou"],
-                "instruction": "第二集父亲的动机更可信，但不要提前揭示他的身份",
+                "target_ids": ["ch_frank"],
+                "instruction": "Make the father's motive in episode 2 more believable, without revealing who he is too early",
                 "locked_ids": ["dl_01_01_01"],
             },
         )
@@ -97,6 +97,8 @@ def test_web_ui_and_listing_endpoints():
             "model_id": "fixture-v1",
             "client": "FixtureModelClient",
             "stage_models": {},
+            "image_model": "fixture-image-v1",
+            "image_client": "FixtureImageClient",
         }
         assert client.get("/v1/drama-jobs").json() == []
 
@@ -105,6 +107,6 @@ def test_web_ui_and_listing_endpoints():
         wait_job(client, job_id)
         jobs = client.get("/v1/drama-jobs").json()
         assert [j["job_id"] for j in jobs] == [job_id]
-        assert jobs[0]["seed"] == SAMPLE_SEED and jobs[0]["status"] == "completed"
+        assert jobs[0]["seed"] == SAMPLE_SEED[:120] and jobs[0]["status"] == "completed"
         # API routes are not shadowed by the static mount.
         assert client.get("/v1/drama-jobs/nope").status_code == 404

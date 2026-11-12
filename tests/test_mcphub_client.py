@@ -21,7 +21,7 @@ from drama_agent.models import Issue, SourceBrief
 from .conftest import run_pipeline
 
 VALID_BRIEF = {
-    "language": "zh-CN",
+    "language": "en-US",
     "source_coverage": [{"source_index": 0}],
     "creative_brief": {
         "genre": "family",
@@ -174,7 +174,7 @@ def test_responses_stream_separates_commentary_from_answer():
     client, seen = make_client(
         lambda r, n: responses_sse(
             json.dumps(VALID_BRIEF),
-            commentary="先确认素材里的事实，再补足冲突。",
+            commentary="First pin down the facts in the source, then build the conflict.",
             reasoning="summary text",
         )
     )
@@ -194,7 +194,7 @@ def test_responses_stream_separates_commentary_from_answer():
 
     [call] = rec.calls
     assert call["api"] == "responses" and call["model"] == "gpt-6.1-sol" and call["turn"] == 0
-    assert call["commentary"] == "先确认素材里的事实，再补足冲突。"
+    assert call["commentary"] == "First pin down the facts in the source, then build the conflict."
     assert call["reasoning"] == "summary text"
     assert json.loads(call["output"]) == VALID_BRIEF
     assert call["end"] == {"usage": req.usage, "error": None}
@@ -204,13 +204,13 @@ def test_invalid_json_gets_one_repair_turn():
     rec = FakeRecorder()
 
     def handler(r, n):
-        body = {"language": "zh-CN"} if n == 1 else VALID_BRIEF
+        body = {"language": "en-US"} if n == 1 else VALID_BRIEF
         return responses_sse(json.dumps(body))
 
     client, seen = make_client(handler)
     req = request(recorder=rec)
     out = asyncio.run(client.generate(req, SourceBrief))
-    assert out.language == "zh-CN" and len(seen) == 2
+    assert out.language == "en-US" and len(seen) == 2
     repair = json.loads(seen[1].content)["input"]
     assert repair[-2]["role"] == "assistant" and "failed schema validation" in repair[-1]["content"]
     assert req.usage["prompt_tokens"] == 20  # summed across both calls
@@ -323,7 +323,11 @@ def test_live_ingest_step():
     req = GenerationRequest(
         stage="ingest",
         instructions="Summarize the story seed into a source brief.",
-        context={"request": {"sources": [{"type": "text", "text": "一个即将失去店铺的年轻人"}]}},
+        context={
+            "request": {
+                "sources": [{"type": "text", "text": "A young woman about to lose her bookstore"}]
+            }
+        },
     )
     out = asyncio.run(client.generate(req, SourceBrief))
     assert out.source_coverage and req.usage["completion_tokens"] > 0
@@ -422,4 +426,6 @@ def test_meta_reports_stage_models():
         "model_id": "gpt-6.1-sol",
         "client": "MCPHubClient",
         "stage_models": {"review": "gpt-6-luna"},
+        "image_model": "fixture-image-v1",
+        "image_client": "FixtureImageClient",
     }

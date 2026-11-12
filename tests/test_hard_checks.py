@@ -26,7 +26,7 @@ def test_wrong_scene_count(package, options):
 
 def test_too_few_characters(package, options):
     for sc in package.episodes[1].scenes:
-        sc.character_ids = [c for c in sc.character_ids if c in ("ch_lin", "ch_zhou")]
+        sc.character_ids = [c for c in sc.character_ids if c in ("ch_maya", "ch_frank")]
     assert "characters_per_episode" in checks_failed(package, options)
 
 
@@ -70,8 +70,8 @@ def test_used_by_must_be_bidirectional(package, options):
 
 def test_dependency_cycle(package, options):
     reqs = package.asset_requirements.by_id()
-    identity = reqs["ar_character_identity_ch_lin"]
-    identity.depends_on.append("ar_character_look_ch_lin_lk_lin_apron")
+    identity = reqs["ar_character_identity_ch_maya"]
+    identity.depends_on.append("ar_character_look_ch_maya_lk_maya_apron")
     assert "asset_depends_on" in checks_failed(package, options)
 
 
@@ -92,8 +92,8 @@ def test_unmerged_duplicate_reuse_unit(package, options):
 
 
 def test_variant_must_belong_to_entity(package, options):
-    req = package.asset_requirements.by_id()["ar_character_look_ch_lin_lk_lin_apron"]
-    req.subject_refs[0].variant_id = "lk_zhao_suit"
+    req = package.asset_requirements.by_id()["ar_character_look_ch_maya_lk_maya_apron"]
+    req.subject_refs[0].variant_id = "lk_ross_suit"
     assert "asset_subject" in checks_failed(package, options)
 
 

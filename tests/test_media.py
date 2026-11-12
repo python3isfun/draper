@@ -136,7 +136,7 @@ def test_job_with_image_and_prompt_runs_and_shows_the_model_the_image(tmp_path, 
     app = create_app(client=client, media=MediaStore(tmp_path), poll_s=0.01)
     with TestClient(app) as http:
         asset = upload(http, media_files["image"], "street.png").json()
-        prompt = "让照片里的人成为女主角，复仇题材"
+        prompt = "make the person in the photo the lead in a revenge story"
         body = {
             "sources": [
                 {"type": "image", "asset_id": asset["asset_id"], "text": prompt},
@@ -186,8 +186,8 @@ class TranscribingFixture(FixtureModelClient):
         if self.fail:
             raise ConnectionError("audio endpoint down")
         return [
-            {"start_ms": 0, "end_ms": 2000, "text": "爸，真的是你吗？"},
-            {"start_ms": 5000, "end_ms": 7000, "text": "回来收房租。"},  # ends after the clip
+            {"start_ms": 0, "end_ms": 2000, "text": "Dad, is that really you?"},
+            {"start_ms": 5000, "end_ms": 7000, "text": "Back for the rent."},  # ends after the clip
         ]
 
 
@@ -201,7 +201,15 @@ def _video_job(tmp_path, media_files, client):
     asset = asyncio.run(store.save_upload(chunks(), "clip.mp4"))
     repo.save_source_asset(asset.asset_id, asset.model_dump(mode="json"))
     req = JobRequest.model_validate(
-        {"sources": [{"type": "video", "asset_id": asset.asset_id, "text": "保留父女重逢"}]}
+        {
+            "sources": [
+                {
+                    "type": "video",
+                    "asset_id": asset.asset_id,
+                    "text": "keep the father-daughter reunion",
+                }
+            ]
+        }
     )
     orch = Orchestrator(repo, client, media=store)
     return repo, orch, req, asset.asset_id
@@ -222,8 +230,8 @@ def test_video_is_transcribed_once_and_the_transcript_reaches_ingest(tmp_path, m
     entry = client.calls[0].context["source_media"][0]
     duration = asset.duration_ms
     assert entry["transcript"] == [
-        {"start_ms": 0, "end_ms": 2000, "text": "爸，真的是你吗？"},
-        {"start_ms": 5000, "end_ms": duration, "text": "回来收房租。"},  # clamped
+        {"start_ms": 0, "end_ms": 2000, "text": "Dad, is that really you?"},
+        {"start_ms": 5000, "end_ms": duration, "text": "Back for the rent."},  # clamped
     ]
     assert entry["audio"].startswith("speech transcribed in full")
     assert len(client.calls[0].media) == 6
@@ -231,7 +239,7 @@ def test_video_is_transcribed_once_and_the_transcript_reaches_ingest(tmp_path, m
 
     [call] = [c for c in repo.list_llm_calls("job_1") if c.api == "transcription"]
     assert call.status == "succeeded" and call.model == "whisper-test"
-    assert "爸，真的是你吗" in repo.get_llm_call(call.call_id).output
+    assert "Dad, is that really you" in repo.get_llm_call(call.call_id).output
 
 
 @needs_ffmpeg

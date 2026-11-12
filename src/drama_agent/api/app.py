@@ -15,12 +15,23 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from ..archive import archive_non_english
 from ..config import (
     client_from_env,
     load_dotenv,
     queue_from_env,
     repo_from_env,
     worker_settings,
+)
+from ..image_prompts import ImagePromptWriter
+from ..imagegen import FixtureImageClient, ImageClient
+from ..images import (
+    SIZES,
+    STALE_RUNNING_S,
+    ImageWorker,
+    image_client_from_env,
+    latest_images,
+    plan_images,
 )
 from ..jobqueue import InMemoryJobQueue, JobQueue
 from ..llm import FixtureModelClient, ModelClient
@@ -39,6 +50,7 @@ from ..models import (
     TraceEvent,
 )
 from ..models.design_sheets import SHEET_SCHEMAS
+from ..models.images import GeneratedImage
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
@@ -96,6 +108,20 @@ class Meta(BaseModel):
     model_id: str  # default model
     client: str
     stage_models: dict[str, str] = {}  # per-step overrides of the default
+    image_model: str = ""
+    image_client: str = ""
+
+
+class ImagesView(BaseModel):
+    package_id: str
+    revision_id: str
+    image_model: str
+    images: list[GeneratedImage]
+    # Over the current (newest) version of each deliverable.
+    pending: int
+    running: int
+    done: int
+    failed: int
 
 
 def _seed_label(job: Job, assets: dict[str, dict]) -> str:
@@ -120,6 +146,7 @@ def create_app(
     poll_s: float = 1.0,
     retry_base_s: float = 5.0,
     media: MediaStore | None = None,
+    image_client: ImageClient | None = None,
 ) -> FastAPI:
     """Build the API. `workers` in-process job workers start with the app (lifespan);
     with workers=0 jobs are only enqueued, for a separate `python -m drama_agent.worker`.
@@ -130,10 +157,14 @@ def create_app(
     orchestrator = Orchestrator(
         repo, client or FixtureModelClient(), checkpoints=queue, media=media
     )
+    images = image_client or FixtureImageClient()
     wakeup = asyncio.Event()
+    image_wakeup = asyncio.Event()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        # Stories from before the app became English-only are archived, not deleted.
+        archive_non_english(repo)
         n = recover(repo, queue)
         if n:
             log.info("enqueued %d unfinished jobs without a queue entry", n)
@@ -151,6 +182,16 @@ def create_app(
             )
             for _ in range(workers)
         ]
+        # One image worker per process: the GPU server makes one image at a time anyway.
+        # Images another process is still generating are younger than the stale limit.
+        if n := repo.requeue_running_images(STALE_RUNNING_S):
+            log.info("requeued %d interrupted images", n)
+        writer = ImagePromptWriter(orchestrator.client, repo)
+        tasks.append(
+            asyncio.create_task(
+                ImageWorker(repo, media, images, writer=writer).run(stop, image_wakeup)
+            )
+        )
         try:
             yield
         finally:
@@ -159,6 +200,8 @@ def create_app(
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if close := getattr(images, "aclose", None):
+                await close()
 
     app = FastAPI(title="Drama Agent", version="0.1.0", lifespan=lifespan)
     app.state.repo = repo
@@ -173,12 +216,116 @@ def create_app(
             model_id=c.model_id,
             client=type(c).__name__,
             stage_models=getattr(c, "stage_models", {}),
+            image_model=images.model_id,
+            image_client=type(images).__name__,
         )
 
+    # Reference images -------------------------------------------------------
+
+    def _package_or_404(package_id: str, revision_id: str | None) -> ProductionPackage:
+        pkg = repo.get_package(package_id, revision_id)
+        if pkg is None:
+            raise HTTPException(404, "package not found")
+        return pkg
+
+    def _images_view(pkg: ProductionPackage) -> ImagesView:
+        imgs = repo.list_images(pkg.package_id, pkg.revision_id)
+        latest = latest_images(imgs)
+        counts = {s: 0 for s in ("pending", "running", "done", "failed")}
+        for img in latest.values():
+            counts[img.status] += 1
+        return ImagesView(
+            package_id=pkg.package_id,
+            revision_id=pkg.revision_id,
+            image_model=images.model_id,
+            images=imgs,
+            **counts,
+        )
+
+    @app.get("/v1/drama-packages/{package_id}/images", response_model=ImagesView)
+    async def list_package_images(package_id: str, revision_id: str | None = None) -> ImagesView:
+        """Reference images of a package revision, every version (newest per deliverable
+        is the current one), with counts over the current ones."""
+        return _images_view(_package_or_404(package_id, revision_id))
+
+    @app.post("/v1/drama-packages/{package_id}/images", status_code=202, response_model=ImagesView)
+    async def generate_package_images(
+        package_id: str,
+        revision_id: str | None = None,
+        draft: bool = False,
+        job_id: str | None = None,
+    ) -> ImagesView:
+        """Queue images for every character, look, location and prop deliverable that has
+        none yet (or whose last attempt failed). draft=true makes small, fast images.
+        job_id (the job that made the package) is where the prompt writer's call is traced;
+        the web UI sends it."""
+        pkg = _package_or_404(package_id, revision_id)
+        job = _package_job(pkg.package_id, job_id)
+        existing = repo.list_images(pkg.package_id, pkg.revision_id)
+        for img in plan_images(pkg, existing, draft=draft, job_id=job and job.job_id):
+            repo.save_image(img)
+        image_wakeup.set()
+        return _images_view(pkg)
+
+    def _package_job(package_id: str, job_id: str | None) -> Job | None:
+        """The job that made a package; refuses archived stories."""
+        if job_id is not None:
+            job = repo.get_job(job_id)
+            if job is None or job.package_id != package_id:
+                raise HTTPException(422, f"job {job_id} did not make package {package_id}")
+        else:
+            job = next((j for j in repo.list_jobs(1000) if j.package_id == package_id), None)
+        if job is not None and job.archived:
+            raise HTTPException(409, "this story is archived")
+        return job
+
+    def _image_or_404(image_id: str) -> GeneratedImage:
+        img = repo.get_image(image_id)
+        if img is None:
+            raise HTTPException(404, "image not found")
+        return img
+
+    @app.post(
+        "/v1/generated-images/{image_id}/regenerate",
+        status_code=202,
+        response_model=GeneratedImage,
+    )
+    async def regenerate_image(image_id: str, draft: bool | None = None) -> GeneratedImage:
+        """A new version of this image's deliverable, with a fresh seed. References use the
+        current versions of the images it depends on."""
+        old = _image_or_404(image_id)
+        pkg = _package_or_404(old.package_id, old.revision_id)
+        _package_job(pkg.package_id, old.job_id)
+        small = draft if draft is not None else old.size in {s[1] for s in SIZES.values()}
+        [new] = plan_images(
+            pkg,
+            repo.list_images(pkg.package_id, pkg.revision_id),
+            draft=small,
+            only=(old.requirement_id, old.deliverable_id),
+            job_id=old.job_id,
+        )
+        repo.save_image(new)
+        image_wakeup.set()
+        return new
+
+    @app.get("/v1/generated-images/{image_id}", response_model=GeneratedImage)
+    async def get_image(image_id: str) -> GeneratedImage:
+        return _image_or_404(image_id)
+
+    @app.get("/v1/generated-images/{image_id}/{variant}", response_class=FileResponse)
+    async def image_file(image_id: str, variant: Literal["content", "thumb"]) -> FileResponse:
+        img = _image_or_404(image_id)
+        rel = img.thumb if variant == "thumb" and img.thumb else img.file
+        if rel is None:
+            raise HTTPException(404, f"image is {img.status}")
+        return _file(rel, "image/jpeg" if rel.endswith(".jpg") else img.content_type)
+
     @app.get("/v1/drama-jobs", response_model=list[JobSummary])
-    async def list_jobs(limit: int = Query(50, ge=1, le=200)) -> list[JobSummary]:
+    async def list_jobs(
+        limit: int = Query(50, ge=1, le=200), include_archived: bool = False
+    ) -> list[JobSummary]:
         out = []
-        jobs = repo.list_jobs(limit)
+        jobs = repo.list_jobs(limit, include_archived=include_archived)
         # One batched lookup for the file names of media-only jobs (not one per job).
         firsts = [j.request.sources[0].asset_id for j in jobs]
         assets = repo.get_source_assets([a for a in firsts if a])
@@ -198,6 +345,11 @@ def create_app(
 
     @app.post("/v1/drama-jobs", status_code=202, response_model=JobCreated)
     async def create_job(req: JobRequest) -> JobCreated:
+        if (req.options.language or "en-US").lower() not in ("en-us", "en"):
+            raise HTTPException(
+                422, "stories are written in American English: language must be en-US"
+            )
+        req.options.language = "en-US"
         n_media = sum(1 for src in req.sources if src.type in ("image", "video"))
         if n_media > media.limits.max_media_sources:
             raise HTTPException(
@@ -433,6 +585,7 @@ def create_app_from_env() -> FastAPI:
         workers=int(settings["workers"]),
         lease_s=float(settings["lease_s"]),
         media=media_from_env(),
+        image_client=image_client_from_env(),
     )
 
 

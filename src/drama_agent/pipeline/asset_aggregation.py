@@ -76,7 +76,7 @@ class Default:
 
 
 def _join(*parts: str) -> str:
-    return "；".join(p.strip() for p in parts if p and p.strip())
+    return "; ".join(p.strip() for p in parts if p and p.strip())
 
 
 def _default_brief(
@@ -122,7 +122,7 @@ def _default_brief_or_raise(unit: ReuseUnit, bible: StoryBible, sheets: DesignSh
             else:
                 parts, keep, freedom = _legacy(c, "appearance"), [], []
             return Default(
-                f"{c.name}：" + _join(*parts) if parts else c.name,
+                f"{c.name}: " + _join(*parts) if parts else c.name,
                 [d("face", "front face", "identity")],
                 keep,
                 freedom,
@@ -164,7 +164,7 @@ def _default_brief_or_raise(unit: ReuseUnit, bible: StoryBible, sheets: DesignSh
             else:
                 parts += _legacy(st, "diff_from_base")
             return Default(
-                f"{loc.name}：" + _join(*parts),
+                f"{loc.name}: " + _join(*parts),
                 [d("wide", "wide", "space"), d("layout", "top-down", "blocking")],
                 keep,
                 freedom,
@@ -187,7 +187,7 @@ def _default_brief_or_raise(unit: ReuseUnit, bible: StoryBible, sheets: DesignSh
             else:
                 parts += _legacy(st, "diff_from_base")
             return Default(
-                f"{p.name}：" + _join(*parts), [d("detail", "detail", "identify")], keep, freedom
+                f"{p.name}: " + _join(*parts), [d("detail", "detail", "identify")], keep, freedom
             )
         case "shot_reference":
             return Default(
