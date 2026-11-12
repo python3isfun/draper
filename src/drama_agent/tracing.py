@@ -90,8 +90,8 @@ class CallRecorder:
             self._save()
 
     def finish(self, *, usage: dict | None = None, error: str | None = None) -> None:
-        if self.call is None:
-            return
+        if self.call is None or self.call.finished_at is not None:
+            return  # nothing open (e.g. a cancellation after the call already finished)
         self.call.status = "failed" if error else "succeeded"
         self.call.error = error
         self.call.usage = usage or {}

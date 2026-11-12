@@ -473,12 +473,19 @@ function renderJobHeader(job) {
     banners.push(h("div", { class: "banner bad" }, h("strong", {}, "Job failed. "), job.failure_reason || ""));
   }
   if (job.status === "needs_revision") {
-    const failed = Object.entries(job.stages).find(([, s]) => s.status === "failed");
+    // Concurrent steps (the design sheets) can fail together: list every one.
+    const failed = Object.entries(job.stages).filter(([, s]) => s.status === "failed");
+    const names = failed.map(([n]) => n);
+    const where = names.length ? names.join(", ") : "?";
     banners.push(
       h("div", { class: "banner warn" },
-        h("strong", {}, `Needs revision at the ${failed?.[0] || "?"} step. `),
+        h("strong", {}, `Needs revision at the ${where} step${names.length > 1 ? "s" : ""}. `),
         "Hard checks still failed after the retry budget. The draft below is kept for inspection.",
-        failed && h("ul", {}, failed[1].issues.slice(0, 8).map((i) => h("li", {}, h("code", {}, i.object_id), ` ${i.check}: ${i.evidence}`))),
+        failed.map(([n, st]) => [
+          names.length > 1 && h("div", { class: "banner-sub" }, n),
+          h("ul", {}, st.issues.slice(0, 8).map((i) => h("li", {}, h("code", {}, i.object_id), ` ${i.check}: ${i.evidence}`))),
+          st.issues.length > 8 && h("p", { class: "small" }, `…and ${st.issues.length - 8} more`),
+        ]),
       ),
     );
   }
@@ -625,6 +632,9 @@ const TABS = [
   ["overview", "Overview"],
   ["script", "Script"],
   ["storyboard", "Storyboard"],
+  ["cast", "Cast"],
+  ["sets", "Sets"],
+  ["props", "Props"],
   ["assets", "Assets"],
   ["qa", "QA"],
   ["revise", "Revise"],
@@ -646,6 +656,9 @@ function renderPackage(pkg) {
   const counts = {
     script: pkg.episodes.length,
     storyboard: pkg.shot_list.length,
+    cast: pkg.cast_sheet?.characters.length,
+    sets: pkg.set_sheet?.locations.length,
+    props: pkg.prop_sheet?.props.length,
     assets: pkg.asset_requirements.items.length,
     qa: pkg.qa_report.hard_issues.length + pkg.qa_report.creative_issues.length,
   };
@@ -659,6 +672,7 @@ function renderPackage(pkg) {
   const L = lookups(pkg);
   const body = {
     overview: renderOverview, script: renderScript, storyboard: renderStoryboard,
+    cast: renderCast, sets: renderSets, props: renderProps,
     assets: renderAssets, qa: renderQA, revise: renderRevise,
     activity: () => activityPanel(state.job.job_id),
   }[state.tab] || renderOverview;
@@ -688,7 +702,8 @@ function renderOverview(pkg, L) {
       b.characters.map((c) =>
         h("div", { class: "card entity" },
           h("h3", {}, c.name, h("code", { class: "muted" }, c.character_id)),
-          h("p", {}, c.appearance), h("p", { class: "muted" }, c.costume),
+          c.role && h("p", { class: "muted" }, c.role),
+          legacyText(c),
           h("p", {}, h("strong", {}, "Goal: "), c.goal),
           h("p", {}, h("strong", {}, "Motivation: "), c.motivation),
           b.character_arcs?.[c.character_id] && h("p", {}, h("strong", {}, "Arc: "), b.character_arcs[c.character_id]),
@@ -702,7 +717,8 @@ function renderOverview(pkg, L) {
       b.locations.map((l) =>
         h("div", { class: "card entity" },
           h("h3", {}, l.name, h("code", { class: "muted" }, l.location_id)),
-          h("p", {}, l.layout), h("p", { class: "muted" }, l.furnishings), h("p", { class: "muted" }, l.lighting),
+          l.summary && h("p", {}, l.summary),
+          legacyText(l),
           h("div", { class: "variants chips" }, (statesBy[l.location_id] || []).map((s) => h("span", { class: "chip", title: s.description }, s.location_state_id))),
         ),
       ),
@@ -713,7 +729,8 @@ function renderOverview(pkg, L) {
         b.props.map((p) =>
           h("div", { class: "card entity" },
             h("h3", {}, p.name, h("code", { class: "muted" }, p.prop_id)),
-            h("p", {}, p.description),
+            p.story_function && h("p", {}, p.story_function),
+            legacyText(p),
             h("div", { class: "variants chips" }, (propStatesBy[p.prop_id] || []).map((s) => h("span", { class: "chip", title: s.description }, s.prop_state_id))),
           ),
         ),
@@ -729,6 +746,8 @@ function renderOverview(pkg, L) {
 }
 
 const kv = (k, v) => [h("dt", {}, k), h("dd", {}, v)];
+// Visual text from packages made before the design sheets (kept under `legacy`).
+const legacyText = (obj) => obj.legacy && Object.values(obj.legacy).map((t) => h("p", { class: "muted" }, t));
 const listCard = (title, items) =>
   h("div", { class: "card" }, h("h3", {}, title),
     items.length ? h("ul", { class: "plain small" }, items.map((i) => h("li", {}, i))) : h("p", { class: "muted small" }, "None"));
@@ -822,6 +841,123 @@ function renderStoryboard(pkg, L) {
       ),
     );
   });
+}
+
+// Design sheets (cast / sets / props) --------------------------------------------
+
+// Field label + value rows; lists render as chips, empty values are left out.
+function sheetFields(obj, fields) {
+  return h("dl", { class: "kv sheet-kv" }, fields.map(([key, label]) => {
+    const v = obj[key];
+    if (v == null || v === "" || (Array.isArray(v) && !v.length)) return null;
+    const value = Array.isArray(v) ? h("div", { class: "chips" }, v.map((x) => h("span", { class: `chip ${key === "must_keep" ? "warn" : ""}` }, x))) : v;
+    return kv(label, value);
+  }));
+}
+
+function sheetHeader(pkg, key, title, blurb) {
+  const sheet = pkg[key.replace("-", "_")];
+  const q = new URLSearchParams({ revision_id: pkg.revision_id });
+  return h("section", { class: "card sheet-head" },
+    h("div", {},
+      h("h2", {}, title),
+      h("p", { class: "muted small" }, blurb),
+    ),
+    h("div", { class: "job-actions" },
+      sheet && h("span", { class: "chip mono" }, `schema ${sheet.schema_version}`),
+      sheet && h("a", { class: "btn small", href: `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/${key}?${q}`, download: `${pkg.package_id}-${key}.json` }, "JSON"),
+      h("a", { class: "btn ghost small", href: `/v1/schemas/${key}.json`, target: "_blank", rel: "noopener" }, "Schema"),
+    ),
+  );
+}
+
+const noSheet = (what) => h("div", { class: "card placeholder" }, h("p", {}, `This package was made before ${what} sheets existed. Retry or create a new job to get one.`));
+
+function variantCard(id, parentName, obj, fields) {
+  return h("div", { class: "card entity variant" },
+    h("h3", {}, parentName, h("code", { class: "muted" }, id)),
+    sheetFields(obj, fields));
+}
+
+const CAST_FIELDS = [
+  ["age_range", "Age"], ["gender_presentation", "Gender"], ["build_and_height", "Build"],
+  ["face", "Face"], ["hair", "Hair"], ["distinguishing_features", "Distinguishing"],
+  ["default_wardrobe", "Wardrobe"], ["wardrobe_palette", "Palette"],
+  ["posture_and_mannerisms", "Mannerisms"], ["voice", "Voice"],
+  ["must_keep", "Must keep"], ["design_freedom", "Free to design"],
+];
+const LOOK_FIELDS = [
+  ["wardrobe", "Wardrobe"], ["hair_and_makeup", "Hair & makeup"], ["condition", "Condition"],
+  ["changes_from_base", "Changes"], ["must_keep", "Must keep"],
+];
+
+function renderCast(pkg, L) {
+  const sheet = pkg.cast_sheet;
+  const head = sheetHeader(pkg, "cast-sheet", "Cast sheet", "How each character looks and sounds, for character design and casting. Story roles and goals are in the Overview.");
+  if (!sheet) return h("div", {}, head, noSheet("cast"));
+  const looksBy = groupBy(sheet.looks, "character_id");
+  return h("div", {}, head,
+    sheet.characters.map((c) =>
+      h("section", { class: "card entity sheet-entry" },
+        h("h3", {}, c.name || L.name[c.character_id] || c.character_id, h("code", { class: "muted" }, c.character_id),
+          !c.on_screen && h("span", { class: "chip" }, "not seen on screen")),
+        sheetFields(c, CAST_FIELDS),
+        (looksBy[c.character_id] || []).length > 0 && h("div", { class: "grid variants-grid" },
+          looksBy[c.character_id].map((lk) => variantCard(lk.look_id, "Look", lk, LOOK_FIELDS))),
+      )),
+  );
+}
+
+const SET_FIELDS = [
+  ["era_and_region", "Era & region"], ["layout", "Layout"], ["key_furnishings", "Furnishings"],
+  ["materials_and_textures", "Materials"], ["color_palette", "Palette"], ["lighting", "Lighting"],
+  ["entrances_and_blocking", "Entrances & blocking"], ["ambient_sound", "Ambient sound"],
+  ["must_keep", "Must keep"], ["design_freedom", "Free to design"],
+];
+const SET_STATE_FIELDS = [
+  ["time_of_day", "Time"], ["lighting", "Lighting"], ["dressing_changes", "Dressing"],
+  ["condition", "Condition"], ["changes_from_base", "Changes"], ["must_keep", "Must keep"],
+];
+
+function renderSets(pkg, L) {
+  const sheet = pkg.set_sheet;
+  const head = sheetHeader(pkg, "set-sheet", "Set sheet", "How each location looks, for production design. Layout and entrances support the script's blocking.");
+  if (!sheet) return h("div", {}, head, noSheet("set"));
+  const statesBy = groupBy(sheet.states, "location_id");
+  return h("div", {}, head,
+    sheet.locations.map((loc) =>
+      h("section", { class: "card entity sheet-entry" },
+        h("h3", {}, loc.name || L.name[loc.location_id] || loc.location_id, h("code", { class: "muted" }, loc.location_id),
+          h("span", { class: "chip" }, loc.interior_exterior)),
+        sheetFields(loc, SET_FIELDS),
+        (statesBy[loc.location_id] || []).length > 0 && h("div", { class: "grid variants-grid" },
+          statesBy[loc.location_id].map((st) => variantCard(st.location_state_id, "State", st, SET_STATE_FIELDS))),
+      )),
+  );
+}
+
+const PROP_FIELDS = [
+  ["size_and_scale", "Size"], ["materials", "Materials"], ["color_and_finish", "Color & finish"],
+  ["condition_and_wear", "Condition"], ["distinguishing_marks", "Distinguishing"],
+  ["handling", "Handling"], ["must_keep", "Must keep"], ["design_freedom", "Free to design"],
+];
+const PROP_STATE_FIELDS = [["condition", "Condition"], ["changes_from_base", "Changes"], ["must_keep", "Must keep"]];
+
+function renderProps(pkg, L) {
+  const sheet = pkg.prop_sheet;
+  const head = sheetHeader(pkg, "prop-sheet", "Prop sheet", "How each plot-relevant prop looks and is handled, for prop making.");
+  if (!sheet) return h("div", {}, head, noSheet("prop"));
+  if (!sheet.props.length) return h("div", {}, head, h("div", { class: "card placeholder" }, h("p", {}, "This story registers no key props.")));
+  const statesBy = groupBy(sheet.states, "prop_id");
+  return h("div", {}, head,
+    sheet.props.map((p) =>
+      h("section", { class: "card entity sheet-entry" },
+        h("h3", {}, p.name || L.name[p.prop_id] || p.prop_id, h("code", { class: "muted" }, p.prop_id)),
+        sheetFields(p, PROP_FIELDS),
+        (statesBy[p.prop_id] || []).length > 0 && h("div", { class: "grid variants-grid" },
+          statesBy[p.prop_id].map((st) => variantCard(st.prop_state_id, "State", st, PROP_STATE_FIELDS))),
+      )),
+  );
 }
 
 // Assets --------------------------------------------------------------------

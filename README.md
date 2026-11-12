@@ -24,9 +24,9 @@ A static single-page app (`src/drama_agent/web/`) served by the same FastAPI pro
 with no build step. It lets you:
 
 - submit a seed or script, and/or upload images and videos (each with an optional
-  prompt), then watch the five pipeline steps progress
+  prompt), then watch the pipeline steps progress
 - browse the result: story bible, scripts, the timed storyboard with a shot timeline,
-  asset requirements (filterable by type), and QA issues with token usage
+  the cast, set and prop sheets, asset requirements (filterable by type), and QA issues with token usage
 - request a targeted revision and see its impact analysis (conflicts, locked objects in
   scope, impacted objects, stale asset requirements)
 - export a package as Markdown or JSON
@@ -102,6 +102,39 @@ keyframes, transcript), `.../content` (the file, supports range requests),
 | `DRAMA_MAX_IMAGES_PER_REQUEST` | `48` | images per model request; videos' keyframes are thinned evenly to fit |
 | `DRAMA_TRANSCRIBE_MAX_S` | `1800` | audio after this is not transcribed (marked unknown) |
 | `MCPHUB_TRANSCRIBE_MODEL` | `whisper-1` | speech-to-text model |
+
+### Cast, set and prop sheets
+
+Each package includes three standalone design documents. Each one has its own versioned
+JSON Schema and is written by its own model call:
+
+| sheet | describes | schema | per package |
+| --- | --- | --- | --- |
+| `cast_sheet` | every character (age, build, face, hair, distinguishing features, wardrobe and palette, mannerisms, voice) and every look | `/v1/schemas/cast-sheet.json` | `GET /v1/drama-packages/{id}/cast-sheet` |
+| `set_sheet` | every location (interior/exterior, era, layout, furnishings, materials, palette, lighting, entrances and blocking, ambient sound) and every location state | `/v1/schemas/set-sheet.json` | `.../set-sheet` |
+| `prop_sheet` | every key prop (size, materials, finish, wear, distinguishing marks, handling) and every prop state | `/v1/schemas/prop-sheet.json` | `.../prop-sheet` |
+
+Every entry also lists `must_keep` (what the story depends on) and `design_freedom`
+(what a designer may decide). These are text descriptions, not generated images.
+
+- **Story bible vs. sheets.** The story bible keeps the story-facing side: IDs, names,
+  roles, goals, relationships, arcs and one-line summaries. The sheets hold how each entity
+  looks, keyed by the same IDs.
+- **Pipeline.** The `cast`, `sets` and `props` steps run concurrently after the script, so
+  descriptions follow how the script uses each entity. Each sheet has its own hard checks
+  and retry budget: every story-bible ID is described exactly once, nothing unknown is
+  added, variants sit under the right parent, a character marked `on_screen: false` is
+  never shown in a shot, and no IDs or timecodes leak into prose. A sheet step doesn't see
+  the other sheets; storyboard and review see all three. If one sheet's model call fails,
+  the other two still finish and are checkpointed, so a retry only redoes the failed one.
+- **Downstream.** Asset requirements take their design brief, `must_keep` and
+  `design_freedom` from the sheets. Locking a character, location or prop also locks its
+  sheet entry.
+- **Older data.** Packages made before the sheets load without them; the sheet endpoints
+  return 404 with an explanation. Their old visual fields (appearance, costume, layout,
+  ...) are kept under `legacy` on each story-bible entry: still shown in the Overview and
+  used for asset briefs, but hidden from the model's schema. Completed jobs show the new steps as `skipped`. A
+  retried or resumed old job runs the sheets, then re-runs storyboard and review.
 
 ### Storage
 
@@ -203,11 +236,12 @@ so everything runs offline.
 
 ```
 src/drama_agent/
-  models/          Pydantic contracts: request, source brief, story bible, screenplay,
-                   storyboard + timing, asset requirements, package/job/revision
+  models/          Pydantic contracts: request, source brief, story bible, design sheets
+                   (cast/set/prop), screenplay, storyboard + timing, asset requirements,
+                   package/job/revision, uploaded media
   pipeline/
-    orchestrator.py  One orchestrator, five gated steps, bounded per-step retries
-    steps.py         ingest → outline → script → storyboard → review
+    orchestrator.py  One orchestrator, gated steps (some concurrent), bounded per-step retries
+    steps.py         ingest → outline → script → {cast, sets, props} → storyboard → review
     asset_aggregation.py  Derives/merges asset requirements from shots (reuse units,
                           used_by, depends_on are program-owned)
     impact.py        Revision impact analysis and stale-requirement propagation

@@ -352,3 +352,21 @@ td.mono { white-space: nowrap; }
 }
 .frame-strip figcaption { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 .transcript { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; font-size: 13px; }
+
+/* Design sheets -------------------------------------------------------------- */
+.sheet-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.sheet-head h2 { margin: 0 0 4px; }
+.sheet-head p { margin: 0; }
+.sheet-entry { margin-top: 12px; }
+.sheet-entry h3 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: flex-start; }
+.sheet-kv { grid-template-columns: 140px 1fr; margin: 8px 0 0; }
+.sheet-kv dd { margin: 0; overflow-wrap: anywhere; }
+.variants-grid { margin-top: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.variant .sheet-kv { grid-template-columns: 96px 1fr; }
+.entity.variant { background: var(--surface-2); box-shadow: none; }
+.entity.variant h3 { font-size: 13px; }
+@media (max-width: 640px) {
+  .sheet-kv { grid-template-columns: 1fr; }
+  .sheet-kv dt { margin-top: 6px; }
+}
+.banner-sub { margin-top: 8px; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }

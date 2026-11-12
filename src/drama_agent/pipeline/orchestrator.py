@@ -16,7 +16,7 @@ from ..models.package import utcnow
 from ..prompts import load_orchestrator_prompt
 from ..store import Repository
 from ..tracing import Tracer
-from .steps import OUTPUT_RULES, STEPS, PipelineState
+from .steps import OUTPUT_RULES, STEP_GROUPS, PipelineState, Step, completed_in_order
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +59,6 @@ class Orchestrator:
         trace = Tracer(self.repo, job_id)
         state, completed = self._restore(job)
         state.emit = lambda kind, msg, **kw: trace.event(kind, msg, **kw)
-        budget = job.request.options.revision_budget_per_stage
         self._set(job, status="running", failure_reason=None)
         if completed:
             trace.event(
@@ -67,118 +66,159 @@ class Orchestrator:
             )
         else:
             trace.event("job_started", "Started.")
-        stage = None
 
         # Everything, including the final save, is inside the try so the job can never be
         # left in 'running' by an unexpected exception.
         try:
-            for step in STEPS:
-                stage = job.stages[step.name]
-                if step.name in completed:
-                    stage.status = "passed"  # restored from checkpoint; not re-run
+            for group in STEP_GROUPS:
+                todo = []
+                for step in group:
+                    if step.name in completed:
+                        job.stages[step.name].status = "passed"  # restored; not re-run
+                    else:
+                        todo.append(step)
+                if not todo:
                     continue
-                # Safe point between steps: pause before announcing the next one.
+                # Safe point between steps: pause before announcing the next ones.
                 if self._pause_requested(job_id):
-                    return self._pause(job, stage, trace, step.name)
-                stage.status, stage.error, stage.issues = "running", None, []
-                self._touch(job)
-                trace.event(
-                    "stage_started", f"{step.name.capitalize()} step started.", stage=step.name
-                )
-                started = time.monotonic()
-                issues = []
-                media_ctx, media_parts = [], []
-                if step.name == "ingest":
-                    media_ctx, media_parts = await self._prepare_media(job, state, trace)
-                # One initial attempt plus `budget` automatic repairs. Only this step is
-                # retried; earlier passed steps are not re-run.
-                for attempt in range(budget + 1):
-                    # Safe point: nothing is in flight, so pausing here loses no work
-                    # except this step's unfinished attempts.
-                    if self._pause_requested(job_id):
-                        return self._pause(job, stage, trace, step.name)
-                    stage.attempts = attempt + 1
-                    if attempt:
-                        trace.event(
-                            "attempt_started",
-                            f"Attempt {attempt + 1} of {budget + 1}, with {len(issues)} "
-                            "issues as feedback.",
-                            stage=step.name,
-                            attempt=attempt,
-                        )
-                    context = state.context()
-                    if media_ctx:
-                        context["source_media"] = media_ctx
-                    gen = GenerationRequest(
-                        stage=step.name,
-                        instructions=(f"{self.base_prompt}\n\n{step.directive}\n\n{OUTPUT_RULES}"),
-                        context=context,
-                        feedback=issues,
-                        attempt=attempt,
-                        recorder=trace.recorder(step.name, attempt),
-                        media=media_parts,
+                    return self._pause(job, trace, [s.name for s in todo])
+                if len(todo) == 1:
+                    outcomes = [await self._run_step(job, state, completed, todo[0], trace)]
+                else:
+                    # Independent steps (the design sheets) run concurrently, each with its
+                    # own retries. If one raises, the others still finish and are
+                    # checkpointed, so a retry doesn't pay for them again. (Cancelling this
+                    # task, e.g. on a lost lease, still cancels all of them.)
+                    results = await asyncio.gather(
+                        *(self._run_step(job, state, completed, step, trace) for step in todo),
+                        return_exceptions=True,
                     )
-                    try:
-                        output = await self.client.generate(gen, step.output_model)
-                    finally:
-                        # Count tokens even when the call ultimately fails.
-                        used = state.token_usage.setdefault(step.name, {})
-                        for k, v in gen.usage.items():
-                            used[k] = used.get(k, 0) + v
-                    state.model_versions[step.name] = gen.model or self.client.model_id
-                    step.apply(state, output)
-                    issues = step.check(state)
-                    if not issues:
-                        break
-                    trace.event(
-                        "gate_issues",
-                        f"Hard checks found {len(issues)} issues.",
-                        stage=step.name,
-                        attempt=attempt,
-                        issues=[f"{i.check} {i.object_id}: {i.evidence}" for i in issues[:10]],
-                    )
-                stage.issues = issues
-                if issues:
-                    stage.status = "failed"
+                    for r in results:
+                        if isinstance(r, BaseException):
+                            raise r
+                    outcomes = [str(r) for r in results]
+                if "needs_revision" in outcomes:
+                    failed = [s.name for s in todo if job.stages[s.name].status == "failed"]
                     # Keep the draft (with its issues) so the user can inspect and revise it.
-                    state.qa_report.hard_issues = issues
-                    trace.event(
-                        "stage_failed",
-                        f"{step.name.capitalize()} still had {len(issues)} issues after "
-                        f"{budget + 1} attempts; stopping as needs_revision.",
-                        stage=step.name,
-                    )
+                    state.qa_report.hard_issues = [
+                        i for name in failed for i in job.stages[name].issues
+                    ]
                     self._finish(job, state, status="needs_revision")
                     return job
-                # Checkpoint before marking passed: a crash in between re-runs this step
-                # rather than skipping it with missing output.
-                completed.append(step.name)
-                if self.checkpoints:
-                    self.checkpoints.save_checkpoint(job_id, state.to_checkpoint(completed))
-                stage.status = "passed"
-                self._touch(job)
-                used = state.token_usage.get(step.name, {})
-                trace.event(
-                    "stage_passed",
-                    f"{step.name.capitalize()} passed in {time.monotonic() - started:.0f}s "
-                    f"({stage.attempts} attempt{'s' if stage.attempts > 1 else ''}).",
-                    stage=step.name,
-                    tokens=used,
-                )
-            stage = None
+                if "paused" in outcomes:
+                    paused = [s.name for s, o in zip(todo, outcomes, strict=True) if o == "paused"]
+                    return self._pause(job, trace, paused)
             self._finish(job, state, status="completed")
             trace.event("job_completed", "Completed; all hard checks passed.")
         except Exception as exc:  # job must record any failure
             log.exception("job %s failed", job_id)
             reason = f"{type(exc).__name__}: {exc}"
-            if stage is not None:
-                stage.status = "failed"
-                stage.error = reason
-            self._set(job, status="failed", failure_reason=reason)
-            trace.event(
-                "job_failed", f"Failed: {reason}", stage=stage and self._stage_name(job, stage)
+            failed_stage = next(
+                (n for n, st in job.stages.items() if st.status == "failed" and st.error), None
             )
+            self._set(job, status="failed", failure_reason=reason)
+            trace.event("job_failed", f"Failed: {reason}", stage=failed_stage)
         return job
+
+    async def _run_step(
+        self,
+        job: Job,
+        state: PipelineState,
+        completed: list[str],
+        step: Step,
+        trace: Tracer,
+    ) -> str:
+        """One step with its bounded retries. Returns "passed", "needs_revision" or
+        "paused"; on an exception the stage is marked failed and the exception re-raised."""
+        stage = job.stages[step.name]
+        budget = job.request.options.revision_budget_per_stage
+        stage.status, stage.error, stage.issues = "running", None, []
+        self._touch(job)
+        trace.event("stage_started", f"{step.name.capitalize()} step started.", stage=step.name)
+        started = time.monotonic()
+        issues: list = []
+        try:
+            media_ctx, media_parts = [], []
+            if step.name == "ingest":
+                media_ctx, media_parts = await self._prepare_media(job, state, trace)
+            # One initial attempt plus `budget` automatic repairs. Only this step is
+            # retried; earlier passed steps are not re-run.
+            for attempt in range(budget + 1):
+                # Safe point: nothing is in flight, so pausing here loses no work except
+                # this step's unfinished attempts.
+                if self._pause_requested(job.job_id):
+                    stage.status, stage.attempts, stage.issues = "pending", 0, []
+                    return "paused"
+                stage.attempts = attempt + 1
+                if attempt:
+                    trace.event(
+                        "attempt_started",
+                        f"Attempt {attempt + 1} of {budget + 1}, with {len(issues)} "
+                        "issues as feedback.",
+                        stage=step.name,
+                        attempt=attempt,
+                    )
+                context = state.context(include_sheets=step.sees_sheets)
+                if media_ctx:
+                    context["source_media"] = media_ctx
+                gen = GenerationRequest(
+                    stage=step.name,
+                    instructions=f"{self.base_prompt}\n\n{step.directive}\n\n{OUTPUT_RULES}",
+                    context=context,
+                    feedback=issues,
+                    attempt=attempt,
+                    recorder=trace.recorder(step.name, attempt),
+                    media=media_parts,
+                )
+                try:
+                    output = await self.client.generate(gen, step.output_model)
+                finally:
+                    # Count tokens even when the call ultimately fails.
+                    used = state.token_usage.setdefault(step.name, {})
+                    for k, v in gen.usage.items():
+                        used[k] = used.get(k, 0) + v
+                state.model_versions[step.name] = gen.model or self.client.model_id
+                step.apply(state, output)
+                issues = step.check(state)
+                if not issues:
+                    break
+                trace.event(
+                    "gate_issues",
+                    f"Hard checks found {len(issues)} issues.",
+                    stage=step.name,
+                    attempt=attempt,
+                    issues=[f"{i.check} {i.object_id}: {i.evidence}" for i in issues[:10]],
+                )
+        except asyncio.CancelledError:
+            raise  # cancelled from outside (e.g. a lost lease); not this step's fault
+        except Exception as exc:
+            stage.status, stage.error = "failed", f"{type(exc).__name__}: {exc}"
+            raise
+        stage.issues = issues
+        if issues:
+            stage.status = "failed"
+            trace.event(
+                "stage_failed",
+                f"{step.name.capitalize()} still had {len(issues)} issues after "
+                f"{budget + 1} attempts; stopping as needs_revision.",
+                stage=step.name,
+            )
+            return "needs_revision"
+        # Checkpoint before marking passed: a crash in between re-runs this step rather
+        # than skipping it with missing output.
+        completed.append(step.name)
+        if self.checkpoints:
+            self.checkpoints.save_checkpoint(job.job_id, state.to_checkpoint(completed))
+        stage.status = "passed"
+        self._touch(job)
+        trace.event(
+            "stage_passed",
+            f"{step.name.capitalize()} passed in {time.monotonic() - started:.0f}s "
+            f"({stage.attempts} attempt{'s' if stage.attempts > 1 else ''}).",
+            stage=step.name,
+            tokens=state.token_usage.get(step.name, {}),
+        )
+        return "passed"
 
     async def _prepare_media(
         self, job: Job, state: PipelineState, trace: Tracer
@@ -273,19 +313,19 @@ class Orchestrator:
         check = getattr(self.checkpoints, "pause_requested", None)
         return bool(check and check(job_id))
 
-    def _pause(self, job: Job, stage, trace: Tracer, stage_name: str) -> Job:
-        # The interrupted step restarts from its first attempt on resume; passed steps are
+    def _pause(self, job: Job, trace: Tracer, stage_names: list[str]) -> Job:
+        # Interrupted steps restart from their first attempt on resume; passed steps are
         # kept by the checkpoint.
-        stage.status, stage.attempts, stage.issues, stage.error = "pending", 0, [], None
+        for name in stage_names:
+            st = job.stages[name]
+            st.status, st.attempts, st.issues, st.error = "pending", 0, [], None
         self._set(job, status="paused", failure_reason=None)
         trace.event(
-            "paused", f"Paused before the {stage_name} step's next model call.", stage=stage_name
+            "paused",
+            f"Paused before the {' / '.join(stage_names)} step's next model call.",
+            stage=stage_names[0],
         )
         return job
-
-    @staticmethod
-    def _stage_name(job: Job, stage) -> str | None:
-        return next((name for name, s in job.stages.items() if s is stage), None)
 
     # ------------------------------------------------------------------
 
@@ -293,6 +333,7 @@ class Orchestrator:
         raw = self.checkpoints.load_checkpoint(job.job_id) if self.checkpoints else None
         if raw:
             state, completed = PipelineState.from_checkpoint(job.request, raw)
+            completed = completed_in_order(completed)
             log.info("job %s resuming after %s", job.job_id, completed)
             return state, completed
         fresh = PipelineState(

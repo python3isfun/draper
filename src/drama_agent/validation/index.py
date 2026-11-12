@@ -94,3 +94,12 @@ def lockable_objects(pkg: ProductionPackage) -> dict[str, BaseModel]:
         objects.update(table)
     objects.update(pkg.asset_requirements.by_id())
     return objects
+
+
+def design_entries(pkg: ProductionPackage) -> dict[str, BaseModel]:
+    """Design-sheet entries keyed by the story bible ID they describe."""
+    out: dict[str, BaseModel] = {}
+    for sheet in (pkg.cast_sheet, pkg.set_sheet, pkg.prop_sheet):
+        if sheet is not None:
+            out |= sheet.entries()
+    return out

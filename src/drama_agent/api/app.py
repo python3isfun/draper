@@ -26,15 +26,19 @@ from ..jobqueue import InMemoryJobQueue, JobQueue
 from ..llm import FixtureModelClient, ModelClient
 from ..media import MediaError, MediaStore, UploadTooLarge, media_from_env
 from ..models import (
+    CastSheet,
     Job,
     JobRequest,
     LLMCall,
     ProductionPackage,
+    PropSheet,
     Revision,
     RevisionRequest,
+    SetSheet,
     SourceAsset,
     TraceEvent,
 )
+from ..models.design_sheets import SHEET_SCHEMAS
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
@@ -356,6 +360,31 @@ def create_app(
             # copied) instead of downloading it.
             return PlainTextResponse(render_markdown(pkg), media_type="text/plain")
         return pkg
+
+    @app.get("/v1/drama-packages/{package_id}/{sheet}", response_model=None)
+    async def get_sheet(
+        package_id: str,
+        sheet: Literal["cast-sheet", "set-sheet", "prop-sheet"],
+        revision_id: str | None = None,
+    ) -> CastSheet | SetSheet | PropSheet:
+        """One design sheet as its own document (schema: /v1/schemas/{sheet}.json)."""
+        pkg = repo.get_package(package_id, revision_id)
+        if pkg is None:
+            raise HTTPException(404, "package not found")
+        doc = getattr(pkg, sheet.replace("-", "_"))
+        if doc is None:
+            raise HTTPException(404, f"this package was made before {sheet}s existed")
+        return doc
+
+    @app.get("/v1/schemas/{name}.json")
+    async def get_schema(name: str) -> dict:
+        """JSON Schema of a standalone document: cast-sheet, set-sheet or prop-sheet."""
+        model = SHEET_SCHEMAS.get(name)
+        if model is None:
+            raise HTTPException(404, f"unknown schema {name}; known: {', '.join(SHEET_SCHEMAS)}")
+        schema = model.model_json_schema()
+        schema["$id"] = f"/v1/schemas/{name}.json"
+        return schema
 
     @app.post("/v1/drama-packages/{package_id}/revisions", status_code=202, response_model=Revision)
     async def create_revision(package_id: str, req: RevisionRequest) -> Revision:

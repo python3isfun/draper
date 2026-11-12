@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 from ..models import Issue, JobOptions, ProductionPackage
 from ..pipeline.asset_aggregation import required_units_for_shot, shot_reference_unit
-from .index import PackageIndex, lockable_objects
+from .index import PackageIndex, design_entries, lockable_objects
 from .prose import find_prose_leaks
 
 Check = Callable[[ProductionPackage, PackageIndex, JobOptions], list[Issue]]
@@ -410,12 +410,19 @@ def _find_cycle(graph: dict[str, list[str]]) -> list[str] | None:
 def check_locks(base: ProductionPackage, new: ProductionPackage) -> list[Issue]:
     """Locked objects in the base revision must be byte-identical in the new one."""
     before, after = lockable_objects(base), lockable_objects(new)
+    # A locked character/location/prop also locks its design-sheet entry (same ID).
+    design_before, design_after = design_entries(base), design_entries(new)
     issues: list[Issue] = []
     for lid in base.locked_ids:
         if lid not in before:
             continue
         if lid not in after or before[lid].model_dump() != after[lid].model_dump():
             issues.append(_issue("locked", lid, "locked object was modified or removed"))
+        elif lid in design_before and (
+            lid not in design_after
+            or design_before[lid].model_dump() != design_after[lid].model_dump()
+        ):
+            issues.append(_issue("locked", lid, "locked object's design sheet entry changed"))
     return issues
 
 
@@ -452,7 +459,120 @@ def check_entity_keys(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) 
 
 
 def check_prose(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
-    return find_prose_leaks(pkg.story_bible, pkg.episodes, pkg.shot_list)
+    return find_prose_leaks(
+        pkg.story_bible, pkg.episodes, pkg.shot_list, pkg.cast_sheet, pkg.set_sheet, pkg.prop_sheet
+    )
+
+
+# ---------------------------------------------------------------------------
+# Design sheets: each covers exactly the story bible's entities of its kind
+
+
+def _coverage(
+    sheet: str,
+    kind: str,
+    entries: list[tuple[str, str | None]],
+    expected: dict[str, str | None],
+    parent_label: str = "",
+) -> list[Issue]:
+    """entries/expected: (id, parent id or None). Every expected ID exactly once, nothing
+    unknown, and each variant under the same parent as in the story bible."""
+    issues: list[Issue] = []
+    seen: set[str] = set()
+    for eid, parent in entries:
+        if eid in seen:
+            issues.append(_issue("design_sheet", eid, f"{sheet}: {kind} described twice", sheet))
+            continue
+        seen.add(eid)
+        if eid not in expected:
+            issues.append(
+                _issue("design_sheet", eid, f"{sheet}: {kind} is not in the story bible", sheet)
+            )
+        elif parent is not None and parent != expected[eid]:
+            issues.append(
+                _issue(
+                    "design_sheet",
+                    eid,
+                    f"{sheet}: {kind} belongs to {expected[eid]}, not {parent} ({parent_label})",
+                    sheet,
+                )
+            )
+    for eid in expected:
+        if eid not in seen:
+            issues.append(_issue("design_sheet", eid, f"{sheet}: {kind} has no entry", sheet))
+    return issues
+
+
+def check_cast_sheet(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
+    sheet = pkg.cast_sheet
+    if sheet is None:
+        return []  # package made before the sheets existed
+    bible = pkg.story_bible
+    issues = _coverage(
+        "cast_sheet",
+        "character",
+        [(c.character_id, None) for c in sheet.characters],
+        {c.character_id: None for c in bible.characters},
+    )
+    issues += _coverage(
+        "cast_sheet",
+        "look",
+        [(lk.look_id, lk.character_id) for lk in sheet.looks],
+        {lk.look_id: lk.character_id for lk in bible.looks},
+        "character_id",
+    )
+    # A character marked as never seen must not appear in a shot.
+    off_screen = {c.character_id for c in sheet.characters if not c.on_screen}
+    for shot in pkg.shot_list:
+        for ref in shot.character_look_refs:
+            if ref.character_id in off_screen:
+                issues.append(
+                    _issue(
+                        "design_sheet",
+                        ref.character_id,
+                        f"cast_sheet says on_screen=false, but shot {shot.shot_id} shows them",
+                        "cast_sheet",
+                    )
+                )
+    return issues
+
+
+def check_set_sheet(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
+    sheet = pkg.set_sheet
+    if sheet is None:
+        return []
+    bible = pkg.story_bible
+    return _coverage(
+        "set_sheet",
+        "location",
+        [(loc.location_id, None) for loc in sheet.locations],
+        {loc.location_id: None for loc in bible.locations},
+    ) + _coverage(
+        "set_sheet",
+        "location state",
+        [(st.location_state_id, st.location_id) for st in sheet.states],
+        {st.location_state_id: st.location_id for st in bible.location_states},
+        "location_id",
+    )
+
+
+def check_prop_sheet(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
+    sheet = pkg.prop_sheet
+    if sheet is None:
+        return []
+    bible = pkg.story_bible
+    return _coverage(
+        "prop_sheet",
+        "prop",
+        [(p.prop_id, None) for p in sheet.props],
+        {p.prop_id: None for p in bible.props},
+    ) + _coverage(
+        "prop_sheet",
+        "prop state",
+        [(st.prop_state_id, st.prop_id) for st in sheet.states],
+        {st.prop_state_id: st.prop_id for st in bible.prop_states},
+        "prop_id",
+    )
 
 
 ALL_CHECKS: tuple[Check, ...] = (
@@ -464,6 +584,9 @@ ALL_CHECKS: tuple[Check, ...] = (
     check_asset_requirements,
     check_entity_keys,
     check_prose,
+    check_cast_sheet,
+    check_set_sheet,
+    check_prop_sheet,
 )
 
 

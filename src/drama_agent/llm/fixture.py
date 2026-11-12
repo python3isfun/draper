@@ -33,9 +33,12 @@ class FixtureModelClient:
     async def generate(self, request: GenerationRequest, output_model: type[T]) -> T:
         # Imported lazily to avoid a cycle: pipeline.steps imports llm types.
         from ..pipeline.steps import (
+            CastOutput,
             CreativeReviewOutput,
             OutlineOutput,
+            PropsOutput,
             ScriptOutput,
+            SetsOutput,
             StoryboardOutput,
         )
 
@@ -49,6 +52,12 @@ class FixtureModelClient:
                 output = OutlineOutput(story_bible=sample.sample_story_bible())
             case "script":
                 output = ScriptOutput(episodes=sample.sample_episodes())
+            case "cast":
+                output = CastOutput(cast_sheet=sample.sample_cast_sheet())
+            case "sets":
+                output = SetsOutput(set_sheet=sample.sample_set_sheet())
+            case "props":
+                output = PropsOutput(prop_sheet=sample.sample_prop_sheet())
             case "storyboard":
                 shots, timing = sample.sample_storyboard()
                 output = StoryboardOutput(
@@ -77,10 +86,14 @@ class FixtureModelClient:
         text = output.model_dump_json(indent=1)
         chunks = 12 if self.stream_delay_s else 1
         size = max(1, len(text) // chunks + 1)
-        for i in range(0, len(text), size):
-            rec.delta("output", text[i : i + size])
-            if self.stream_delay_s:
-                await asyncio.sleep(self.stream_delay_s / chunks)
+        try:
+            for i in range(0, len(text), size):
+                rec.delta("output", text[i : i + size])
+                if self.stream_delay_s:
+                    await asyncio.sleep(self.stream_delay_s / chunks)
+        except asyncio.CancelledError:
+            rec.finish(error="cancelled before the response finished")
+            raise
         rec.finish(usage={"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0})
         return output
 

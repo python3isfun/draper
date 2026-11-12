@@ -37,6 +37,17 @@ from ..models import (
     StoryBible,
     StyleBrief,
 )
+from ..models.design_sheets import (
+    CastLook,
+    CastMember,
+    CastSheet,
+    PropItem,
+    PropSheet,
+    PropVariant,
+    SetLocation,
+    SetSheet,
+    SetState,
+)
 
 SAMPLE_SEED = "一个即将失去店铺的年轻人，发现前来收租的老人是失踪多年的父亲。"
 SHOT_MS = 15_000
@@ -94,8 +105,7 @@ def sample_story_bible() -> StoryBible:
             Character(
                 character_id="ch_lin",
                 name="林晓",
-                appearance="28岁女性，短发，眼神倔强",
-                costume="深色毛衣配店铺围裙",
+                role="主角",
                 relationships={"ch_zhou": "父亲（未知）", "ch_mei": "店员兼好友", "ch_mom": "母亲"},
                 goal="保住书店",
                 motivation="书店是她独自撑起的唯一依靠",
@@ -104,8 +114,7 @@ def sample_story_bible() -> StoryBible:
             Character(
                 character_id="ch_zhou",
                 name="周叔（林建国）",
-                appearance="60岁男性，灰白头发，右手背有烫伤疤",
-                costume="旧夹克",
+                role="主角的父亲，隐藏身份的房东",
                 relationships={"ch_lin": "女儿"},
                 goal="还清旧债而不让女儿知道",
                 motivation="愧疚",
@@ -114,8 +123,7 @@ def sample_story_bible() -> StoryBible:
             Character(
                 character_id="ch_mei",
                 name="阿梅",
-                appearance="26岁女性，扎马尾",
-                costume="书店工作服",
+                role="主角的好友与帮手",
                 relationships={"ch_lin": "好友"},
                 goal="帮林晓保住店",
                 motivation="书店也是她的工作",
@@ -123,8 +131,7 @@ def sample_story_bible() -> StoryBible:
             Character(
                 character_id="ch_zhao",
                 name="赵经理",
-                appearance="40岁男性，梳背头",
-                costume="深灰西装",
+                role="对手，开发商代表",
                 goal="按期收回整栋楼",
                 motivation="开发项目的业绩",
                 knowledge=["周叔把店铺抵押给他"],
@@ -132,8 +139,7 @@ def sample_story_bible() -> StoryBible:
             Character(
                 character_id="ch_mom",
                 name="林母",
-                appearance="仅电话出场",
-                costume="无",
+                role="仅电话出场的母亲",
                 relationships={"ch_lin": "女儿"},
                 goal="不让女儿被父亲再次伤害",
                 motivation="当年被抛下",
@@ -144,8 +150,7 @@ def sample_story_bible() -> StoryBible:
             CharacterLook(
                 look_id="lk_zhou_rain",
                 character_id="ch_zhou",
-                description="湿透的旧夹克与鸭舌帽",
-                diff_from_base="淋雨",
+                description="雨夜赶来时被淋湿",
                 applies_to_scene_ids=["sc_01_02"],
             ),
             CharacterLook(look_id="lk_zhou_home", character_id="ch_zhou", description="居家旧毛衫"),
@@ -156,18 +161,12 @@ def sample_story_bible() -> StoryBible:
             Location(
                 location_id="loc_shop",
                 name="林晓的旧书店",
-                layout="狭长店面，入口玻璃门正对收银柜台，两侧书架",
-                furnishings="木质柜台、旧书架、门口风铃",
-                lighting="白天自然光从门口进入；夜晚暖色吊灯",
-                entrances="唯一入口为临街玻璃门",
+                summary="林晓独自经营、即将被收走的旧书店",
             ),
             Location(
                 location_id="loc_room",
                 name="周叔的出租屋",
-                layout="单间，门对窗，左侧单人床，右侧小方桌",
-                furnishings="方桌、单人床、墙上挂着旧外套",
-                lighting="窗户为主光",
-                entrances="走廊一侧的木门",
+                summary="周叔独居的简陋出租屋，藏着他的过去",
             ),
         ],
         location_states=[
@@ -188,7 +187,7 @@ def sample_story_bible() -> StoryBible:
             Prop(
                 prop_id="prop_photo",
                 name="旧全家福",
-                description="十五年前的三口之家合影，父亲右手背可见烫伤疤",
+                story_function="照片上父亲手背的烫伤疤让林晓认出周叔",
                 owner_character_id="ch_lin",
             )
         ],
@@ -197,8 +196,7 @@ def sample_story_bible() -> StoryBible:
             PropState(
                 prop_state_id="ps_photo_torn",
                 prop_id="prop_photo",
-                description="被撕成两半",
-                diff_from_base="从中间撕开",
+                description="争吵中被撕成两半",
             ),
         ],
         beat_outlines=[
@@ -545,6 +543,219 @@ def sample_storyboard() -> tuple[list[Shot], list[EpisodeTiming]]:
             )
         )
     return shots, timings
+
+
+def sample_cast_sheet() -> CastSheet:
+    return CastSheet(
+        characters=[
+            CastMember(
+                character_id="ch_lin",
+                age_range="二十八岁左右",
+                gender_presentation="女性",
+                build_and_height="中等身高，偏瘦，肩背挺直",
+                face="鹅蛋脸，眉眼清晰，习惯抿嘴，眼神倔强",
+                hair="齐耳短发，深棕色，常别在耳后",
+                default_wardrobe="深色粗针毛衣，外系帆布店铺围裙",
+                wardrobe_palette="墨绿、深灰与米白",
+                posture_and_mannerisms="说话时双手撑着柜台；紧张时整理书脊",
+                voice="中音，语速偏快，北方口音",
+                must_keep=["短发", "店铺围裙"],
+                design_freedom=["毛衣的具体款式"],
+            ),
+            CastMember(
+                character_id="ch_zhou",
+                age_range="六十岁左右",
+                gender_presentation="男性",
+                build_and_height="偏高，略驼背，手掌粗大",
+                face="面颊消瘦，皱纹深，目光躲闪",
+                hair="灰白短发，略显凌乱",
+                distinguishing_features="右手背一块旧烫伤疤，与全家福中父亲的疤一致",
+                default_wardrobe="洗旧的棕色夹克，深色长裤",
+                wardrobe_palette="褪色的棕与灰",
+                posture_and_mannerisms="习惯把右手插进口袋遮住伤疤",
+                voice="低沉沙哑，说话慢，常停顿",
+                must_keep=["右手背烫伤疤的位置与形状", "旧夹克"],
+                design_freedom=["皱纹与发型细节"],
+            ),
+            CastMember(
+                character_id="ch_mei",
+                age_range="二十六岁左右",
+                gender_presentation="女性",
+                build_and_height="娇小，动作利落",
+                face="圆脸，笑容明显",
+                hair="高马尾",
+                default_wardrobe="书店统一的藏青工作服",
+                wardrobe_palette="藏青与白",
+                posture_and_mannerisms="走路快，总抱着一摞书",
+                voice="清亮，语速快",
+                must_keep=["马尾", "工作服颜色与林晓的围裙区分"],
+            ),
+            CastMember(
+                character_id="ch_zhao",
+                age_range="四十岁左右",
+                gender_presentation="男性",
+                build_and_height="中等身材，略发福",
+                face="方脸，常带客套的笑",
+                hair="梳得一丝不苟的背头",
+                default_wardrobe="合身的深灰西装，白衬衫，无领带",
+                wardrobe_palette="深灰与白，与书店的暖色对立",
+                posture_and_mannerisms="站姿笔直，习惯看表",
+                voice="中音，礼貌但不容商量",
+                must_keep=["深灰西装"],
+            ),
+            CastMember(
+                character_id="ch_mom",
+                on_screen=False,
+                age_range="五十多岁",
+                gender_presentation="女性",
+                build_and_height="不出镜",
+                face="不出镜",
+                hair="不出镜",
+                default_wardrobe="不出镜",
+                wardrobe_palette="不出镜",
+                posture_and_mannerisms="不出镜",
+                voice="温和但疲惫，南方口音，只在电话中出现",
+            ),
+        ],
+        looks=[
+            CastLook(
+                look_id="lk_lin_apron",
+                character_id="ch_lin",
+                wardrobe="深色毛衣配帆布围裙",
+                hair_and_makeup="素颜，短发别在耳后",
+                changes_from_base="无，即基础造型",
+            ),
+            CastLook(
+                look_id="lk_zhou_rain",
+                character_id="ch_zhou",
+                wardrobe="湿透的旧夹克，加一顶深色鸭舌帽",
+                hair_and_makeup="头发贴在额头，脸上有雨水",
+                condition="全身被雨淋湿",
+                changes_from_base="淋湿，加鸭舌帽",
+                must_keep=["鸭舌帽遮住半张脸"],
+            ),
+            CastLook(
+                look_id="lk_zhou_home",
+                character_id="ch_zhou",
+                wardrobe="起球的灰色旧毛衫",
+                hair_and_makeup="头发凌乱，未刮胡子",
+                changes_from_base="脱下夹克，换居家毛衫",
+            ),
+            CastLook(
+                look_id="lk_mei_work",
+                character_id="ch_mei",
+                wardrobe="书店藏青工作服",
+                hair_and_makeup="高马尾，淡妆",
+                changes_from_base="无，即基础造型",
+            ),
+            CastLook(
+                look_id="lk_zhao_suit",
+                character_id="ch_zhao",
+                wardrobe="深灰西装",
+                hair_and_makeup="背头，整洁",
+                changes_from_base="无，即基础造型",
+            ),
+        ],
+    )
+
+
+def sample_set_sheet() -> SetSheet:
+    return SetSheet(
+        locations=[
+            SetLocation(
+                location_id="loc_shop",
+                interior_exterior="INT",
+                era_and_region="当代中国南方老城区",
+                layout="狭长店面，入口玻璃门正对收银柜台，两侧高至天花板的书架",
+                key_furnishings="木质收银柜台、旧书架、门口风铃、柜台上的台灯",
+                materials_and_textures="磨旧的实木、泛黄纸张、斑驳的水磨石地面",
+                color_palette="暖棕与米黄",
+                lighting="白天自然光从门口进入；夜晚暖色吊灯与柜台台灯",
+                entrances_and_blocking="唯一入口为临街玻璃门；人物从门口走向柜台，柜台后是林晓的固定位置",
+                ambient_sound="门口风铃、街道车声",
+                must_keep=["玻璃门正对柜台的布局", "门口风铃"],
+                design_freedom=["书架上书籍的具体摆放"],
+            ),
+            SetLocation(
+                location_id="loc_room",
+                interior_exterior="INT",
+                era_and_region="当代中国南方老旧居民楼",
+                layout="单间，门对窗，左侧单人床，右侧小方桌",
+                key_furnishings="方桌、单人床、墙上挂着的旧外套、桌上的饭盒",
+                materials_and_textures="剥落的墙皮、旧木家具",
+                color_palette="灰绿与暗黄",
+                lighting="窗户为主光；夜晚只有一盏台灯",
+                entrances_and_blocking="走廊一侧的木门；进门后正面是窗",
+                ambient_sound="楼道脚步声、远处电视声",
+                must_keep=["门对窗的布局"],
+            ),
+        ],
+        states=[
+            SetState(
+                location_state_id="ls_shop_day",
+                location_id="loc_shop",
+                time_of_day="白天",
+                lighting="门口进来的自然光",
+                changes_from_base="营业中，门口挂着营业牌",
+            ),
+            SetState(
+                location_state_id="ls_shop_night",
+                location_id="loc_shop",
+                time_of_day="雨夜",
+                lighting="只开柜台台灯，玻璃门外有雨水反光",
+                condition="窗外下雨",
+                changes_from_base="打烊，卷帘半拉，门外下雨",
+                must_keep=["玻璃门上的雨水"],
+            ),
+            SetState(
+                location_state_id="ls_room_day",
+                location_id="loc_room",
+                time_of_day="白天",
+                lighting="窗户的自然光",
+                changes_from_base="无，即基础状态",
+            ),
+            SetState(
+                location_state_id="ls_room_night",
+                location_id="loc_room",
+                time_of_day="夜晚",
+                lighting="只有桌上台灯，房间大部分在暗处",
+                changes_from_base="夜晚，仅台灯照明",
+            ),
+        ],
+    )
+
+
+def sample_prop_sheet() -> PropSheet:
+    return PropSheet(
+        props=[
+            PropItem(
+                prop_id="prop_photo",
+                size_and_scale="五寸相片，装在巴掌大的旧相框里",
+                materials="相纸，木质相框",
+                color_and_finish="褪色的彩色照片，边缘泛黄",
+                condition_and_wear="相框边角磨损",
+                distinguishing_marks="照片上父亲的右手背可见烫伤疤",
+                handling="林晓收在柜台抽屉里；近景时必须看清父亲的手",
+                must_keep=["父亲右手背的烫伤疤清晰可见"],
+                design_freedom=["一家三口的站位"],
+            )
+        ],
+        states=[
+            PropVariant(
+                prop_state_id="ps_photo_intact",
+                prop_id="prop_photo",
+                condition="完整",
+                changes_from_base="无，即基础状态",
+            ),
+            PropVariant(
+                prop_state_id="ps_photo_torn",
+                prop_id="prop_photo",
+                condition="从中间撕成两半",
+                changes_from_base="被撕开，裂口正好穿过父亲和林晓之间",
+                must_keep=["裂口位置"],
+            ),
+        ],
+    )
 
 
 def sample_style_brief() -> StyleBrief:

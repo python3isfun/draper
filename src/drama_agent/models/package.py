@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .assets import AssetRequirements
+from .design_sheets import CastSheet, PropSheet, SetSheet
 from .request import JobRequest
 from .screenplay import Episode
 from .source_brief import SourceBrief
@@ -85,6 +86,11 @@ class ProductionPackage(BaseModel):
     shot_list: list[Shot]
     timing: list[EpisodeTiming]
     asset_requirements: AssetRequirements
+    # Standalone design sheets, each with its own schema (models/design_sheets.py).
+    # None in packages made before the sheets existed.
+    cast_sheet: CastSheet | None = None
+    set_sheet: SetSheet | None = None
+    prop_sheet: PropSheet | None = None
     experiment: Experiment
     provenance: Provenance
     qa_report: QAReport = Field(default_factory=QAReport)
@@ -102,9 +108,17 @@ class ProductionPackage(BaseModel):
 JobStatus = Literal[
     "queued", "running", "paused", "completed", "needs_revision", "failed", "cancelled"
 ]
-StageName = Literal["ingest", "outline", "script", "storyboard", "review"]
-StageStatus = Literal["pending", "running", "passed", "failed"]
-STAGES: tuple[StageName, ...] = ("ingest", "outline", "script", "storyboard", "review")
+StageName = Literal["ingest", "outline", "script", "cast", "sets", "props", "storyboard", "review"]
+# "skipped": the step didn't exist yet when this (finished) job ran.
+StageStatus = Literal["pending", "running", "passed", "failed", "skipped"]
+STAGES: tuple[StageName, ...] = (
+    "ingest", "outline", "script", "cast", "sets", "props", "storyboard", "review"
+)  # fmt: skip
+# Steps in the same group run concurrently; groups run in order.
+STAGE_GROUPS: tuple[tuple[StageName, ...], ...] = (
+    ("ingest",), ("outline",), ("script",), ("cast", "sets", "props"), ("storyboard",),
+    ("review",),
+)  # fmt: skip
 
 
 class StageState(BaseModel):
@@ -131,6 +145,32 @@ class Job(BaseModel):
     pause_requested: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def _all_stages(self) -> Job:
+        """Jobs stored before a step was added get it here, in pipeline order.
+
+        A completed job shows it as skipped. A job that can still run (retry/resume) shows
+        it as pending, and so does every later step, because those re-run after it: the
+        strip then matches what will actually run.
+        """
+        if list(self.stages) == list(STAGES):
+            return self
+        if self.status == "completed":
+            self.stages = {s: self.stages.get(s) or StageState(status="skipped") for s in STAGES}
+            return self
+        stages: dict[StageName, StageState] = {}
+        gap = False
+        for group in STAGE_GROUPS:
+            if any(s not in self.stages for s in group):
+                gap = True
+            for s in group:
+                st = self.stages.get(s)
+                if st is None or (gap and st.status == "passed"):
+                    st = StageState()
+                stages[s] = st
+        self.stages = stages
+        return self
 
 
 # ---------------------------------------------------------------------------

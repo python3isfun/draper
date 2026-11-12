@@ -195,8 +195,11 @@ class MCPHubClient:
                 result = await self._stream_with_retries(
                     model, wire, recorded, output_model, schema, rec
                 )
-            except ModelClientError as exc:
-                rec.finish(error=str(exc))
+            except asyncio.CancelledError:
+                rec.finish(error="cancelled before the response finished")
+                raise
+            except Exception as exc:
+                rec.finish(error=str(exc) or type(exc).__name__)
                 raise
             for k, v in result.usage.items():
                 request.usage[k] = request.usage.get(k, 0) + v

@@ -29,12 +29,13 @@ from ..models import (
     StoryBible,
     StyleBrief,
 )
-from ..models.package import StageName
+from ..models.design_sheets import CastSheet, PropSheet, SetSheet
+from ..models.package import STAGE_GROUPS, StageName
 from ..prompts import ORCHESTRATOR_PROMPT_VERSION
 from ..validation import PackageIndex
 from ..validation import hard_checks as hc
 from ..validation.prose import entity_names, find_prose_leaks, normalize_prose
-from .asset_aggregation import aggregate_asset_requirements
+from .asset_aggregation import DesignSheets, aggregate_asset_requirements
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,21 @@ class OutlineOutput(BaseModel):
 
 class ScriptOutput(BaseModel):
     episodes: list[Episode]
+    notes: StageNotes = Field(default_factory=StageNotes)
+
+
+class CastOutput(BaseModel):
+    cast_sheet: CastSheet
+    notes: StageNotes = Field(default_factory=StageNotes)
+
+
+class SetsOutput(BaseModel):
+    set_sheet: SetSheet
+    notes: StageNotes = Field(default_factory=StageNotes)
+
+
+class PropsOutput(BaseModel):
+    prop_sheet: PropSheet
     notes: StageNotes = Field(default_factory=StageNotes)
 
 
@@ -94,6 +110,9 @@ class PipelineCheckpoint(BaseModel):
     source_brief: SourceBrief | None = None
     story_bible: StoryBible | None = None
     episodes: list[Episode] = Field(default_factory=list)
+    cast_sheet: CastSheet | None = None
+    set_sheet: SetSheet | None = None
+    prop_sheet: PropSheet | None = None
     shots: list[Shot] = Field(default_factory=list)
     timing: list[EpisodeTiming] = Field(default_factory=list)
     asset_requirements: AssetRequirements | None = None
@@ -111,6 +130,9 @@ class PipelineState:
     source_brief: SourceBrief | None = None
     story_bible: StoryBible | None = None
     episodes: list[Episode] = field(default_factory=list)
+    cast_sheet: CastSheet | None = None
+    set_sheet: SetSheet | None = None
+    prop_sheet: PropSheet | None = None
     shots: list[Shot] = field(default_factory=list)
     timing: list[EpisodeTiming] = field(default_factory=list)
     asset_requirements: AssetRequirements | None = None
@@ -141,6 +163,9 @@ class PipelineState:
             source_brief=self.source_brief,  # type: ignore[arg-type]
             story_bible=self.story_bible,  # type: ignore[arg-type]
             episodes=self.episodes,
+            cast_sheet=self.cast_sheet,
+            set_sheet=self.set_sheet,
+            prop_sheet=self.prop_sheet,
             shot_list=self.shots,
             timing=self.timing,
             asset_requirements=self.asset_requirements
@@ -168,6 +193,9 @@ class PipelineState:
             source_brief=self.source_brief,
             story_bible=self.story_bible,
             episodes=self.episodes,
+            cast_sheet=self.cast_sheet,
+            set_sheet=self.set_sheet,
+            prop_sheet=self.prop_sheet,
             shots=self.shots,
             timing=self.timing,
             asset_requirements=self.asset_requirements,
@@ -187,6 +215,9 @@ class PipelineState:
             source_brief=cp.source_brief,
             story_bible=cp.story_bible,
             episodes=cp.episodes,
+            cast_sheet=cp.cast_sheet,
+            set_sheet=cp.set_sheet,
+            prop_sheet=cp.prop_sheet,
             shots=cp.shots,
             timing=cp.timing,
             asset_requirements=cp.asset_requirements,
@@ -197,8 +228,10 @@ class PipelineState:
         )
         return state, cp.completed_stages
 
-    def context(self) -> dict[str, Any]:
-        """Upstream artifacts handed to the model as JSON."""
+    def context(self, include_sheets: bool = True) -> dict[str, Any]:
+        """Upstream artifacts handed to the model as JSON. The sheet steps run concurrently
+        and get include_sheets=False, so what they see never depends on which finished
+        first."""
         ctx: dict[str, Any] = {"request": self.request.model_dump(mode="json")}
         if self.source_brief:
             ctx["source_brief"] = self.source_brief.model_dump(mode="json")
@@ -206,7 +239,13 @@ class PipelineState:
             ctx["story_bible"] = self.story_bible.model_dump(mode="json")
         if self.episodes:
             ctx["episodes"] = [e.model_dump(mode="json") for e in self.episodes]
+        for key in ("cast_sheet", "set_sheet", "prop_sheet") if include_sheets else ():
+            if (sheet := getattr(self, key)) is not None:
+                ctx[key] = sheet.model_dump(mode="json")
         return ctx
+
+    def sheets(self) -> DesignSheets:
+        return DesignSheets(cast=self.cast_sheet, sets=self.set_sheet, props=self.prop_sheet)
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +288,7 @@ class Step:
     name: StageName
     output_model: type[BaseModel]
     directive: str
+    sees_sheets = True  # whether the design sheets are in this step's context
 
     def apply(self, state: PipelineState, output: Any) -> None:
         raise NotImplementedError
@@ -327,7 +367,12 @@ class OutlineStep(Step):
     output_model = OutlineOutput
     directive = (
         "Current step: design the story bible and a beat outline for all three episodes. "
-        "Fix protagonist goal, opposing goal, obstacle, cost and causal progression first."
+        "Fix protagonist goal, opposing goal, obstacle, cost and causal progression first. "
+        "The story bible is story-facing: characters, locations and props get IDs, names, "
+        "roles, goals, relationships and one-line summaries, not visual descriptions (those "
+        "are written later in separate cast, set and prop sheets). Register every look, "
+        "location state and prop state the story needs, each with a one-line description "
+        "of what it is and why it exists."
     )
 
     def apply(self, state: PipelineState, output: OutlineOutput) -> None:
@@ -383,6 +428,104 @@ class ScriptStep(Step):
         )
 
 
+_SHEET_RULES = (
+    "Describe every {kinds} registered in story_bible exactly once, using its ID; do not "
+    "add, rename or drop any. Ground descriptions in source_brief (observed facts from "
+    "uploaded photos and videos come first) and in how the script actually uses each one. "
+    "Write concrete, visual, designer-ready prose in the output language; leave `name` "
+    "empty (it is filled from the story bible). must_keep lists only what the story "
+    "depends on (e.g. a scar that identifies someone); design_freedom lists what a "
+    "designer may decide. These are text descriptions, not generated images."
+)
+
+
+class _SheetStep(Step):
+    """Shared shape of the three design-sheet steps: one model call, one schema each."""
+
+    sheet_attr: str
+    output_attr: str
+    check_fn: Any
+    sees_sheets = False
+
+    def apply(self, state: PipelineState, output: Any) -> None:
+        sheet = getattr(output, self.output_attr)
+        self.fill_names(state, sheet)
+        setattr(state, self.sheet_attr, sheet)
+        state.notes[self.name] = output.notes
+        _normalize(state, self.name, sheet)
+
+    def fill_names(self, state: PipelineState, sheet: Any) -> None:
+        raise NotImplementedError
+
+    def check(self, state: PipelineState) -> list[Issue]:
+        pkg = state.draft_package()
+        idx = PackageIndex.build(pkg)
+        return self.check_fn(pkg, idx, state.request.options) + find_prose_leaks(
+            getattr(state, self.sheet_attr)
+        )
+
+
+class CastStep(_SheetStep):
+    name = "cast"
+    output_model = CastOutput
+    sheet_attr = output_attr = "cast_sheet"
+    check_fn = staticmethod(hc.check_cast_sheet)
+    directive = (
+        "Current step: write the cast sheet, a standalone design document for character "
+        "designers and casting. "
+        + _SHEET_RULES.format(kinds="character and every look")
+        + " Set on_screen=false only for characters who are never seen (phone, voice-over)."
+        " Each look describes only that look's wardrobe, hair and makeup and condition, and "
+        "what changes from the base design."
+    )
+
+    def fill_names(self, state: PipelineState, sheet: CastSheet) -> None:
+        assert state.story_bible is not None
+        names = {c.character_id: c.name for c in state.story_bible.characters}
+        for c in sheet.characters:
+            c.name = names.get(c.character_id, c.name)
+
+
+class SetsStep(_SheetStep):
+    name = "sets"
+    output_model = SetsOutput
+    sheet_attr = output_attr = "set_sheet"
+    check_fn = staticmethod(hc.check_set_sheet)
+    directive = (
+        "Current step: write the set sheet, a standalone design document for production "
+        "designers. "
+        + _SHEET_RULES.format(kinds="location and every location state")
+        + " The layout and entrances must support the blocking in the script (who enters "
+        "from where, who stands where). Each state describes time of day, lighting and what "
+        "changes from the base set."
+    )
+
+    def fill_names(self, state: PipelineState, sheet: SetSheet) -> None:
+        assert state.story_bible is not None
+        names = {loc.location_id: loc.name for loc in state.story_bible.locations}
+        for loc in sheet.locations:
+            loc.name = names.get(loc.location_id, loc.name)
+
+
+class PropsStep(_SheetStep):
+    name = "props"
+    output_model = PropsOutput
+    sheet_attr = output_attr = "prop_sheet"
+    check_fn = staticmethod(hc.check_prop_sheet)
+    directive = (
+        "Current step: write the prop sheet, a standalone design document for prop makers. "
+        + _SHEET_RULES.format(kinds="prop and every prop state")
+        + " Say what makes each prop recognizable on screen and how it is handled. If the "
+        "story bible registers no props, return empty lists."
+    )
+
+    def fill_names(self, state: PipelineState, sheet: PropSheet) -> None:
+        assert state.story_bible is not None
+        names = {p.prop_id: p.name for p in state.story_bible.props}
+        for p in sheet.props:
+            p.name = names.get(p.prop_id, p.name)
+
+
 class StoryboardStep(Step):
     name = "storyboard"
     output_model = StoryboardOutput
@@ -405,6 +548,7 @@ class StoryboardStep(Step):
             state.shots,
             output.style_brief,
             {o.requirement_id: o for o in output.design_overrides},
+            state.sheets(),
         )
         valid = hc.compute_planned_timing_valid(state.draft_package(), state.request.options)
         for t in state.timing:
@@ -452,6 +596,27 @@ STEPS: tuple[Step, ...] = (
     IngestStep(),
     OutlineStep(),
     ScriptStep(),
+    CastStep(),
+    SetsStep(),
+    PropsStep(),
     StoryboardStep(),
     ReviewStep(),
 )
+_BY_NAME = {s.name: s for s in STEPS}
+# Steps grouped for execution: a group's steps run concurrently, groups run in order.
+STEP_GROUPS: tuple[tuple[Step, ...], ...] = tuple(
+    tuple(_BY_NAME[name] for name in group) for group in STAGE_GROUPS
+)
+
+
+def completed_in_order(completed: list[str]) -> list[str]:
+    """The completed steps that still count, in pipeline order: a step only counts if every
+    earlier group is complete. (A checkpoint from before a step was added can list
+    storyboard as done without the design sheets; storyboard then re-runs after them.)"""
+    kept: list[str] = []
+    for group in STEP_GROUPS:
+        done = [s.name for s in group if s.name in completed]
+        kept += done
+        if len(done) < len(group):
+            break
+    return kept

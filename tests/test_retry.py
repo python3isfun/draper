@@ -58,7 +58,10 @@ def test_retry_needs_revision_resumes_and_publishes_new_revision(backend):
         assert queued.status_code == 202
         body = queued.json()
         assert body["status"] == "queued" and body["package_id"] is None
-        assert body["failure_reason"] == "retry requested; keeping ingest, outline, script"
+        assert (
+            body["failure_reason"]
+            == "retry requested; keeping ingest, outline, script, cast, sets, props"
+        )
         assert body["stages"]["storyboard"] == {
             "status": "pending",
             "attempts": 0,

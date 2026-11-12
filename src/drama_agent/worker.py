@@ -20,7 +20,7 @@ import uuid
 from .jobqueue import Claim, JobQueue
 from .models import Job
 from .pipeline.orchestrator import Orchestrator, new_id
-from .pipeline.steps import PipelineCheckpoint
+from .pipeline.steps import PipelineCheckpoint, completed_in_order
 from .store import Repository
 from .tracing import Tracer
 
@@ -194,6 +194,7 @@ def retry_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
     if raw := queue.load_checkpoint(job_id):
         cp = PipelineCheckpoint.model_validate_json(raw)
         cp.revision_id = new_id("rev")
+        cp.completed_stages = completed_in_order(cp.completed_stages)
         queue.save_checkpoint(job_id, cp.model_dump_json())
         passed = cp.completed_stages
 

@@ -401,6 +401,9 @@ def test_provenance_records_the_model_each_step_used():
         "ingest": "gpt-6-luna",
         "outline": "gpt-6.1-sol",
         "script": "gpt-6.1-sol",
+        "cast": "gpt-6.1-sol",
+        "sets": "gpt-6.1-sol",
+        "props": "gpt-6.1-sol",
         "storyboard": "gpt-6.1-sol",
         "review": "gpt-6-luna",
     }

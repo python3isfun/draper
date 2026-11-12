@@ -38,7 +38,7 @@ def test_replaces_ids_next_to_cjk_text():
 
 def test_longest_id_wins():
     raw = "照片状态：ps_photo_torn"
-    assert normalize_text(raw, NAMES, "zh-CN") == "照片状态：被撕成两半"
+    assert normalize_text(raw, NAMES, "zh-CN") == "照片状态：争吵中被撕成两半"
 
 
 def test_converts_bare_durations_and_episode_labels():

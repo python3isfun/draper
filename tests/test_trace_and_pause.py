@@ -19,7 +19,8 @@ from drama_agent.worker import JobWorker, pause_job, resume_job
 from .conftest import run_pipeline
 
 BODY = {"sources": [{"type": "text", "text": SAMPLE_SEED, "use_as": "story_seed"}]}
-STAGES = ["ingest", "outline", "script", "storyboard", "review"]
+STAGES = ["ingest", "outline", "script", "cast", "sets", "props", "storyboard", "review"]
+SHEETS = {"cast", "sets", "props"}
 
 
 @pytest.fixture(params=["memory", "sqlite"])
@@ -42,13 +43,15 @@ def kinds(repo, job_id):
 
 def test_full_run_traces_every_step_and_call():
     job, repo = run_pipeline()
-    assert kinds(repo, job.job_id) == (
-        ["job_started"]
-        + [k for _ in STAGES for k in ("stage_started", "stage_passed")]
-        + ["job_completed"]
-    )
+    events = repo.list_events(job.job_id)
+    assert events[0].kind == "job_started" and events[-1].kind == "job_completed"
+    for stage in STAGES:  # every step starts once and passes once
+        assert [e.kind for e in events if e.stage == stage] == ["stage_started", "stage_passed"]
     calls = repo.list_llm_calls(job.job_id)
-    assert [c.stage for c in calls] == STAGES
+    order = [c.stage for c in calls]
+    # The design sheets run concurrently, between script and storyboard.
+    assert order[:3] == STAGES[:3] and order[-2:] == STAGES[-2:]
+    assert set(order[3:6]) == SHEETS
     assert all(c.status == "succeeded" and c.finished_at for c in calls)
     assert all(c.commentary.startswith("Offline sample") for c in calls)
     full = repo.get_llm_call(calls[1].call_id)
@@ -184,7 +187,7 @@ def test_pause_mid_run_stops_at_the_next_safe_point(store):
     job = repo.get_job("job_1")
     assert job.status == "paused"
     # The in-flight script call finished and was kept; nothing after it ran.
-    assert [job.stages[s].status for s in STAGES] == ["passed"] * 3 + ["pending"] * 2
+    assert [job.stages[s].status for s in STAGES] == ["passed"] * 3 + ["pending"] * 5
     assert q.state("job_1") == "paused" and not q.pause_requested("job_1")
     assert [k for k in kinds(repo, "job_1") if "pause" in k] == ["pause_requested", "paused"]
 
