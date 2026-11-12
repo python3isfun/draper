@@ -429,3 +429,31 @@ def test_meta_reports_stage_models():
         "image_model": "fixture-image-v1",
         "image_client": "FixtureImageClient",
     }
+
+
+def test_a_stream_of_keepalives_hits_the_call_deadline_and_is_retried():
+    """httpx's timeout counts gaps between bytes; keep-alive lines reset it forever."""
+
+    class KeepAlives(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                yield b": keep-alive\n\n"
+                await asyncio.sleep(0.01)
+
+    calls = []
+
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=KeepAlives()
+        )
+
+    rec = FakeRecorder()
+    client = MCPHubClient(
+        "https://hub.test/v1", "sk-test", "gpt-6.1-sol", backoff_s=0, max_http_retries=1,
+        call_timeout_s=0.1, transport=httpx.MockTransport(handler),
+    )  # fmt: skip
+    with pytest.raises(ModelClientError, match="no complete response within"):
+        asyncio.run(client.generate(request(recorder=rec), SourceBrief))
+    assert len(calls) == 2  # retried once, then gave up
+    assert [kind for kind, _ in rec.notes] == ["model_retry"]

@@ -140,6 +140,7 @@ class MCPHubClient:
         api: WireAPI = "responses",
         transcribe_model: str = "whisper-1",
         timeout_s: float = 600.0,
+        call_timeout_s: float = 1200.0,
         max_http_retries: int = 3,
         max_repair_turns: int = 1,
         backoff_s: float = 2.0,
@@ -154,6 +155,11 @@ class MCPHubClient:
         self.api: WireAPI = api
         self.transcribe_model = transcribe_model
         self.max_http_retries = max_http_retries
+        # Whole-call deadline. httpx's timeout counts the gap between bytes, and MCPHub keeps
+        # an idle stream open with keep-alive lines, so without this a stalled call hangs
+        # forever (seen live: a storyboard call silent for 48 min). Storyboard calls, the
+        # longest, take 5-8 min.
+        self.call_timeout_s = call_timeout_s
         self.max_repair_turns = max_repair_turns
         self.backoff_s = backoff_s
         self._http = httpx.AsyncClient(
@@ -297,9 +303,33 @@ class MCPHubClient:
     ) -> _Streamed:
         for attempt in range(self.max_http_retries + 1):
             try:
-                if self.api == "responses":
-                    return await self._stream_responses(model, messages, output_model, schema, rec)
-                return await self._stream_chat(model, messages, output_model, schema, rec)
+                async with asyncio.timeout(self.call_timeout_s):
+                    if self.api == "responses":
+                        return await self._stream_responses(
+                            model, messages, output_model, schema, rec
+                        )
+                    return await self._stream_chat(model, messages, output_model, schema, rec)
+            except TimeoutError as exc:
+                if attempt == self.max_http_retries:
+                    raise ModelClientError(
+                        f"MCPHub call gave no complete response within {self.call_timeout_s:.0f}s"
+                    ) from exc
+                delay = self.backoff_s * 2**attempt
+                rec.finish(
+                    error=f"no complete response within {self.call_timeout_s:.0f}s; retrying"
+                )
+                rec.note(
+                    "model_retry",
+                    f"The model call stalled (no complete response in "
+                    f"{self.call_timeout_s / 60:.0f} min); retrying in {delay:.0f}s.",
+                )
+                rec.start(
+                    model=model,
+                    api=self.api,
+                    request=recorded,
+                    turn=getattr(getattr(rec, "call", None), "turn", 0),
+                )
+                await asyncio.sleep(delay)
             except _Retryable as exc:
                 if attempt == self.max_http_retries:
                     raise ModelClientError(f"MCPHub request failed: {exc}") from exc

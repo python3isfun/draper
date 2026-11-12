@@ -61,7 +61,12 @@ default). `MCPHUB_API=chat` uses streaming Chat Completions instead: live output
 notes or summaries.
 
 **Pause** (`POST /v1/drama-jobs/{id}/pause`) stops a queued job at once, and a running one
-once its current model call finishes, so that call's work is kept. **Resume**
+once its current model call finishes, so that call's work is kept. **Stop now**
+(`?now=true`) interrupts a running job immediately, cancelling the in-flight call (for a
+call that hangs); the interrupted step restarts on resume. Every model call also has an
+overall deadline (`MCPHUB_CALL_TIMEOUT_S`, default 1200 s; storyboard calls take 5-8 min):
+MCPHub keeps a stalled stream open with keep-alive lines, which reset httpx's read timeout,
+so without it a stalled call would wait forever. A call past the deadline is retried. **Resume**
 (`POST .../resume`) continues from the checkpoint; pausing doesn't use up a retry attempt.
 
 To try the live view offline, run with `DRAMA_MODEL_CLIENT=fixture

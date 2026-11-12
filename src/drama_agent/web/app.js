@@ -450,6 +450,11 @@ function renderJobHeader(job) {
     );
   }
   if (isActive(job.status)) {
+    if (job.status === "running") {
+      // For a model call that hangs: interrupt it now; the step restarts on resume.
+      actions.unshift(h("button", { class: "btn small", type: "button", onclick: (e) => jobAction(job.job_id, "pause?now=true", e.currentTarget),
+        title: "Stop now: cancel the current model call. That step restarts on resume; steps that passed are kept." }, "Stop now"));
+    }
     actions.unshift(job.pause_requested
       ? h("button", { class: "btn small", type: "button", disabled: true }, "Pausing…")
       : h("button", { class: "btn small primary-outline", type: "button", onclick: (e) => jobAction(job.job_id, "pause", e.currentTarget),
@@ -477,7 +482,7 @@ function renderJobHeader(job) {
   }
   if (job.pause_requested) {
     banners.push(h("div", { class: "banner info" }, h("strong", {}, "Pausing. "),
-      "The job stops once the current model call finishes, so that call's work isn't lost."));
+      "The job stops once the current model call finishes, so that call's work isn't lost. If the call seems stuck, use Stop now."));
   }
   if (job.status === "paused") {
     const next = Object.entries(job.stages).find(([, s]) => s.status !== "passed")?.[0];

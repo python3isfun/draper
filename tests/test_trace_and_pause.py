@@ -249,3 +249,63 @@ def test_api_trace_after_a_completed_run():
         assert first["request"] == {}  # the live view omits request bodies
         full = http.get(f"/v1/llm-calls/{first['call_id']}").json()
         assert full["output"] and full["request"] == {"stage": "ingest"}
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_stop_now_interrupts_a_hanging_call(kind, tmp_path):
+    """Pause waits for the current call; Stop now cancels it (e.g. a call that hangs)."""
+    from drama_agent import worker as worker_mod
+
+    if kind == "memory":
+        repo, q = InMemoryRepository(), InMemoryJobQueue()
+    else:
+        repo = SqliteRepository(tmp_path / "t.db")
+        q = SqliteJobQueue(repo)
+    add_job(repo, q)
+
+    class HangsOnScript(FixtureModelClient):
+        async def generate(self, request, output_model):
+            if request.stage == "script" and not self.faults.get("released"):
+                rec = request.recorder
+                rec.start(model="m", api="fixture", request={})
+                try:
+                    await asyncio.sleep(3600)  # the stalled stream
+                except asyncio.CancelledError:
+                    rec.finish(error="cancelled before the response finished")
+                    raise
+            return await super().generate(request, output_model)
+
+    client = HangsOnScript()
+    worker = make_worker(repo, q, client)
+    worker_mod.STOP_POLL_S = 0.02
+
+    async def scenario():
+        task = asyncio.create_task(worker.run_once())
+        while repo.get_job("job_1").stages["script"].status != "running":
+            await asyncio.sleep(0.01)
+        pause_job(repo, q, "job_1", now=True)
+        await asyncio.wait_for(task, 5)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        worker_mod.STOP_POLL_S = 2.0
+    job = repo.get_job("job_1")
+    assert job.status == "paused" and q.state("job_1") == "paused"
+    assert job.stages["script"].status == "pending" and job.stages["outline"].status == "passed"
+    [hung] = [c for c in repo.list_llm_calls("job_1") if c.stage == "script"]
+    assert hung.status == "failed" and "cancelled" in hung.error
+    assert "stop_requested" in kinds(repo, "job_1")
+
+    client.faults["released"] = True
+    resume_job(repo, q, "job_1")
+    asyncio.run(make_worker(repo, q, client).run_once())
+    assert repo.get_job("job_1").status == "completed"
+    assert [c.stage for c in client.calls].count("outline") == 1  # passed steps kept
+
+
+def test_api_stop_now_on_a_queued_job_just_pauses_it():
+    with TestClient(create_app(workers=0)) as http:
+        job_id = http.post("/v1/drama-jobs", json=BODY).json()["job_id"]
+        r = http.post(f"/v1/drama-jobs/{job_id}/pause", params={"now": True})
+        assert r.status_code == 202 and r.json()["status"] == "paused"

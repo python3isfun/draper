@@ -26,6 +26,8 @@ from .tracing import Tracer
 
 log = logging.getLogger(__name__)
 
+# How often a running job checks for Stop now (seconds).
+STOP_POLL_S = 2.0
 TERMINAL = ("completed", "needs_revision", "failed", "cancelled")
 PAUSABLE = ("queued", "running")
 
@@ -100,10 +102,17 @@ class JobWorker:
 
         run = asyncio.create_task(self.orchestrator.run_job(claim.job_id))
         lost_lease = asyncio.Event()
-        beat = asyncio.create_task(self._heartbeat(claim.job_id, run, lost_lease))
+        stopped = asyncio.Event()
+        beat = asyncio.create_task(self._heartbeat(claim.job_id, run, lost_lease, stopped))
         try:
             job = await run
         except asyncio.CancelledError:
+            if stopped.is_set():
+                # The user pressed Stop now: park the job; the step that was running
+                # restarts on resume (passed steps are kept by the checkpoint).
+                self._mark_paused(claim.job_id, trace)
+                self.queue.pause(claim.job_id, self.worker_id)
+                return
             if lost_lease.is_set():
                 log.warning("job %s: lease lost to another worker; stopped", claim.job_id)
                 trace.event("lease_lost", "Another worker took over this job; stopped here.")
@@ -141,13 +150,41 @@ class JobWorker:
             self.repo.save_job(job)
             trace.event("gave_up", f"Gave up after {claim.attempt} attempts.")
 
-    async def _heartbeat(self, job_id: str, run: asyncio.Task, lost: asyncio.Event) -> None:
+    async def _heartbeat(
+        self, job_id: str, run: asyncio.Task, lost: asyncio.Event, stopped: asyncio.Event
+    ) -> None:
+        """Renew the lease every lease_s/3, and check for Stop now every STOP_POLL_S."""
+        every = max(1, round(self.lease_s / 3 / STOP_POLL_S))
+        tick = 0
         while True:
-            await asyncio.sleep(self.lease_s / 3)
-            if not self.queue.heartbeat(job_id, self.worker_id, self.lease_s):
+            await asyncio.sleep(min(STOP_POLL_S, self.lease_s / 3))
+            tick += 1
+            if self.queue.stop_requested(job_id):
+                stopped.set()
+                run.cancel()
+                return
+            if tick % every == 0 and not self.queue.heartbeat(job_id, self.worker_id, self.lease_s):
                 lost.set()
                 run.cancel()
                 return
+
+    def _mark_paused(self, job_id: str, trace: Tracer) -> None:
+        job = self.repo.get_job(job_id)
+        if job is None:
+            return
+        running = [n for n, st in job.stages.items() if st.status == "running"]
+        for name in running:
+            st = job.stages[name]
+            st.status, st.attempts, st.issues, st.error = "pending", 0, [], None
+        job.status, job.failure_reason, job.pause_requested = "paused", None, False
+        self.repo.save_job(job)
+        where = f" during the {' / '.join(running)} step" if running else ""
+        trace.event(
+            "paused",
+            f"Stopped{where}; the interrupted model call was cancelled. Resume restarts "
+            "that step; steps that passed are kept.",
+            stage=running[0] if running else None,
+        )
 
     def _mark_queued(self, job_id: str, reason: str) -> None:
         job = self.repo.get_job(job_id)
@@ -217,9 +254,11 @@ def retry_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
     return job
 
 
-def pause_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
+def pause_job(repo: Repository, queue: JobQueue, job_id: str, now: bool = False) -> Job:
     """Pause now if the job is waiting, otherwise at the running pipeline's next safe point
-    (after the current model call). Raises KeyError / ValueError."""
+    (after the current model call). now=True stops a running job at once: its worker
+    interrupts the in-flight model call, and the interrupted step restarts on resume.
+    Raises KeyError / ValueError."""
     job = repo.get_job(job_id)
     if job is None:
         raise KeyError(job_id)
@@ -227,12 +266,14 @@ def pause_job(repo: Repository, queue: JobQueue, job_id: str) -> Job:
         raise ValueError("this job is archived")
     if job.status not in PAUSABLE:
         raise ValueError(f"only queued or running jobs can be paused, not {job.status}")
-    outcome = queue.request_pause(job_id)
+    outcome = queue.request_pause(job_id, now=now)
     trace = Tracer(repo, job_id)
     if outcome == "paused":
         job.status = "paused"
         repo.save_job(job)
         trace.event("paused", "Paused before it started.")
+    elif now:
+        trace.event("stop_requested", "Stop requested; interrupting the current model call.")
     else:
         trace.event("pause_requested", "Pause requested; stopping after the current model call.")
     job.pause_requested = outcome == "requested"

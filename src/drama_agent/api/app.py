@@ -439,10 +439,12 @@ def create_app(
         return job
 
     @app.post("/v1/drama-jobs/{job_id}/pause", status_code=202, response_model=Job)
-    async def pause(job_id: str) -> Job:
-        """Pause a queued job now, or a running one after its current model call."""
+    async def pause(job_id: str, now: bool = False) -> Job:
+        """Pause a queued job now, or a running one after its current model call.
+        now=true stops a running job at once, cancelling the in-flight model call (for a
+        call that hangs); the interrupted step restarts on resume."""
         try:
-            return pause_job(repo, queue, job_id)
+            return pause_job(repo, queue, job_id, now=now)
         except KeyError:
             raise HTTPException(404, "job not found") from None
         except ValueError as exc:

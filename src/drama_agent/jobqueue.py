@@ -33,6 +33,12 @@ class Claim:
     exhausted: bool = False
 
 
+# Values of the pause flag: pause at the next safe point (after the current model call), or
+# stop now (the worker interrupts the running step).
+PAUSE_AT_SAFE_POINT = 1
+STOP_NOW = 2
+
+
 class JobQueue(Protocol):
     max_attempts: int
 
@@ -54,11 +60,15 @@ class JobQueue(Protocol):
         """Queue a finished (done/dead) job again with a fresh attempt budget, keeping its
         checkpoint. Raises ValueError if the job is still queued or running."""
 
-    def request_pause(self, job_id: str) -> str:
+    def request_pause(self, job_id: str, now: bool = False) -> str:
         """'paused' if the job was waiting (now paused), 'requested' if it's running and will
-        pause at its next safe point. Raises ValueError if it can't be paused."""
+        pause at its next safe point (now=True: the worker interrupts the current model call
+        instead). Raises ValueError if it can't be paused."""
 
     def pause_requested(self, job_id: str) -> bool: ...
+    def stop_requested(self, job_id: str) -> bool:
+        """A pause that interrupts the running step (request_pause(now=True))."""
+
     def pause(self, job_id: str, worker_id: str) -> None:
         """The worker reached a safe point: park the job (attempt not counted)."""
 
@@ -84,7 +94,7 @@ class _Entry:
     lease_expires_at: float = 0.0
     last_error: str | None = None
     checkpoint: str | None = None
-    pause_requested: bool = False
+    pause_requested: int = 0  # 0, PAUSE_AT_SAFE_POINT or STOP_NOW
 
 
 class InMemoryJobQueue:
@@ -155,19 +165,23 @@ class InMemoryJobQueue:
             raise ValueError(f"job {job_id} is still {e.state}")
         e.state, e.attempts, e.lease_owner, e.available_at = "queued", 0, None, time.time()
 
-    def request_pause(self, job_id: str) -> str:
+    def request_pause(self, job_id: str, now: bool = False) -> str:
         e = self.entries.get(job_id)
         if e is None or e.state not in ("queued", "leased"):
             raise ValueError(f"job {job_id} is not queued or running")
         if e.state == "queued":
             e.state = "paused"
             return "paused"
-        e.pause_requested = True
+        e.pause_requested = max(int(e.pause_requested), STOP_NOW if now else PAUSE_AT_SAFE_POINT)
         return "requested"
 
     def pause_requested(self, job_id: str) -> bool:
         e = self.entries.get(job_id)
         return bool(e and e.pause_requested)
+
+    def stop_requested(self, job_id: str) -> bool:
+        e = self.entries.get(job_id)
+        return bool(e and int(e.pause_requested) >= STOP_NOW)
 
     def pause(self, job_id: str, worker_id: str) -> None:
         if e := self._owned(job_id, worker_id):
@@ -298,7 +312,7 @@ class SqliteJobQueue:
         if cur.rowcount != 1:
             raise ValueError(f"job {job_id} is still {current}")
 
-    def request_pause(self, job_id: str) -> str:
+    def request_pause(self, job_id: str, now: bool = False) -> str:
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE job_queue SET state = 'paused' WHERE job_id = ? AND state = 'queued'",
@@ -307,8 +321,9 @@ class SqliteJobQueue:
             if cur.rowcount == 1:
                 return "paused"
             cur = self._conn.execute(
-                "UPDATE job_queue SET pause_requested = 1 WHERE job_id = ? AND state = 'leased'",
-                (job_id,),
+                "UPDATE job_queue SET pause_requested = MAX(pause_requested, ?) "
+                "WHERE job_id = ? AND state = 'leased'",
+                (STOP_NOW if now else PAUSE_AT_SAFE_POINT, job_id),
             )
         if cur.rowcount == 1:
             return "requested"
@@ -320,6 +335,13 @@ class SqliteJobQueue:
                 "SELECT pause_requested FROM job_queue WHERE job_id = ?", (job_id,)
             ).fetchone()
         return bool(row and row[0])
+
+    def stop_requested(self, job_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT pause_requested FROM job_queue WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return bool(row and row[0] >= STOP_NOW)
 
     def pause(self, job_id: str, worker_id: str) -> None:
         self._update_owned(
