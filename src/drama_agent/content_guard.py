@@ -5,9 +5,11 @@ so the rules are strict and simple:
 
 1. No nudity, sexual acts or sexually explicit imagery, ever.
 2. No romantic or sexualized imagery of anyone who is, or looks, under 18.
-3. No intimate, sexualized, romantic or revealing edits of an uploaded photo: an upload may
-   show a real person, and sexual imagery of a real person without consent is illegal in
-   many places (in the US, the TAKE IT DOWN Act). Ordinary edits of an upload are fine.
+3. No sexualized images of a real person's likeness (an identifiable person from an
+   uploaded photo, or someone made to resemble a named real person): sexual imagery of a
+   real person without consent is illegal in many places (in the US, the TAKE IT DOWN
+   Act). Ordinary images and clothed romance are fine in the default (open) mode; the
+   Restrictive mode switch also rules out likeness by name and romance with a likeness.
 
 Two layers. `text_guard` is deterministic (word lists) and cheap; it catches the clear
 cases in any prompt. `screen` asks the text model, which also sees the pictures, for what
@@ -62,18 +64,23 @@ _NUDE_COLOR = re.compile(
 _NEGATED = re.compile(
     r"\b(no|not|without|never|non)[- ]+(\w+[- ]+)?(nudity|nude|naked)\b", re.IGNORECASE
 )
-# Revealing or bedroom imagery: refused for pictures that may show a real person (rule 3).
+# Sexualized imagery (underwear, undressing, bed scenes): refused for pictures that may show
+# a real person (rule 3). Swimwear is separate: refused only under the restrictive rules.
 _REVEALING = re.compile(
-    r"\b(lingerie|underwear|bra|bras|panties|thong|briefs|boxers|bikini|swimsuit|swimwear|"
-    r"bathing suit|negligee|nightie|camisole|corset|shirtless|bare[- ]chested|undress\w*|"
-    r"in bed|bed scene|between the sheets|under the covers|bedsheets?)\b",
+    r"\b(lingerie|underwear|bra|bras|panties|thong|briefs|boxers|negligee|nightie|corset|"
+    r"undress\w*|in bed|bed scene|between the sheets|under the covers|bedsheets?)\b",
+    re.IGNORECASE,
+)
+
+_SWIMWEAR = re.compile(
+    r"\b(bikini|swimsuit|swimwear|bathing suit|swim trunks|shirtless|bare[- ]chested)\b",
     re.IGNORECASE,
 )
 
 NUDITY_REASON = "Images here never show nudity or sexual acts."
 REAL_PERSON_REASON = (
     "This job has uploaded photos, so its images may show a real person: no underwear, "
-    "swimwear or bed scenes."
+    "lingerie, swimwear or bed scenes."
 )
 MINOR_REASON = "No romantic or sexualized images of anyone under 18."
 
@@ -94,31 +101,31 @@ RULES = """\
 2. Never: romantic, sexualized or revealing imagery of anyone who is or looks under 18. If a \
 picture shows someone who looks under 18, refuse any change that makes the image romantic, \
 sexual or revealing.
-3. Never: an intimate, sexualized, romantic or revealing image of a real person's likeness: \
-undressing, lingerie, swimwear or underwear, a kiss or embrace, a bed scene, suggestive poses \
-or expressions, or a humiliating or compromising situation. A real person's likeness is an \
-identifiable person from an uploaded photo, a picture marked as showing a real person's \
-likeness, or anyone made to look like a named or described real person (an actress, a public \
-figure, someone the user knows). Ordinary images of a real person's likeness are fine: hair, \
-makeup, everyday or formal clothing, expression, pose, background, light. Anyone whose face is \
-visible in an uploaded photo counts as an identifiable real person. An uploaded photo used \
-only for its clothing, a place or an object passes on nobody's likeness, even if a model wears \
-the clothes.
-4. Everything else is allowed, including clothed romance, swimwear and a kiss or embrace \
-between adult characters who don't have a real person's likeness.\
+3. Never: a sexualized image of a real person's likeness: lingerie or underwear, undressing, \
+a bed scene or bedroom intimacy, suggestive or sexualized poses or expressions, or a \
+degrading or humiliating situation. A real person's likeness is an identifiable person from \
+an uploaded photo (anyone whose face is visible in one counts), a picture marked as showing a \
+real person's likeness, or anyone made to look like a named or described real person (an \
+actress, a public figure, someone the user knows). An uploaded photo used only for its \
+clothing, a place or an object passes on nobody's likeness, even if a model wears the clothes.
+4. Everything else is allowed, including clothed romance (a kiss, an embrace, holding hands) \
+and swimwear between adult characters.\
 """
 
 # The Restrictive mode switch (top of the page; off by default). Rules 1-4 apply either way.
 OPEN_MODE = """\
 Open mode (the default, for exploration): a character may be made to resemble a named real \
-person, and a face may be taken from an uploaded photo, for ordinary images; the result then \
-has a real person's likeness and rule 3 applies to it.\
+person, and a face may be taken from an uploaded photo. That likeness may appear in ordinary \
+and clothed romantic scenes (a kiss, an embrace, swimwear at a beach); production and legal \
+clear any likeness before it is used. Rule 3 still applies to it.\
 """
 RESTRICTIVE_MODE = """\
 Restrictive mode: don't make anyone resemble a named or described real person, and don't take \
 a face from an uploaded photo onto another figure. Turn "like <a real person>" into generic \
 visible traits (hair, face shape, features) that don't add up to that person, and never write \
-a real person's name in the prompt. Say so in your reply.\
+a real person's name in the prompt. Say so in your reply. A real person's likeness that is \
+already there (an uploaded photo, a picture marked as having one) gets no romance or revealing \
+clothing either: no kiss or embrace, no swimwear.\
 """
 
 
@@ -126,12 +133,13 @@ def mode_rule(restrictive: bool) -> str:
     return RESTRICTIVE_MODE if restrictive else OPEN_MODE
 
 
-def upload_guard(prompt: str) -> str | None:
-    """text_guard, plus rule 3 for images that may show a real person (a job or chat with
-    uploaded photos): nothing revealing and no bed scenes."""
+def upload_guard(prompt: str, *, restrictive: bool = True) -> str | None:
+    """text_guard, plus rule 3 for images that may show a real person (a job with uploaded
+    character photos): nothing sexualized, and under the restrictive rules (the design
+    board's, always) no swimwear either."""
     if reason := text_guard(prompt):
         return reason
-    if _REVEALING.search(prompt):
+    if _REVEALING.search(prompt) or (restrictive and _SWIMWEAR.search(prompt)):
         return REAL_PERSON_REASON
     return None
 

@@ -368,7 +368,10 @@ function renderTurn(t) {
       results,
       t.error && h("div", { class: "exp-error" },
         h("p", { class: "form-error" }, t.error),
-        !t.refused && h("button", { type: "button", class: "btn small", onclick: (e) => retryTurn(t, e.currentTarget) }, "Retry")),
+        h("button", {
+          type: "button", class: "btn small", onclick: (e) => retryTurn(t, e.currentTarget),
+          title: t.refused ? "Check this message again under the current rules" : null,
+        }, t.refused ? "Check again" : "Retry")),
       t.prompt && h("details", { class: "exp-prompt" },
         h("summary", {}, "Prompt sent to the image model"),
         h("pre", {}, t.prompt),
@@ -394,7 +397,7 @@ function expImage(ref, current, label, result) {
         ? h("span", { class: "chip accent" }, "current")
         : h("button", { type: "button", class: "btn small", disabled: expBusy(exp.view), onclick: () => patchExp({ current: ref }) }, "Edit this one"),
       result && h("span", { class: "muted small" }, `seed ${result.seed}`),
-      result && exp.likeness[ref] && h("span", { class: "chip warn", title: "Shows a real person's likeness: nothing intimate or revealing can be made from it" }, "real-person likeness"),
+      result && exp.likeness[ref] && h("span", { class: "chip warn", title: "Shows a real person's likeness: nothing sexualized can be made from it (in Restrictive mode, no romance or swimwear either)" }, "real-person likeness"),
     ),
   );
 }

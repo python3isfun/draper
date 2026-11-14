@@ -557,6 +557,9 @@ def create_app(
                 pictures=[
                     {"picture": f"<Picture {i}>", "kind": kind} for i in range(1, n_refs + 1)
                 ],
+                # The design board's images go into the hand-off package the team shoots
+                # from, so it always uses the restrictive rules (the switch is Experiment's).
+                restrictive=True,
             )
         except GuardRefused as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -766,15 +769,15 @@ def create_app(
 
     @app.post("/v1/experiment-turns/{turn_id}/retry", status_code=202, response_model=ExpTurn)
     async def retry_experiment_turn(turn_id: str) -> ExpTurn:
-        """Run a failed turn again; draws already made and a prompt already written are kept."""
+        """Run a failed turn again; draws already made and a prompt already written are kept.
+        A refused turn is checked again under the current rules (which may have changed)."""
         turn = _exp_turn_or_404(turn_id)
         if turn.status != "failed":
             raise HTTPException(409, "only a failed message can be retried")
-        if turn.refused:
-            raise HTTPException(409, "This message isn't allowed; retrying won't change that.")
         if is_busy(repo.list_exp_turns(turn.session_id)):
             raise HTTPException(409, "Wait for the current image to finish first.")
         turn.status, turn.error, turn.finished_at = "pending", None, None
+        turn.refused = False
         repo.save_exp_turn(turn)
         experiments.start(turn.turn_id)
         return turn

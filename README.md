@@ -285,25 +285,32 @@ Intimate scenes are written as staging for the crew; the app never draws them.
   fix is to remove the intimacy from the script, never to restate the age.
 - **Export:** `08_intimacy/intimacy_plan.md` (text only) lists each scene for the
   intimacy coordinator, with the on-set rules.
-- **Images** (`content_guard.py`): never nudity or sexual acts; never romantic or
-  sexualized images of anyone under 18 or who looks it; never intimate, romantic or
-  revealing images of a **real person's likeness**: an identifiable person from an uploaded
-  photo, or someone made to resemble a named real person. An upload used only for its
-  clothing, a place or an object passes on nobody's likeness. In Experiment, each result
-  records whether it shows a real person's likeness (marked "real-person likeness"); images
-  built on it keep that, until you go back to an image without one.
+- **Images** (`content_guard.py`), in every mode: never nudity or sexual acts; never
+  romantic, sexualized or revealing images of anyone under 18 or who looks it; never a
+  **sexualized** image of a real person's likeness (lingerie or underwear, undressing, bed
+  scenes, suggestive poses, degrading situations). A real person's likeness is an
+  identifiable person from an uploaded photo (a visible face counts), or someone made to
+  resemble a named real person; an upload used only for its clothing, a place or an object
+  passes on nobody's likeness. In Experiment, each result records whether it shows a real
+  person's likeness (marked "real-person likeness"); images built on it keep that, until you
+  go back to an image without one.
   A word-list check runs on every prompt before any render (design board and Experiment);
-  "nude" as a color ("nude lipstick") and negations ("no nudity") are not refused. For a
+  "nude" as a color ("nude lipstick") and negations ("no nudity") are not refused. The design
+  board always uses the restrictive rules (its images go into the hand-off package): for a
   job with uploaded photos or videos used as character references (or with no stated use),
-  design-board prompts that mention underwear, swimwear or bed scenes are refused too;
-  location and style references don't count. The text model judges the rest: in Experiment it sees the
-  pictures; for Rewrite with GPT the writer applies the rules, while exact prompts and
-  hand-edited takes are screened separately. The check fails closed, and a refused message
-  is marked "not allowed" and can't be retried.
+  prompts that mention underwear, lingerie, swimwear or bed scenes are refused, and the
+  prompt writer never makes a character resemble a named real person. Location and style
+  references don't count as people. The text model judges the rest: in
+  Experiment it sees the pictures; for Rewrite with GPT the writer applies the rules, while
+  exact prompts and hand-edited takes are screened separately. The check fails closed, and
+  a refused message is marked "not allowed"; **Check again** runs it under the current rules.
 - **Restrictive mode (Experiment)** (switch at the top of the page, off by default,
-  remembered per browser; the design board keeps its own rules): off, a character may be made to resemble a named real person or take a face
-  from an uploaded photo, for ordinary images. On, GPT turns "like <a real person>" into
-  generic traits and keeps real names out of prompts. The rules above apply in both modes.
+  remembered per browser; the design board always uses the restrictive rules):
+  - **Off (exploration):** a character may resemble a named real person or take a face from
+    an uploaded photo, including in clothed romantic scenes (a kiss, an embrace, swimwear).
+    Clearing likeness is production's and legal's call before anything is used.
+  - **On:** GPT turns "like <a real person>" into generic traits and keeps real names out
+    of prompts; an existing real-person likeness gets no romance or swimwear either.
 
 ### Experiment: chat with the image model
 

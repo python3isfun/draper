@@ -214,8 +214,11 @@ def test_experiment_writer_refusal_draws_nothing(tmp_path):
         assert turn["status"] == "failed" and turn["refused"]
         assert turn["error"] == "Not with an uploaded photo."
         assert c.images.calls == [] and turn["prompt"] == ""
+        # "Check again" runs the check under the current rules; still refused here.
         r = c.http.post(f"/v1/experiment-turns/{turn['turn_id']}/retry")
-        assert r.status_code == 409
+        assert r.status_code == 202
+        again = c.wait()["turns"][-1]
+        assert again["refused"] and c.images.calls == []
 
 
 def test_exact_prompts_are_screened(tmp_path):
@@ -311,8 +314,15 @@ def test_design_board_applies_the_uploaded_photo_rule(tmp_path):
         v = s.wait()
         face = next(o for o in v["options"] if key(o) == FRANK_FACE)
         url = f"/v1/image-options/{face['option_id']}/edit"
+        r = s.http.post(url, json={"prompt": "Frank Collins in his underwear."})
+        assert r.status_code == 422 and r.json()["detail"] == REAL_PERSON_REASON
+        # The design board always uses the restrictive rules: no swimwear either.
         r = s.http.post(url, json={"prompt": "Frank Collins in swimwear on a beach."})
         assert r.status_code == 422 and r.json()["detail"] == REAL_PERSON_REASON
+        r = s.http.post(url, json={"prompt": "Frank Collins in a wool coat, side view."})
+        assert r.status_code == 202
+        screened = [c for c in s.text.calls if c.stage == "content_guard"][-1]
+        assert "Restrictive mode:" in screened.instructions
         # The worker applies it to every prompt, however it was written.
         repo = s.app.state.repo
         img = next(i for i in v["images"] if key(i) == FRANK_FACE)
@@ -509,3 +519,14 @@ def test_older_images_come_with_their_ancestry(tmp_path):
             "in a kitchen",
             "drinking coffee",
         ]
+
+
+def test_open_mode_allows_clothed_romance_with_a_likeness():
+    from drama_agent.content_guard import RULES, mode_rule
+
+    assert "clothed romantic scenes (a kiss, an embrace, swimwear" in mode_rule(False)
+    assert "no kiss or embrace, no swimwear" in mode_rule(True)
+    assert "Never: a sexualized image of a real person's likeness" in RULES
+    assert upload_guard("Lila in a red swimsuit on a beach", restrictive=False) is None
+    assert upload_guard("Lila in a red swimsuit on a beach") == REAL_PERSON_REASON
+    assert upload_guard("Lila undressing", restrictive=False) == REAL_PERSON_REASON

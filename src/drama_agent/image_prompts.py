@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 STAGE = "image_prompts"
 # Bump when the instructions or the shared rules file change; stored on each written prompt.
-PROMPT_RULES_VERSION = "6"
+PROMPT_RULES_VERSION = "7"
 MAX_PROMPT_CHARS = 6000  # ~1,500 tokens; H3 reads at most 4,096 tokens
 
 ROLE = """\
@@ -38,7 +38,9 @@ sets and props. Our server renders each prompt exactly as written (no prompt exp
 every prompt must be the finished description of the whole image. Follow the rules and the \
 examples below exactly. These are design references: never nudity, underwear or sexual \
 content. For a look worn in an intimate scene, show the outfit as a plain, clothed wardrobe \
-reference; for a bedroom set, show the empty room.\
+reference; for a bedroom set, show the empty room. Never make a character resemble a real \
+person: if the facts name one ("looks like <an actor>"), describe generic visible traits \
+instead and never write a real person's name in the prompt.\
 """
 
 HOW_TO_READ_BRIEFS = """\
