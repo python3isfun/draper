@@ -18,6 +18,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .content_guard import text_guard
 from .images import NO_OTHER_TEXT, NO_TEXT  # the sentences the rules require
 from .llm import GenerationRequest
 from .models import ProductionPackage
@@ -28,14 +29,16 @@ log = logging.getLogger(__name__)
 
 STAGE = "image_prompts"
 # Bump when the instructions or the shared rules file change; stored on each written prompt.
-PROMPT_RULES_VERSION = "5"
+PROMPT_RULES_VERSION = "6"
 MAX_PROMPT_CHARS = 6000  # ~1,500 tokens; H3 reads at most 4,096 tokens
 
 ROLE = """\
 You write prompts for MiniMax-H3-Image for the reference images of a short drama's characters, \
 sets and props. Our server renders each prompt exactly as written (no prompt expansion), so \
 every prompt must be the finished description of the whole image. Follow the rules and the \
-examples below exactly.\
+examples below exactly. These are design references: never nudity, underwear or sexual \
+content. For a look worn in an intimate scene, show the outfit as a plain, clothed wardrobe \
+reference; for a bedroom set, show the empty room.\
 """
 
 HOW_TO_READ_BRIEFS = """\
@@ -150,6 +153,8 @@ def problems(prompt: str, n_refs: int) -> list[str]:
         return ["empty"]
     if len(prompt) > MAX_PROMPT_CHARS:
         out.append(f"longer than {MAX_PROMPT_CHARS} characters")
+    if reason := text_guard(prompt):
+        out.append(f"not allowed: {reason}")
     cited = {int(n) for n in _PICTURE.findall(prompt)}
     if any(n < 1 or n > n_refs for n in cited):
         out.append(f"cites a picture it doesn't have (has {n_refs})")

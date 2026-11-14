@@ -6,10 +6,11 @@ replace these checks.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Callable
 
-from ..models import Issue, JobOptions, ProductionPackage
+from ..models import INTIMACY_ORDER, RATING_LIMITS, Issue, JobOptions, ProductionPackage
 from ..pipeline.asset_aggregation import required_units_for_shot, shot_reference_unit
 from .index import PackageIndex, design_entries, lockable_objects
 from .prose import find_prose_leaks
@@ -521,6 +522,7 @@ def check_cast_sheet(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -
         {lk.look_id: lk.character_id for lk in bible.looks},
         "character_id",
     )
+    issues += _intimacy_ages(pkg)
     # A character marked as never seen must not appear in a shot.
     off_screen = {c.character_id for c in sheet.characters if not c.on_screen}
     for shot in pkg.shot_list:
@@ -534,6 +536,142 @@ def check_cast_sheet(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -
                         "cast_sheet",
                     )
                 )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Intimacy: within the job's content rating, staged for production, adults only
+
+_MINOR_WORDS = re.compile(
+    r"\b(child|children|kid|kids|teen|teens|teenage|teenager|adolescent|minor|underage|"
+    r"pre-?teen|tween|schoolgirl|schoolboy|high[- ]school(er)?|"
+    r"(little|young|baby) (girl|boy))\b",
+    re.IGNORECASE,
+)
+_DECADES = {
+    "twenties": 20, "thirties": 30, "forties": 40, "fifties": 50, "sixties": 60,
+    "seventies": 70, "eighties": 80, "nineties": 90,
+}  # fmt: skip
+
+
+# An age: a number not followed by a height, weight or count ("5'6\"", "2 kids").
+_AGE_NUMBER = re.compile(
+    r"(?<![\d.'’])(\d{1,3})(?:s\b|['’]s\b)?"
+    r"(?!\s*(?:['’\"”]|\d|cm\b|mm\b|m\b|ft\b|feet\b|foot\b|in\b|inch|lbs?\b|kg\b|"
+    r"pounds\b|kids?\b|children\b|child\b|sons?\b|daughters?\b|siblings?\b|brothers?\b|"
+    r"sisters?\b|grandchildren\b|times\b|percent\b|%))",
+    re.IGNORECASE,
+)
+
+
+def apparent_adult(age_range: str) -> bool | None:
+    """True if a stated apparent age is 18 or older, False if it is younger, None if no age
+    is stated ("young", "ageless"). A stated age decides ("about 40, mother of teenage
+    kids" is an adult); words like "teenager" decide only when no age is given."""
+    ages = [int(n) for n in _AGE_NUMBER.findall(age_range)]
+    ages += [v for w, v in _DECADES.items() if w in age_range.lower()]
+    if ages:
+        return min(ages) >= 18
+    if _MINOR_WORDS.search(age_range):
+        return False
+    return None
+
+
+def _intimate_cast(pkg: ProductionPackage) -> list[tuple[str, str]]:
+    """(scene_id, character_id) for everyone in a scene staged as implied or simulated."""
+    out: list[tuple[str, str]] = []
+    for ep in pkg.episodes:
+        for sc in ep.scenes:
+            if INTIMACY_ORDER.index(sc.intimacy_level) < INTIMACY_ORDER.index("implied"):
+                continue
+            assert sc.intimacy is not None
+            out += [(sc.scene_id, c) for c in sc.intimacy.character_ids or sc.character_ids]
+    return out
+
+
+def _intimacy_ages(pkg: ProductionPackage) -> list[Issue]:
+    """Cast-sheet check: everyone in an implied or simulated scene has an apparent age in
+    years. Only a missing age is the cast sheet's to fix; a minor is check_intimacy_minors'
+    (the fix is in the script, never in the stated age)."""
+    sheet = pkg.cast_sheet
+    if sheet is None:
+        return []
+    ages = {c.character_id: c.age_range for c in sheet.characters}
+    issues: list[Issue] = []
+    seen: set[str] = set()
+    for scene_id, cid in _intimate_cast(pkg):
+        if cid in seen or cid not in ages or apparent_adult(ages[cid]) is not None:
+            continue
+        seen.add(cid)
+        issues.append(
+            _issue(
+                "intimacy_age",
+                cid,
+                f"in intimate scene {scene_id}, but age_range {ages[cid]!r} states no "
+                "apparent age in years: give the character's age as the story has it "
+                "(e.g. about 28).",
+                "cast_sheet",
+            )
+        )
+    return issues
+
+
+def check_intimacy_minors(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
+    """No one who reads as under 18 is in an implied or simulated scene. Not repairable by
+    restating the age: the script must drop the intimacy, so the job stays blocked until a
+    revision of the script does."""
+    sheet = pkg.cast_sheet
+    if sheet is None:
+        return []
+    ages = {c.character_id: c.age_range for c in sheet.characters}
+    return [
+        _issue(
+            "intimacy_minor",
+            scene_id,
+            f"{cid} reads as under 18 (age_range {ages[cid]!r}) and is in an intimate scene. "
+            "A minor must never be in an intimate scene: remove the intimacy from the script. "
+            "Do not change the character's age to pass this check.",
+            "script",
+        )
+        for scene_id, cid in _intimate_cast(pkg)
+        if cid in ages and apparent_adult(ages[cid]) is False
+    ]
+
+
+def check_intimacy(pkg: ProductionPackage, idx: PackageIndex, opts: JobOptions) -> list[Issue]:
+    """Scene intimacy stays within the content rating and carries what production needs."""
+    rating = getattr(opts, "content_rating", "teen")
+    top, nudity_ok = RATING_LIMITS.get(rating, RATING_LIMITS["teen"])
+    issues: list[Issue] = []
+    for ep in pkg.episodes:
+        for sc in ep.scenes:
+            it = sc.intimacy
+            if it is None or it.level == "none":
+                continue
+            sid = sc.scene_id
+
+            def bad(evidence: str, sid: str = sid) -> None:
+                issues.append(_issue("intimacy", sid, evidence, "script"))
+
+            if INTIMACY_ORDER.index(it.level) > INTIMACY_ORDER.index(top):
+                bad(
+                    f"staged as {it.level}, but the {rating} rating allows at most {top}: "
+                    + (
+                        "cut away before anything sexual (implied)"
+                        if top == "implied"
+                        else "keep it to a kiss or an embrace"
+                    )
+                )
+            if it.nudity != "none" and not nudity_ok:
+                bad(f"has {it.nudity} nudity, which the {rating} rating does not allow")
+            if unknown := [c for c in it.character_ids if c not in sc.character_ids]:
+                bad(f"intimacy lists {', '.join(unknown)}, who are not in the scene")
+            if it.level in ("implied", "simulated") and not it.consent_beats:
+                bad(f"is staged as {it.level} but lists no consent_beats")
+            if (it.level == "simulated" or it.nudity != "none") and not it.closed_set:
+                bad("simulated intimacy or nudity needs closed_set=true")
+            if not it.on_screen.strip():
+                bad("intimacy.on_screen is empty: say what the camera shows")
     return issues
 
 
@@ -584,6 +722,8 @@ ALL_CHECKS: tuple[Check, ...] = (
     check_asset_requirements,
     check_entity_keys,
     check_prose,
+    check_intimacy,
+    check_intimacy_minors,
     check_cast_sheet,
     check_set_sheet,
     check_prop_sheet,

@@ -32,6 +32,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from .content_guard import RULES as CONTENT_RULES
+from .content_guard import GuardRefused, screen, text_guard
 from .imagegen import MAX_REFERENCE_BYTES, MAX_REFERENCES, ImageClient, Reference
 from .llm import GenerationRequest
 from .media import MediaPart, MediaStore
@@ -86,6 +88,9 @@ class ExpTurn(BaseModel):
     reply: str = ""  # the writer's short note on what it changed
     status: TurnStatus = "pending"
     error: str | None = None
+    refused: bool = False  # the content guard refused it (retrying won't help)
+    # Any picture is an upload or was made from one: its results may show a real person.
+    from_upload: bool = False
     results: list[ExpResult] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
@@ -187,6 +192,7 @@ def plan_turn(
             f"At most {MAX_REFERENCES} pictures per message, the current image included."
         )
     turn.mode, turn.references = mode, refs
+    turn.from_upload = any(_from_upload(r, turns) for r in refs)
     if mode == "exact":
         if len(text) > MAX_PROMPT_CHARS:
             raise ExpError(f"The prompt is longer than {MAX_PROMPT_CHARS} characters.")
@@ -198,6 +204,36 @@ def plan_turn(
             )
     turn.size = _size_for(size or session.size, refs, turns, assets)
     return turn
+
+
+def _from_upload(ref: str, turns: list[ExpTurn]) -> bool:
+    """Whether a picture is an upload or was made, at any remove, from one. Follows the
+    saved references (not the stored from_upload flag, which turns saved before it existed
+    lack). An unknown turn counts as from an upload."""
+    by_id = {t.turn_id: t for t in turns}
+    todo, seen = [ref], set()
+    while todo:
+        kind, ident, _ = parse_ref(todo.pop())
+        if kind == "asset":
+            return True
+        if ident in seen:
+            continue
+        seen.add(ident)
+        made = by_id.get(ident)
+        if made is None:
+            return True
+        todo.extend(made.references)
+    return False
+
+
+def picture_kind(ref: str, turns: list[ExpTurn]) -> str:
+    """How the content rules see a picture (see content_guard rule 3)."""
+    kind, _, _ = parse_ref(ref)
+    if kind == "asset":
+        return "uploaded photo"
+    if _from_upload(ref, turns):
+        return "uploaded photo, as edited in this chat (may show a real person)"
+    return "generated image (made in this chat from text only)"
 
 
 def _size_for(
@@ -266,23 +302,36 @@ end with "The image contains no text, letters or numbers." unless the user wants
 Keep names as the user wrote them. Write in English; quote any lettering exactly.
 - Never cite a picture that is not listed.
 
+## What may be drawn
+
+Each picture has a `kind`. These rules decide what you may write a prompt for:
+
+{rules}
+
+If the request breaks a rule, don't write a prompt: return allowed=false, an empty prompt, and \
+in `refusal` one short sentence to the user naming the rule. Don't write a toned-down version \
+of a refused request.
+
 ## Output
 
-Return {"prompt": ..., "reply": ...}: `prompt` is the prompt only, as plain text; `reply` is one \
-or two short sentences to the user saying what you changed or how you read the request \
-(no prompt text in it).\
+Return {{"allowed": true, "prompt": ..., "reply": ..., "refusal": ""}}: `prompt` is the prompt \
+only, as plain text; `reply` is one or two short sentences to the user saying what you \
+changed or how you read the request (no prompt text in it).\
 """
 
 
 class ExpPromptOutput(BaseModel):
-    prompt: str
+    allowed: bool = True
+    prompt: str = ""
     reply: str = ""
+    refusal: str = ""
 
 
 def writer_instructions() -> str:
     from .prompts import load_h3_image_examples, load_h3_image_rules
 
-    parts = [WRITER_ROLE, load_h3_image_rules(), load_h3_image_examples(), WRITER_GUIDE]
+    guide = WRITER_GUIDE.format(rules=CONTENT_RULES)
+    parts = [WRITER_ROLE, load_h3_image_rules(), load_h3_image_examples(), guide]
     return "\n\n".join(parts)
 
 
@@ -351,6 +400,7 @@ class ExperimentRunner:
             if not turn.prompt:
                 await self._write_prompt(turn)
                 self.repo.save_exp_turn(turn)
+            await self._guard(turn)
             for n in range(len(turn.results), turn.draws):
                 seed = random.randint(1, 2**31 - 1)
                 async with self._gpu:
@@ -373,6 +423,11 @@ class ExperimentRunner:
             turn.finished_at = utcnow()
             self.repo.save_exp_turn(turn)
             raise
+        except GuardRefused as exc:
+            turn.status, turn.error, turn.finished_at = "failed", str(exc), utcnow()
+            turn.refused = True
+            self.repo.save_exp_turn(turn)
+            return
         except Exception as exc:
             log.warning("experiment turn %s failed", turn_id, exc_info=True)
             turn.status, turn.error, turn.finished_at = (
@@ -432,7 +487,11 @@ class ExperimentRunner:
                 path, mime = self.media.path(r.file), r.content_type
         return (path, mime) if path.is_file() else (None, "")
 
-    async def _write_prompt(self, turn: ExpTurn) -> None:
+    def _for_model(
+        self, turn: ExpTurn
+    ) -> tuple[list[dict[str, str]], list[MediaPart], str | None, list[ExpTurn]]:
+        """What the text model is told about the pictures: (one entry per <Picture N>, the
+        pictures as small images, the prompt that made the current image, earlier turns)."""
         turns = [t for t in self.repo.list_exp_turns(turn.session_id) if t.index < turn.index]
         made = {t.turn_id: t for t in turns}
         parts: list[dict[str, str]] = []
@@ -454,10 +513,28 @@ class ExperimentRunner:
                 what = "an image the user uploaded earlier"
             if i == 1:
                 what = f"the current image: {what}"
-            parts.append({"picture": f"<Picture {i}>", "what": what})
-            path, mime = self.ref_file(ref, variant="thumb")  # the writer only needs to see it
+            parts.append(
+                {"picture": f"<Picture {i}>", "what": what, "kind": picture_kind(ref, turns)}
+            )
+            path, mime = self.ref_file(ref, variant="thumb")  # the model only needs to see it
             if path is not None:
                 media.append(MediaPart(label=f"<Picture {i}>", path=path, mime=mime))
+        return parts, media, current_prompt, turns
+
+    async def _guard(self, turn: ExpTurn) -> None:
+        """Raise GuardRefused unless the turn's prompt may be drawn. A prompt the writer
+        wrote was judged by the writer (it sees the rules and the pictures); one sent as
+        typed (exact mode, or the writer failed) is screened by the text model."""
+        if reason := text_guard(turn.prompt) or text_guard(turn.text):
+            raise GuardRefused(reason)
+        if turn.prompt_model is None:
+            parts, media, _, _ = self._for_model(turn)
+            await screen(self.writer_client, turn.prompt, pictures=parts, media=media)
+
+    async def _write_prompt(self, turn: ExpTurn) -> None:
+        if reason := text_guard(turn.text):  # clear cases need no model call
+            raise GuardRefused(reason)
+        parts, media, current_prompt, turns = self._for_model(turn)
         history = [
             {"message": t.text, "prompt": t.prompt}
             for t in turns
@@ -478,28 +555,42 @@ class ExperimentRunner:
         )
         try:
             out = await self.writer_client.generate(request, ExpPromptOutput)
-            prompt = out.prompt.strip()
-            if not prompt:
-                raise ValueError("the writer returned an empty prompt")
-            if missing := cited_beyond(prompt, len(turn.references)):
-                raise ValueError(f"the prompt cites {', '.join(missing)}, which wasn't sent")
-            if len(prompt) > MAX_PROMPT_CHARS:  # cutting it could drop the closing sentences
-                raise ValueError(f"the prompt is longer than {MAX_PROMPT_CHARS} characters")
-            turn.prompt = prompt
-            turn.reply = out.reply.strip()
-            turn.prompt_model = request.model
         except Exception as exc:
             log.warning("experiment prompt writer failed", exc_info=True)
-            # Sent as written, so it gets the same check as an exact prompt.
-            if missing := cited_beyond(turn.text, len(turn.references)):
-                raise ExpError(
-                    f"Couldn't rewrite your message ({exc}), and as written it cites "
-                    f"{', '.join(missing)}, which this message doesn't send."
-                ) from exc
-            turn.prompt = turn.text
-            turn.reply = (
-                f"Couldn't rewrite your message ({exc}); sent it to the image model as written."
-            )
+            self._send_as_written(turn, exc)
+            return
+        if not out.allowed:
+            raise GuardRefused(out.refusal.strip() or "This image isn't allowed here.")
+        prompt = out.prompt.strip()
+        problem = (
+            "the writer returned an empty prompt"
+            if not prompt
+            else f"the prompt cites {', '.join(missing)}, which wasn't sent"
+            if (missing := cited_beyond(prompt, len(turn.references)))
+            # Cutting it could drop the closing sentences.
+            else f"the prompt is longer than {MAX_PROMPT_CHARS} characters"
+            if len(prompt) > MAX_PROMPT_CHARS
+            else None
+        )
+        if problem:
+            self._send_as_written(turn, ValueError(problem))
+            return
+        turn.prompt = prompt
+        turn.reply = out.reply.strip()
+        turn.prompt_model = request.model
+
+    def _send_as_written(self, turn: ExpTurn, exc: Exception) -> None:
+        """Fallback when the writer fails: the message is the prompt, with the same checks
+        as an exact prompt (prompt_model stays None, so _guard screens it)."""
+        if missing := cited_beyond(turn.text, len(turn.references)):
+            raise ExpError(
+                f"Couldn't rewrite your message ({exc}), and as written it cites "
+                f"{', '.join(missing)}, which this message doesn't send."
+            ) from exc
+        turn.prompt = turn.text
+        turn.reply = (
+            f"Couldn't rewrite your message ({exc}); sent it to the image model as written."
+        )
 
     def _write(self, rel: str, data: bytes) -> None:
         path = self.media.path(rel)

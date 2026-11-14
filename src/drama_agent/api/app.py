@@ -27,6 +27,7 @@ from ..config import (
     repo_from_env,
     worker_settings,
 )
+from ..content_guard import GuardRefused, screen, upload_guard
 from ..experiment import (
     MAX_DRAWS,
     ExperimentRunner,
@@ -52,6 +53,7 @@ from ..images import (
     draws_for,
     image_client_from_env,
     latest_images,
+    package_has_uploads,
     plan_images,
     slot_title,
     take_draws,
@@ -533,6 +535,26 @@ def create_app(
         fatal = [p for p in found if p == "empty" or p.startswith("cites a picture")]
         if fatal:
             raise HTTPException(422, f"prompt {'; '.join(fatal)}")
+        # Hand-written prompts are screened. Pictures may come from the job's uploaded
+        # photos (character references), so they count as possibly showing real people.
+        has_uploads = package_has_uploads(repo, pkg.package_id)
+        if has_uploads and (reason := upload_guard(prompt)):
+            raise HTTPException(422, reason)
+        kind = (
+            "uploaded photo, or an image made from one (may show a real person)"
+            if has_uploads
+            else "generated image (made from text only)"
+        )
+        try:
+            await screen(
+                orchestrator.client,
+                prompt,
+                pictures=[
+                    {"picture": f"<Picture {i}>", "kind": kind} for i in range(1, n_refs + 1)
+                ],
+            )
+        except GuardRefused as exc:
+            raise HTTPException(422, str(exc)) from exc
         opt, imgs = edit_take_plan(
             source,
             repo.list_options(pkg.package_id, pkg.revision_id),
@@ -732,6 +754,8 @@ def create_app(
         turn = _exp_turn_or_404(turn_id)
         if turn.status != "failed":
             raise HTTPException(409, "only a failed message can be retried")
+        if turn.refused:
+            raise HTTPException(409, "This message isn't allowed; retrying won't change that.")
         if is_busy(repo.list_exp_turns(turn.session_id)):
             raise HTTPException(409, "Wait for the current image to finish first.")
         turn.status, turn.error, turn.finished_at = "pending", None, None

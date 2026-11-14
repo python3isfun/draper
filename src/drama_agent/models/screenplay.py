@@ -42,6 +42,40 @@ class SceneState(BaseModel):
     open_questions: list[str] = Field(default_factory=list)
 
 
+# Ordered from least to most intimate; a job's content rating caps the level.
+IntimacyLevel = Literal["none", "kiss", "implied", "simulated"]
+INTIMACY_ORDER: tuple[IntimacyLevel, ...] = ("none", "kiss", "implied", "simulated")
+
+
+class Intimacy(BaseModel):
+    """How a scene stages physical intimacy, for the director and the intimacy coordinator.
+    Written as staging, never as explicit description."""
+
+    level: IntimacyLevel = Field(
+        "none",
+        description=(
+            "none; kiss (a kiss or embrace); implied (the scene cuts away or starts after: "
+            "a door closing, the morning after); simulated (simulated sex is on screen)."
+        ),
+    )
+    character_ids: list[str] = Field(
+        default_factory=list, description="The characters in the intimate moment."
+    )
+    on_screen: str = Field(
+        "",
+        description="What the camera shows, as staging (e.g. a kiss, then a cut to the hallway).",
+    )
+    off_screen: str = Field("", description="What is implied and not shown.")
+    nudity: Literal["none", "partial"] = Field(
+        "none", description="partial: bare back or shoulders; never full nudity."
+    )
+    consent_beats: list[str] = Field(
+        default_factory=list,
+        description="Moments in the scene where consent is clear on screen (a look, a line).",
+    )
+    closed_set: bool = Field(False, description="True when only essential crew should be present.")
+
+
 class Scene(BaseModel):
     scene_id: str
     number: int
@@ -56,6 +90,12 @@ class Scene(BaseModel):
     start_state: SceneState = Field(default_factory=SceneState)
     end_state: SceneState = Field(default_factory=SceneState)
     new_information: list[str] = Field(default_factory=list)
+    # None (older packages, and scenes the writer left out) means no intimacy.
+    intimacy: Intimacy | None = None
+
+    @property
+    def intimacy_level(self) -> IntimacyLevel:
+        return self.intimacy.level if self.intimacy else "none"
 
     def dialogue_lines(self) -> list[DialogueLine]:
         return [b.dialogue for b in self.beats if b.dialogue is not None]

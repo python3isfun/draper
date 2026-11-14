@@ -16,6 +16,14 @@ SourceUse = Literal[
 ]
 StoryScope = Literal["series_opening", "complete_short"]
 ReferenceMode = Literal["inspiration", "adaptation"]
+# The most intimate staging a job may contain (see RATING_LIMITS).
+ContentRating = Literal["general", "teen", "mature"]
+# rating -> (highest scene intimacy level, partial nudity allowed)
+RATING_LIMITS: dict[str, tuple[str, bool]] = {
+    "general": ("kiss", False),
+    "teen": ("implied", False),
+    "mature": ("simulated", True),
+}
 
 
 class Source(BaseModel):
@@ -64,6 +72,9 @@ class JobOptions(BaseModel):
     genre: str | None = None
     audience: str | None = None
     reference_mode: ReferenceMode = "inspiration"
+    # general: a kiss at most; teen: intimacy implied (cut away), no nudity; mature:
+    # simulated intimacy and partial nudity, staged for a closed set.
+    content_rating: ContentRating = "teen"
     variants: int = Field(default=1, ge=1)
     # Automatic revision attempts per stage (spec section 8 suggests 2).
     revision_budget_per_stage: int = Field(default=2, ge=0, le=5)

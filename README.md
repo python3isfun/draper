@@ -261,10 +261,40 @@ team one file to produce and shoot from. Inside a folder named after the title a
 | `05_assets/` | Asset requirements (CSV + JSON) and the newest finished reference image per deliverable, with `index.csv` (prompt, seed, size, model) |
 | `06_qa/` | Hard checks and creative review |
 | `07_sources/` | The idea text and uploaded photos/videos with their prompts |
+| `08_intimacy/` | Only when the story has intimacy: `intimacy_plan.md`, every such scene with its level, what is shown and implied, nudity, closed set and consent beats, for the director and intimacy coordinator |
 | `package.json` | The whole package |
 
 Everything uses names, not IDs, where people read it. CSVs are UTF-8 with a BOM so Excel
 and Google Sheets open them correctly. Archived stories can't be exported.
+
+### Intimacy and content rules
+
+Intimate scenes are written as staging for the crew; the app never draws them.
+
+- **Content rating** (job option `content_rating`, under Options): `general` allows at most a
+  kiss; `teen` (default) at most *implied* intimacy (the scene cuts away), no nudity;
+  `mature` allows simulated intimacy with at most partial nudity, on a closed set.
+- **Scenes** carry an `intimacy` block when they have physical intimacy: level (`kiss`,
+  `implied`, `simulated`), who, what the camera shows, what is implied, nudity, consent
+  beats and closed set. The script tab marks these scenes.
+- **Hard checks:** a scene above the job's rating, nudity the rating doesn't allow, an
+  implied or simulated scene without consent beats, simulated intimacy or nudity without a
+  closed set, or an empty `on_screen` fails the script step, which is retried with that
+  feedback. Everyone in an implied or simulated scene needs an apparent age in years on
+  the cast sheet; anyone who reads as under 18 blocks the job (`intimacy_minor`), and the
+  fix is to remove the intimacy from the script, never to restate the age.
+- **Export:** `08_intimacy/intimacy_plan.md` (text only) lists each scene for the
+  intimacy coordinator, with the on-set rules.
+- **Images** (`content_guard.py`): never nudity or sexual acts; never romantic or
+  sexualized images of anyone under 18 or who looks it; never intimate, romantic or
+  revealing edits of an uploaded photo, or of an image made from one, since it may show a
+  real person. A word-list check runs on every prompt before any render (design board and
+  Experiment); "nude" as a color ("nude lipstick") and negations ("no nudity") are not
+  refused. For a job with uploaded photos or videos, design-board prompts that mention
+  underwear, swimwear or bed scenes are refused too. The text model judges the rest: in Experiment it sees the pictures; for
+  Rewrite with GPT the writer applies the rules, while exact prompts and hand-edited takes
+  are screened separately. The check fails closed, and a refused message is marked "not
+  allowed" and can't be retried.
 
 ### Experiment: chat with the image model
 
@@ -415,6 +445,7 @@ src/drama_agent/
   imagegen.py      Image generation clients (MiniMax-H3-Image on MCPHub, offline fixture)
   images.py        Reference image planning, prompts, references and the image worker
   experiment.py    Experiment tab: image chat sessions, the GPT prompt rewriter, the runner
+  content_guard.py What image prompts may ask for (word lists + a model screen)
   worker.py        Job workers; `drama-worker` entry point
   api/             FastAPI routes (spec §9) + /v1/meta, job listing
   web/             Web UI (HTML/CSS/JS, served at /)

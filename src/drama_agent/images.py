@@ -1000,6 +1000,13 @@ class ImageWorker:
             self.repo.save_image(i)
 
     async def _generate(self, img: GeneratedImage) -> None:
+        from .content_guard import GuardRefused, text_guard, upload_guard
+
+        # Every prompt, however it was written. A job with uploaded photos may show real
+        # people, so its images also get the uploaded-photo rule.
+        check = upload_guard if package_has_uploads(self.repo, img.package_id) else text_guard
+        if reason := check(img.prompt):
+            raise GuardRefused(f"Not drawn: {reason}")
         references, missing = await asyncio.to_thread(self._references, img)
         if missing:
             # The prompt defines each <Picture N> as a <Subject N> with its relationship;
@@ -1063,6 +1070,13 @@ class ImageWorker:
 
     def _thumb(self, rel: str) -> str | None:
         return make_thumb(self.media, rel)
+
+
+def package_has_uploads(repo: Any, package_id: str) -> bool:
+    """Whether any job behind the package had uploaded photos or videos (which may show
+    real people, e.g. as character references). Unknown counts as yes."""
+    jobs = repo.jobs_for_package(package_id)
+    return not jobs or any(s.type in ("image", "video") for j in jobs for s in j.request.sources)
 
 
 def make_thumb(media: MediaStore, rel: str) -> str | None:

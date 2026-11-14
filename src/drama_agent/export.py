@@ -12,6 +12,8 @@ Layout (inside a folder named after the title and revision):
                                   (newest finished version per deliverable, + index.csv)
     06_qa/qa_report.md            hard checks and creative review
     07_sources/                   the job's idea text and uploaded photos/videos
+    08_intimacy/intimacy_plan.md  scenes with intimacy, for the intimacy coordinator
+                                  (only when the story has any)
     package.json                  the whole package, machine-readable
 
 CSV files are UTF-8 with a BOM so spreadsheet apps open them correctly. Text is stored
@@ -201,6 +203,64 @@ def episode_md(pkg: ProductionPackage, ep_index: int, n: Names) -> str:
                 out += [f"*Sound: {beat.sound}*", ""]
         if sc.new_information:
             out += [f"> New information: {'; '.join(sc.new_information)}", ""]
+        if sc.intimacy_level != "none":
+            out += [f"> Intimacy: {sc.intimacy_level} (see 08_intimacy/intimacy_plan.md)", ""]
+    return "\n".join(out)
+
+
+INTIMACY_LABEL = {
+    "kiss": "Kiss or embrace",
+    "implied": "Implied (cuts away)",
+    "simulated": "Simulated intimacy on screen",
+}
+
+
+def intimacy_scenes(pkg: ProductionPackage) -> list[tuple[Any, Any]]:
+    return [(ep, sc) for ep in pkg.episodes for sc in ep.scenes if sc.intimacy_level != "none"]
+
+
+def intimacy_md(pkg: ProductionPackage, n: Names, rating: str) -> str:
+    """The intimacy plan: every scene with intimacy, staged for the coordinator and the
+    director. Text only: the package never contains intimate images."""
+    out = [
+        f"# Intimacy plan: {pkg.story_bible.title}",
+        "",
+        f"Content rating: **{rating}**.",
+        "",
+        "Before shooting any scene below:",
+        "",
+        (
+            "- Hire an intimacy coordinator for implied and simulated scenes (SAG-AFTRA expects "
+            "one for nudity and simulated sex)."
+        ),
+        (
+            "- Agree each scene's choreography, modesty garments and barriers with the actors in "
+            "advance; get nudity riders signed where nudity is listed."
+        ),
+        "- Actors are adults (18+). Consent can be withdrawn at any time, including on the day.",
+        (
+            "- Closed set means only essential crew; monitors are restricted, and no stills or "
+            "behind-the-scenes footage are taken without the actors' written consent."
+        ),
+        "",
+    ]
+    for ep, sc in intimacy_scenes(pkg):
+        it = sc.intimacy
+        place = n.loc.get(sc.location_id, sc.location_id)
+        who = ", ".join(n.char.get(c, c) for c in (it.character_ids or sc.character_ids))
+        out += [
+            f"## Episode {ep.number}, scene {sc.number}: {place}",
+            "",
+            f"- Level: {INTIMACY_LABEL.get(it.level, it.level)}",
+            f"- Characters: {who}",
+            f"- On screen: {it.on_screen or '(not described)'}",
+            f"- Implied, not shown: {it.off_screen or '(nothing)'}",
+            f"- Nudity: {it.nudity}",
+            f"- Closed set: {'yes' if it.closed_set else 'no'}",
+            "- Consent beats: " + ("; ".join(it.consent_beats) or "(none listed)"),
+            f"- Coordinator needed: {'yes' if it.level in ('implied', 'simulated') else 'advised'}",
+            "",
+        ]
     return "\n".join(out)
 
 
@@ -671,6 +731,11 @@ def build_export(
             src_lines.append("The job that made this package was not found.")
         text("07_sources/sources.md", "\n".join(src_lines))
 
+        # Intimacy plan (text only), when any scene has intimacy
+        if intimacy_scenes(pkg):
+            rating = job.request.options.content_rating if job else "teen"
+            text("08_intimacy/intimacy_plan.md", intimacy_md(pkg, n, rating))
+
         # Everything, and the README
         text("package.json", _json(pkg))
         text("00_README.md", readme_md(pkg, job, rows, len(index_rows)))
@@ -725,6 +790,17 @@ def readme_md(pkg: ProductionPackage, job: Job | None, rows: list, n_images: int
             ),
             "| `06_qa/` | producer | Hard-check results and the creative review |",
             "| `07_sources/` | everyone | The original idea and any uploaded photos or videos |",
+            *(
+                [
+                    (
+                        "| `08_intimacy/` | director, intimacy coordinator | Every scene with "
+                        "intimacy: level, what is shown and implied, nudity, closed set, consent "
+                        "beats |"
+                    )
+                ]
+                if intimacy_scenes(pkg)
+                else []
+            ),
             "| `package.json` | tooling | The whole package, machine-readable |",
             "",
             "## Notes",

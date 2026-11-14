@@ -407,7 +407,15 @@ class ScriptStep(Step):
         "Current step: write all three episodes. Every scene must change the situation; later "
         "episodes read the previous episode's end_state. Give every line a stable dialogue_id. "
         "Scene length goes only in target_duration_ms: do not annotate beats with time "
-        "ranges; shot timing is planned in the storyboard step."
+        "ranges; shot timing is planned in the storyboard step. "
+        "Intimacy: fill a scene's `intimacy` only when it has physical intimacy (otherwise "
+        "leave it null), within request.options.content_rating: general allows at most a "
+        "kiss; teen at most implied (cut away before anything sexual; no nudity); mature "
+        "allows simulated intimacy with at most partial nudity, on a closed set. Write it as "
+        "staging for the director (what the camera shows, what is implied), never as "
+        "explicit description, and list the consent beats for implied or simulated scenes. "
+        "Everyone in an intimate or romantic scene is an adult: never write romantic or "
+        "sexual content involving anyone under 18."
     )
 
     def apply(self, state: PipelineState, output: ScriptOutput) -> None:
@@ -424,6 +432,7 @@ class ScriptStep(Step):
             + hc.check_episode_structure(pkg, idx, opts)
             + hc.check_references(pkg, idx, opts)
             + hc.check_entity_keys(pkg, idx, opts)
+            + hc.check_intimacy(pkg, idx, opts)
             + find_prose_leaks(pkg.episodes)
         )
 
@@ -474,7 +483,8 @@ class CastStep(_SheetStep):
         "Current step: write the cast sheet, a standalone design document for character "
         "designers and casting. "
         + _SHEET_RULES.format(kinds="character and every look")
-        + " Set on_screen=false only for characters who are never seen (phone, voice-over)."
+        + " Give age_range as an apparent age in years (e.g. about 28), as the story has it."
+        " Set on_screen=false only for characters who are never seen (phone, voice-over)."
         " Each look describes only that look's wardrobe, hair and makeup and condition, and "
         "what changes from the base design."
     )

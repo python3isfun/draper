@@ -35,8 +35,17 @@ from .package import (
     StageState,
     TraceEvent,
 )
-from .request import JobOptions, JobRequest, Source
-from .screenplay import Beat, DialogueLine, Episode, Scene, SceneState
+from .request import RATING_LIMITS, ContentRating, JobOptions, JobRequest, Source
+from .screenplay import (
+    INTIMACY_ORDER,
+    Beat,
+    DialogueLine,
+    Episode,
+    Intimacy,
+    IntimacyLevel,
+    Scene,
+    SceneState,
+)
 from .source_brief import CreativeBrief, SourceBrief, SourceCoverage
 from .story import (
     BeatOutline,
@@ -58,6 +67,8 @@ from .storyboard import (
 )
 
 __all__ = [
+    "INTIMACY_ORDER",
+    "RATING_LIMITS",
     "STAGES",
     "AssetRequirement",
     "AssetRequirements",
@@ -70,6 +81,7 @@ __all__ = [
     "Character",
     "CharacterLook",
     "CharacterLookRef",
+    "ContentRating",
     "CreativeBrief",
     "Deliverable",
     "DialogueCue",
@@ -78,6 +90,8 @@ __all__ = [
     "Episode",
     "EpisodeTiming",
     "Experiment",
+    "Intimacy",
+    "IntimacyLevel",
     "Issue",
     "Job",
     "JobOptions",

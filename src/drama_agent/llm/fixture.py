@@ -76,6 +76,10 @@ class FixtureModelClient:
                     if output_model is ImageTakesOutput
                     else fixture_prompts(request)
                 )
+            case "content_guard":
+                from ..content_guard import ScreenOutput
+
+                output = ScreenOutput(allowed=True)
             case "experiment":
                 from ..experiment import fixture_prompt
 
