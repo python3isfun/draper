@@ -11,3 +11,6 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# Story source material (scripts, synopses): kept local, not pushed
+stories/
