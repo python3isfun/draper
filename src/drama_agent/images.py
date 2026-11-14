@@ -1072,11 +1072,21 @@ class ImageWorker:
         return make_thumb(self.media, rel)
 
 
+# Uploads used for these carry no one's likeness into the images (content rule 3).
+NO_LIKENESS_USES = {"location_reference", "visual_style"}
+
+
 def package_has_uploads(repo: Any, package_id: str) -> bool:
-    """Whether any job behind the package had uploaded photos or videos (which may show
-    real people, e.g. as character references). Unknown counts as yes."""
+    """Whether any job behind the package had uploaded photos or videos that may carry a
+    real person's likeness: character references, or uploads with no stated use (a story
+    seed photo may show people). Location and style references don't. Unknown counts as
+    yes."""
     jobs = repo.jobs_for_package(package_id)
-    return not jobs or any(s.type in ("image", "video") for j in jobs for s in j.request.sources)
+    return not jobs or any(
+        s.type in ("image", "video") and s.use_as not in NO_LIKENESS_USES
+        for j in jobs
+        for s in j.request.sources
+    )
 
 
 def make_thumb(media: MediaStore, rel: str) -> str | None:

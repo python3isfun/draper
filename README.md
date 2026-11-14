@@ -287,14 +287,23 @@ Intimate scenes are written as staging for the crew; the app never draws them.
   intimacy coordinator, with the on-set rules.
 - **Images** (`content_guard.py`): never nudity or sexual acts; never romantic or
   sexualized images of anyone under 18 or who looks it; never intimate, romantic or
-  revealing edits of an uploaded photo, or of an image made from one, since it may show a
-  real person. A word-list check runs on every prompt before any render (design board and
-  Experiment); "nude" as a color ("nude lipstick") and negations ("no nudity") are not
-  refused. For a job with uploaded photos or videos, design-board prompts that mention
-  underwear, swimwear or bed scenes are refused too. The text model judges the rest: in Experiment it sees the pictures; for
-  Rewrite with GPT the writer applies the rules, while exact prompts and hand-edited takes
-  are screened separately. The check fails closed, and a refused message is marked "not
-  allowed" and can't be retried.
+  revealing images of a **real person's likeness**: an identifiable person from an uploaded
+  photo, or someone made to resemble a named real person. An upload used only for its
+  clothing, a place or an object passes on nobody's likeness. In Experiment, each result
+  records whether it shows a real person's likeness (marked "real-person likeness"); images
+  built on it keep that, until you go back to an image without one.
+  A word-list check runs on every prompt before any render (design board and Experiment);
+  "nude" as a color ("nude lipstick") and negations ("no nudity") are not refused. For a
+  job with uploaded photos or videos used as character references (or with no stated use),
+  design-board prompts that mention underwear, swimwear or bed scenes are refused too;
+  location and style references don't count. The text model judges the rest: in Experiment it sees the
+  pictures; for Rewrite with GPT the writer applies the rules, while exact prompts and
+  hand-edited takes are screened separately. The check fails closed, and a refused message
+  is marked "not allowed" and can't be retried.
+- **Restrictive mode (Experiment)** (switch at the top of the page, off by default,
+  remembered per browser; the design board keeps its own rules): off, a character may be made to resemble a named real person or take a face
+  from an uploaded photo, for ordinary images. On, GPT turns "like <a real person>" into
+  generic traits and keeps real names out of prompts. The rules above apply in both modes.
 
 ### Experiment: chat with the image model
 
@@ -311,7 +320,13 @@ saved and listed on the left.
    (what is preserved, what changes) with the shared H3 rules; its note says what it
    changed. **Exact prompt** sends your text as written. Every reply shows the prompt
    sent; **Edit this prompt** copies it into the box in Exact mode.
-4. The result becomes the current image, so the next message builds on it. **Edit this
+4. Every image in a chat (results and uploads) gets a number, shown as a badge (`#7`);
+   numbers are never reused. Refer to earlier images by number: "hair like #3" sends #3
+   along with the current image, and "go back to #3 and add a hat" lets GPT start from #3
+   instead (it chooses which pictures to send and in what order; the reply shows "sent #3").
+   Click a badge to put its number in your message. In Exact prompt mode, `#3` is replaced
+   with the `<Picture N>` it is sent as.
+5. The result becomes the current image, so the next message builds on it. **Edit this
    one** makes any earlier result or upload current instead (branching); **Start a new
    image** clears it. **Draws** (1–4) renders several seeds of the same prompt.
 

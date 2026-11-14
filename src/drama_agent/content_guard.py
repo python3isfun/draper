@@ -94,15 +94,36 @@ RULES = """\
 2. Never: romantic, sexualized or revealing imagery of anyone who is or looks under 18. If a \
 picture shows someone who looks under 18, refuse any change that makes the image romantic, \
 sexual or revealing.
-3. A picture marked "uploaded photo" may show a real person. Never allow an intimate, \
-sexualized, romantic or revealing edit of a person in an uploaded photo: undressing, \
-lingerie, swimwear or underwear, a kiss or embrace, a bed scene, suggestive poses or \
-expressions, or a humiliating or compromising situation. Ordinary edits of an uploaded photo \
-are fine: hair, makeup, everyday or formal clothing, expression, pose, background, light, \
-age within adulthood.
-4. Everything else is allowed, including clothed romance between adult characters in images \
-that come from no uploaded photo (a kiss, an embrace, holding hands).\
+3. Never: an intimate, sexualized, romantic or revealing image of a real person's likeness: \
+undressing, lingerie, swimwear or underwear, a kiss or embrace, a bed scene, suggestive poses \
+or expressions, or a humiliating or compromising situation. A real person's likeness is an \
+identifiable person from an uploaded photo, a picture marked as showing a real person's \
+likeness, or anyone made to look like a named or described real person (an actress, a public \
+figure, someone the user knows). Ordinary images of a real person's likeness are fine: hair, \
+makeup, everyday or formal clothing, expression, pose, background, light. Anyone whose face is \
+visible in an uploaded photo counts as an identifiable real person. An uploaded photo used \
+only for its clothing, a place or an object passes on nobody's likeness, even if a model wears \
+the clothes.
+4. Everything else is allowed, including clothed romance, swimwear and a kiss or embrace \
+between adult characters who don't have a real person's likeness.\
 """
+
+# The Restrictive mode switch (top of the page; off by default). Rules 1-4 apply either way.
+OPEN_MODE = """\
+Open mode (the default, for exploration): a character may be made to resemble a named real \
+person, and a face may be taken from an uploaded photo, for ordinary images; the result then \
+has a real person's likeness and rule 3 applies to it.\
+"""
+RESTRICTIVE_MODE = """\
+Restrictive mode: don't make anyone resemble a named or described real person, and don't take \
+a face from an uploaded photo onto another figure. Turn "like <a real person>" into generic \
+visible traits (hair, face shape, features) that don't add up to that person, and never write \
+a real person's name in the prompt. Say so in your reply.\
+"""
+
+
+def mode_rule(restrictive: bool) -> str:
+    return RESTRICTIVE_MODE if restrictive else OPEN_MODE
 
 
 def upload_guard(prompt: str) -> str | None:
@@ -115,23 +136,30 @@ def upload_guard(prompt: str) -> str | None:
     return None
 
 
-SCREEN_INSTRUCTIONS = f"""\
+def screen_instructions(restrictive: bool = False) -> str:
+    return f"""\
 You check prompts before they are sent to an image model. Decide whether the image the \
 prompt asks for is allowed, by these rules:
 
 {RULES}
 
+{mode_rule(restrictive)}
+
 You see the prompt, the list of pictures sent with it (each attached after its label) and \
 the user's own message when there is one. Judge the image that would result, not the wording.
 
-Return {{"allowed": true|false, "reason": "..."}}: when not allowed, `reason` is one short \
-sentence to the user naming the rule, without repeating the prompt.\
+Return {{"allowed": true|false, "reason": "...", "real_person": true|false}}: when not \
+allowed, `reason` is one short sentence to the user naming the rule, without repeating the \
+prompt. `real_person`: whether the person in the resulting image would have a real person's \
+likeness (see rule 3), e.g. kept from <Picture 1> when it has one.\
 """
 
 
 class ScreenOutput(BaseModel):
     allowed: bool
     reason: str = ""
+    # Required: a check that doesn't say counts as failed (fails closed), never as "no".
+    real_person: bool
 
 
 class GuardRefused(ValueError):
@@ -145,16 +173,17 @@ async def screen(
     pictures: list[dict[str, str]],
     media: list[Any] | None = None,
     message: str | None = None,
-) -> None:
-    """Raise GuardRefused unless the prompt may be drawn. `pictures`: one entry per
-    <Picture N>, {"picture": "<Picture 1>", "kind": "uploaded photo" | "generated image"};
-    `media`: the pictures themselves (MediaPart), so the model can see who is in them.
-    Fails closed: if the check can't run, the prompt is refused."""
+    restrictive: bool = False,
+) -> ScreenOutput:
+    """Raise GuardRefused unless the prompt may be drawn; returns the verdict (with
+    `real_person`). `pictures`: one entry per <Picture N>, {"picture": "<Picture 1>",
+    "kind": ...}; `media`: the pictures themselves (MediaPart), so the model can see who is
+    in them. Fails closed: if the check can't run, the prompt is refused."""
     if reason := text_guard(prompt) or (text_guard(message) if message else None):
         raise GuardRefused(reason)
     request = GenerationRequest(
         stage=STAGE,  # type: ignore[arg-type]
-        instructions=SCREEN_INSTRUCTIONS,
+        instructions=screen_instructions(restrictive),
         context={"prompt": prompt, "pictures": pictures, "user_message": message},
         media=list(media or []),
     )
@@ -168,3 +197,4 @@ async def screen(
         ) from exc
     if not out.allowed:
         raise GuardRefused(out.reason.strip() or "This image isn't allowed here.")
+    return out

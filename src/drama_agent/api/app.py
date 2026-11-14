@@ -34,10 +34,12 @@ from ..experiment import (
     ExpError,
     ExpSession,
     ExpTurn,
+    apply_labels,
     is_busy,
     known_refs,
     new_session,
     plan_turn,
+    unlabeled,
 )
 from ..experiment import MAX_PROMPT_CHARS as EXP_MAX_PROMPT_CHARS
 from ..experiment import SIZES as EXP_SIZES
@@ -213,6 +215,9 @@ class ExpTurnRequest(BaseModel):
     mode: Literal["rewrite", "exact"] = "rewrite"
     draws: int = Field(1, ge=1, le=MAX_DRAWS)
     size: str | None = None  # overrides the session's size for this message
+    # Restrictive mode (top-of-page switch, off by default): no real-person likeness by name
+    # or face. The content rules that protect minors and real people apply either way.
+    restrictive: bool = False
 
 
 class ExpSessionView(BaseModel):
@@ -656,10 +661,18 @@ def create_app(
             raise HTTPException(404, "session not found")
         return session
 
+    def _exp_turns(session_id: str) -> list[ExpTurn]:
+        """A chat's turns. Images made before numbering existed get numbers once, oldest
+        first (not while a message runs: the runner is saving that turn)."""
+        turns = repo.list_exp_turns(session_id)
+        if not is_busy(turns) and (n := unlabeled(turns)):
+            for t in apply_labels(turns, repo.allocate_exp_labels(session_id, n)):
+                repo.save_exp_turn(t)
+        return turns
+
     def _exp_view(session: ExpSession) -> ExpSessionView:
-        return ExpSessionView(
-            session=session, turns=repo.list_exp_turns(session.session_id), sizes=EXP_SIZES
-        )
+        turns = _exp_turns(session.session_id)
+        return ExpSessionView(session=session, turns=turns, sizes=EXP_SIZES)
 
     @app.get("/v1/experiments", response_model=list[ExpSession])
     async def list_experiments() -> list[ExpSession]:
@@ -712,7 +725,7 @@ def create_app(
     @app.post("/v1/experiments/{session_id}/turns", status_code=202, response_model=ExpTurn)
     async def send_experiment_turn(session_id: str, req: ExpTurnRequest) -> ExpTurn:
         session = _exp_session_or_404(session_id)
-        turns = repo.list_exp_turns(session_id)
+        turns = _exp_turns(session_id)  # numbered, so the message can mention any image
         # Uploads: this message's, plus the current image when it is an earlier upload
         # (its dimensions pick the "auto" size).
         asset_ids = list(req.attachments)
@@ -728,9 +741,12 @@ def create_app(
                 mode=req.mode,
                 draws=req.draws,
                 size=req.size,
+                restrictive=req.restrictive,
             )
         except ExpError as exc:
             raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
+        if turn.attachments:
+            turn.attachment_labels = repo.allocate_exp_labels(session_id, len(turn.attachments))
         repo.save_exp_turn(turn)
         if turn.mode == "upload":
             session.current = f"asset:{turn.attachments[0]}"

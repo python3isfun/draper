@@ -59,6 +59,7 @@ class Repository(Protocol):
     def get_exp_turn(self, turn_id: str) -> ExpTurn | None: ...
     def list_exp_turns(self, session_id: str) -> list[ExpTurn]: ...
     def fail_unfinished_exp_turns(self, error: str) -> int: ...
+    def allocate_exp_labels(self, session_id: str, n: int) -> list[int]: ...
     def asset_in_use(self, asset_id: str) -> bool: ...
     def delete_source_asset(self, asset_id: str) -> None: ...
 
@@ -83,6 +84,7 @@ class InMemoryRepository:
         self.options: dict[str, DesignOption] = {}
         self.exp_sessions: dict[str, ExpSession] = {}
         self.exp_turns: dict[str, ExpTurn] = {}
+        self.exp_next_label: dict[str, int] = {}
 
     def save_source_asset(self, asset_id: str, meta: dict[str, Any]) -> None:
         self.source_assets[asset_id] = meta
@@ -265,6 +267,7 @@ class InMemoryRepository:
 
     def delete_exp_session(self, session_id: str) -> None:
         self.exp_sessions.pop(session_id, None)
+        self.exp_next_label.pop(session_id, None)
         for tid in [t.turn_id for t in self.exp_turns.values() if t.session_id == session_id]:
             del self.exp_turns[tid]
 
@@ -288,6 +291,12 @@ class InMemoryRepository:
             if t.status in ("pending", "running"):
                 t.status, t.error, t.finished_at, n = "failed", error, utcnow(), n + 1
         return n
+
+    def allocate_exp_labels(self, session_id: str, n: int) -> list[int]:
+        """The next n image numbers of a chat (1, 2, ...), never handed out twice."""
+        start = self.exp_next_label.get(session_id, 1)
+        self.exp_next_label[session_id] = start + n
+        return list(range(start, start + n))
 
     def asset_in_use(self, asset_id: str) -> bool:
         """Whether a job, a reference image or a chat message uses this upload."""

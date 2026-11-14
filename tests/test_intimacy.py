@@ -196,9 +196,13 @@ class Refuser(FixtureModelClient):
         if request.stage in ("experiment", "content_guard"):
             self.calls.append(request)
         if request.stage == "experiment":
-            return output_model(allowed=False, refusal="Not with an uploaded photo.")
+            return output_model(
+                allowed=False, real_person=True, refusal="Not with an uploaded photo."
+            )
         if request.stage == "content_guard":
-            return output_model(allowed=False, reason="Not with an uploaded photo.")
+            return output_model(
+                allowed=False, real_person=True, reason="Not with an uploaded photo."
+            )
         return await super().generate(request, output_model)
 
 
@@ -230,23 +234,6 @@ def test_exact_prompts_are_screened(tmp_path):
         assert turn["refused"] and turn["error"] == NUDITY_REASON
         assert c.text.calls[-1].stage == "content_guard"  # only the first message's screen
         assert len(c.images.calls) == 1
-
-
-def test_results_of_an_upload_count_as_uploads(tmp_path):
-    with Chat(tmp_path) as c:
-        c.send(attachments=[c.upload()])
-        c.send(text="make the background blue")
-        first = c.wait()["turns"][-1]
-        assert first["from_upload"]
-        c.send(text="add a hat")
-        c.wait()
-        kinds = [p["kind"] for p in c.text.calls[-1].context["pictures"]]
-        assert kinds == ["uploaded photo, as edited in this chat (may show a real person)"]
-
-        c.http.patch(f"/v1/experiments/{c.sid}", json={"clear_current": True})
-        c.send(text="a red bicycle")
-        fresh = c.wait()["turns"][-1]
-        assert not fresh["from_upload"]
 
 
 def test_design_board_refuses_explicit_edits(tmp_path):
@@ -294,24 +281,10 @@ def test_upload_guard():
     assert text_guard("Lila in a red bikini on the beach") is None  # fine without uploads
 
 
-def test_lineage_follows_references_not_the_stored_flag():
-    # Saved before from_upload existed: the flag is False, the references say otherwise.
-    old = ExpTurn(
-        turn_id="turn_old", session_id="s", index=2, references=["asset:asset_x"], status="done"
-    )
-    child = ExpTurn(
-        turn_id="turn_kid", session_id="s", index=3, references=["turn:turn_old:0"], status="done"
-    )
-    fresh = ExpTurn(turn_id="turn_txt", session_id="s", index=4, status="done")
-    turns = [old, child, fresh]
-    assert not old.from_upload
-    assert picture_kind("turn:turn_kid:0", turns).startswith("uploaded photo")
-    assert picture_kind("turn:turn_txt:0", turns).startswith("generated image")
-    assert picture_kind("turn:turn_gone:0", turns).startswith("uploaded photo")
-
-
 class UploadSession(Session):
     """A design-board session whose job has an uploaded photo (a character reference)."""
+
+    use_as = "character_reference"
 
     def __enter__(self):
         self.http = TestClient(self.app).__enter__()
@@ -321,7 +294,7 @@ class UploadSession(Session):
         body = {
             "sources": [
                 {"type": "text", "text": SAMPLE_SEED, "use_as": "story_seed"},
-                {"type": "image", "asset_id": asset["asset_id"], "use_as": "character_reference"},
+                {"type": "image", "asset_id": asset["asset_id"], "use_as": self.use_as},
             ]
         }
         job_id = self.http.post("/v1/drama-jobs", json=body).json()["job_id"]
@@ -352,3 +325,187 @@ def test_design_board_applies_the_uploaded_photo_rule(tmp_path):
         s.wait()
         failed = repo.get_image(img["image_id"])
         assert failed.status == "failed" and REAL_PERSON_REASON in failed.error
+
+
+# ---------------------------------------------------------------------------
+# Real-person likeness and Restrictive mode (Experiment)
+
+
+class Judge(FixtureModelClient):
+    """A writer that judges likeness like the real one: messages with "like <name>" make a
+    real person's likeness; it may also choose pictures."""
+
+    def __init__(self, pictures=None):
+        super().__init__()
+        self.pictures = pictures
+
+    async def generate(self, request, output_model):
+        if request.stage == "experiment":
+            self.calls.append(request)
+            request.model = "judge-v1"  # as the real client does
+            ctx = request.context
+            n = len(ctx["pictures"] if self.pictures is None else self.pictures)
+            defs = " ".join(f"<Picture {i}> is <Subject {i}>." for i in range(1, n + 1))
+            return output_model(
+                real_person="look like" in ctx["message"],
+                pictures=self.pictures,
+                prompt=f"{defs} The target image ... No other lettering is added."
+                if n
+                else "A photograph. The image contains no text, letters or numbers.",
+            )
+        return await super().generate(request, output_model)
+
+
+def writer_calls(c):
+    return [r for r in c.text.calls if r.stage == "experiment"]
+
+
+def test_a_clothing_reference_passes_on_no_likeness(tmp_path):
+    with Chat(tmp_path, text=Judge()) as c:
+        c.send(text="a woman in a blazer")
+        c.wait()
+        c.send(text="put her in the cardigan from the photo", attachments=[c.upload()])
+        turn = c.wait()["turns"][-1]
+        assert turn["from_upload"] and turn["likeness"] is False
+        c.send(text="a man hugs her from behind")
+        c.wait()
+        kind = writer_calls(c)[-1].context["pictures"][0]["kind"]
+        assert kind == "made in this chat; no real person's likeness (fictional)"
+
+
+def test_a_named_likeness_is_inherited_until_you_go_back(tmp_path):
+    with Chat(tmp_path, text=Judge()) as c:
+        c.send(text="a woman in a blazer")  # #1
+        c.wait()
+        c.send(text="make her look like a famous actress")  # #2
+        assert c.wait()["turns"][-1]["likeness"] is True
+        c.send(text="show the front view")  # #3: the writer says no, Picture 1 says yes
+        turn = c.wait()["turns"][-1]
+        assert turn["likeness"] is True
+        assert (
+            writer_calls(c)[-1]
+            .context["pictures"][0]["kind"]
+            .endswith("shows a real person's likeness")
+        )
+    with Chat(tmp_path, text=Judge(pictures=["#1"])) as c:
+        c.send(text="a woman in a blazer")  # #1
+        c.wait()
+        c.send(text="make her look like a famous actress")  # #2 (the writer sends #1 only)
+        c.wait()
+        c.send(text="go back to #1 and add a scarf")
+        assert c.wait()["turns"][-1]["likeness"] is False  # built on #1, which has none
+
+
+def test_dropping_pictures_keeps_the_likeness(tmp_path):
+    with Chat(tmp_path, text=Judge()) as c:
+        c.send(text="make her look like a famous actress")
+        assert c.wait()["turns"][-1]["likeness"] is True
+    with Chat(tmp_path, text=Judge(pictures=[])) as c:
+        c.send(text="a woman")
+        c.wait()
+        repo = c.app.state.repo
+        [t] = repo.list_exp_turns(c.sid)
+        t.likeness = True  # as if she had been made to look like someone
+        repo.save_exp_turn(t)
+        c.send(text="draw her again from scratch")  # no picture sent, but she was seen
+        turn = c.wait()["turns"][-1]
+        assert turn["references"] == [] and turn["likeness"] is True
+
+
+def test_older_results_are_judged_by_the_model(tmp_path):
+    old = ExpTurn(turn_id="turn_old", session_id="s", index=1, status="done")
+    assert old.likeness is None
+    kind = picture_kind("turn:turn_old:0", [old])
+    assert kind.startswith("made in this chat before likeness was tracked")
+    assert picture_kind("asset:asset_x", []).startswith("uploaded photo (judge")
+
+
+def test_restrictive_mode_reaches_the_writer_and_the_screen(tmp_path):
+    with Chat(tmp_path) as c:
+        c.send(text="a woman in a blazer")
+        turn = c.wait()["turns"][-1]
+        assert turn["restrictive"] is False
+        assert "Open mode" in writer_calls(c)[-1].instructions
+        c.send(text="a man in a coat", restrictive=True)
+        assert c.wait()["turns"][-1]["restrictive"] is True
+        assert "Restrictive mode:" in writer_calls(c)[-1].instructions
+        assert "Open mode" not in writer_calls(c)[-1].instructions
+        c.send(text="A photograph of a red door.", mode="exact", restrictive=True)
+        c.wait()
+        screened = [r for r in c.text.calls if r.stage == "content_guard"][-1]
+        assert "Restrictive mode:" in screened.instructions
+
+
+class SeesARealPerson(FixtureModelClient):
+    async def generate(self, request, output_model):
+        if request.stage == "content_guard":
+            self.calls.append(request)
+            return output_model(allowed=True, real_person=True)
+        return await super().generate(request, output_model)
+
+
+def test_exact_prompts_get_the_likeness_from_the_screen(tmp_path):
+    with Chat(tmp_path, text=SeesARealPerson()) as c:
+        c.send(text="A portrait in the style of a famous actress.", mode="exact")
+        assert c.wait()["turns"][-1]["likeness"] is True
+
+
+class LocationUploadSession(UploadSession):
+    use_as = "location_reference"
+
+
+def test_location_uploads_carry_no_likeness_on_the_design_board(tmp_path):
+    with LocationUploadSession(tmp_path) as s:
+        s.http.post(
+            f"{s.base}/explore", json={**s.ids(), "takes": 1, "draws": 1, "scope": ["cast"]}
+        )
+        v = s.wait()
+        face = next(o for o in v["options"] if key(o) == FRANK_FACE)
+        r = s.http.post(
+            f"/v1/image-options/{face['option_id']}/edit",
+            json={"prompt": "Frank Collins in swimwear on a beach."},
+        )
+        assert r.status_code == 202, r.text
+
+
+class Silent(FixtureModelClient):
+    """Answers without real_person, as a model that ignores part of the schema would."""
+
+    async def generate(self, request, output_model):
+        if request.stage == "experiment":
+            self.calls.append(request)
+            return output_model.model_validate({"prompt": "A photograph of a woman."})
+        if request.stage == "content_guard":
+            self.calls.append(request)
+            return output_model.model_validate({"allowed": True})
+        return await super().generate(request, output_model)
+
+
+def test_an_unanswered_likeness_check_draws_nothing(tmp_path):
+    with Chat(tmp_path, text=Silent()) as c:
+        c.send(text="make her look like a famous actress")
+        turn = c.wait()["turns"][-1]
+        assert turn["refused"] and "Couldn't run the content check" in turn["error"]
+        assert c.images.calls == []
+
+
+def test_older_images_come_with_their_ancestry(tmp_path):
+    with Chat(tmp_path) as c:
+        c.send(text="make her look like a famous actress")
+        c.wait()
+        for msg in ["front view", "in a kitchen", "drinking coffee"]:
+            c.send(text=msg)
+            c.wait()
+        repo = c.app.state.repo
+        for t in repo.list_exp_turns(c.sid):  # as made before likeness was tracked
+            t.likeness = None
+            repo.save_exp_turn(t)
+        c.send(text="a man hugs her")
+        c.wait()
+        part = writer_calls(c)[-1].context["pictures"][0]
+        assert [a["message"] for a in part["ancestry"]] == [
+            "make her look like a famous actress",
+            "front view",
+            "in a kitchen",
+            "drinking coffee",
+        ]

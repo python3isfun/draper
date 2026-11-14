@@ -79,7 +79,7 @@ class FixtureModelClient:
             case "content_guard":
                 from ..content_guard import ScreenOutput
 
-                output = ScreenOutput(allowed=True)
+                output = ScreenOutput(allowed=True, real_person=False)
             case "experiment":
                 from ..experiment import fixture_prompt
 

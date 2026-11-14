@@ -33,7 +33,7 @@ class FlakyImages(FixtureImageClient):
 class LongWriter(FixtureModelClient):
     async def generate(self, request, output_model):
         if request.stage == "experiment":
-            return output_model(prompt="x" * 7000, reply="long")
+            return output_model(real_person=False, prompt="x" * 7000, reply="long")
         return await super().generate(request, output_model)
 
 
@@ -267,3 +267,147 @@ def test_fallback_text_gets_the_exact_prompt_check(tmp_path):
         turn = c.wait()["turns"][-1]
         assert turn["status"] == "failed" and "<Picture 2>" in turn["error"]
         assert c.images.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Image numbers (#N) and mentions
+
+
+class Picker(FixtureModelClient):
+    """A writer that chooses which pictures to send (as "go back to #N" would)."""
+
+    def __init__(self, pictures):
+        super().__init__()
+        self.pictures = pictures
+
+    async def generate(self, request, output_model):
+        if request.stage == "experiment":
+            self.calls.append(request)
+            n = len(request.context["pictures"] if self.pictures is None else self.pictures)
+            defs = " ".join(f"<Picture {i}> is <Subject {i}>." for i in range(1, n + 1))
+            return output_model(
+                real_person=False,
+                pictures=self.pictures,
+                prompt=f"{defs} The target image is <Subject 1> with a hat. No other lettering is added.",
+                reply="Back to the earlier one, with a hat.",
+            )
+        return await super().generate(request, output_model)
+
+
+def labels(turn):
+    return turn["attachment_labels"] + [r["label"] for r in turn["results"]]
+
+
+def test_every_image_gets_a_number(tmp_path):
+    with Chat(tmp_path) as c:
+        c.send(attachments=[c.upload()])
+        c.send(text="add a hat")
+        c.wait()
+        c.send(text="add a scarf", draws=2)
+        turns = c.wait()["turns"]
+        assert [labels(t) for t in turns] == [[1], [2], [3, 4]]
+        assert c.view()["session"]["current"] == f"turn:{turns[2]['turn_id']}:0"
+
+
+def test_mentioned_images_are_offered_to_the_writer(tmp_path):
+    with Chat(tmp_path) as c:
+        c.send(attachments=[c.upload()])  # #1
+        c.send(text="add a hat")  # #2
+        c.wait()
+        c.send(text="add a scarf")  # #3, current
+        c.wait()
+        c.send(text="give her the hair from #1")
+        turn = c.wait()["turns"][-1]
+        assert turn["references"][0].startswith("turn:")  # the current image (#3) first
+        assert turn["references"][1] == c.view()["turns"][0]["references"][0]  # then #1
+        ctx = c.text.calls[-1].context
+        assert [p["id"] for p in ctx["pictures"]] == ["#3", "#1"]
+        assert ctx["pictures"][0]["made_by_prompt"]  # the prompt that made #3
+        assert c.send(text="like #99").json()["detail"] == "There's no image #99 in this chat."
+
+
+def test_writer_can_go_back_to_an_earlier_image(tmp_path):
+    with Chat(tmp_path, text=Picker(["#2"])) as c:
+        c.send(text="a red bicycle")  # #1
+        c.wait()
+        c.send(text="make it blue")  # #2
+        c.wait()
+        c.send(text="make it green")  # #3: worse
+        c.wait()
+        first = c.view()["turns"]
+        c.send(text="go back to #2 and add a basket")
+        turn = c.wait()["turns"][-1]
+        assert turn["references"] == [f"turn:{first[1]['turn_id']}:0"]  # only #2, as Picture 1
+        assert c.images.calls[-1][3] == [f"{first[1]['turn_id']}_0.png"]
+        assert labels(turn) == [4]
+
+
+def test_unknown_picture_choice_falls_back_to_the_message(tmp_path):
+    with Chat(tmp_path, text=Picker(["#42"])) as c:
+        c.send(text="a red bicycle")
+        c.wait()
+        c.send(text="like #1 but at night")
+        turn = c.wait()["turns"][-1]
+        assert turn["status"] == "done"
+        assert turn["prompt"] == "like <Picture 1> but at night"  # #1 is the current image
+        assert "Couldn't rewrite" in turn["reply"]
+
+
+def test_exact_prompts_turn_numbers_into_pictures(tmp_path):
+    with Chat(tmp_path) as c:
+        c.send(text="a red bicycle")  # #1
+        c.wait()
+        c.send(text="a blue bicycle")  # #2, current
+        c.wait()
+        prompt = "<Picture 1> is <Subject 1>. #1 is <Subject 2>. The target image ..."
+        c.send(text=prompt, mode="exact")
+        turn = c.wait()["turns"][-1]
+        assert turn["prompt"] == (
+            "<Picture 1> is <Subject 1>. <Picture 2> is <Subject 2>. The target image ..."
+        )
+        assert len(turn["references"]) == 2
+
+
+def test_images_from_before_numbering_get_numbers(tmp_path):
+    with Chat(tmp_path) as c:
+        c.send(attachments=[c.upload()])
+        c.send(text="add a hat")
+        c.wait()
+        repo = c.app.state.repo
+        for t in repo.list_exp_turns(c.sid):  # as saved before numbering existed
+            t.attachment_labels = []
+            for r in t.results:
+                r.label = None
+            repo.save_exp_turn(t)
+        turns = c.view()["turns"]
+        assert [labels(t) for t in turns] == [[3], [4]]  # oldest first, numbers never reused
+        assert [labels(t) for t in c.view()["turns"]] == [[3], [4]]  # once
+
+
+def test_numbers_in_quotes_and_colors_are_not_mentions(tmp_path):
+    with Chat(tmp_path) as c:
+        c.send(text="a red door")  # #1
+        c.wait()
+        assert c.send(text="paint the wall #222222").status_code == 202  # a color
+        c.wait()
+        prompt = '<Picture 1> is <Subject 1>. Like #1, and a plaque reads "Room #1".'
+        c.send(text=prompt, mode="exact")
+        turn = c.wait()["turns"][-1]
+        assert turn["prompt"] == (
+            '<Picture 1> is <Subject 1>. Like <Picture 2>, and a plaque reads "Room #1".'
+        )
+        assert c.send(text="like #99").status_code == 422  # still a likely typo
+
+
+def test_sending_numbers_old_images_first(tmp_path):
+    with Chat(tmp_path) as c:
+        c.send(text="a red door")
+        c.wait()
+        repo = c.app.state.repo
+        for t in repo.list_exp_turns(c.sid):  # as saved before numbering existed
+            for r in t.results:
+                r.label = None
+            repo.save_exp_turn(t)
+        # No GET in between (an API client): sending numbers the old image first.
+        r = c.send(text="like #2 but blue")
+        assert r.status_code == 202, r.text

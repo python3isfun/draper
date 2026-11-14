@@ -33,7 +33,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .content_guard import RULES as CONTENT_RULES
-from .content_guard import GuardRefused, screen, text_guard
+from .content_guard import GuardRefused, mode_rule, screen, text_guard
 from .imagegen import MAX_REFERENCE_BYTES, MAX_REFERENCES, ImageClient, Reference
 from .llm import GenerationRequest
 from .media import MediaPart, MediaStore
@@ -66,6 +66,7 @@ PictureVariant = Literal["full", "model", "thumb"]
 
 
 class ExpResult(BaseModel):
+    label: int | None = None  # the image's number in the chat (#7); None before labels existed
     file: str
     thumb: str | None = None
     content_type: str = "image/jpeg"
@@ -78,10 +79,15 @@ class ExpTurn(BaseModel):
     index: int  # 1, 2, ... within the session
     text: str = ""  # the user's message
     attachments: list[str] = Field(default_factory=list)  # source asset ids
+    attachment_labels: list[int] = Field(default_factory=list)  # their numbers (#N), in order
     # The pictures sent, in <Picture N> order: "asset:<id>" or "turn:<turn_id>:<n>".
     references: list[str] = Field(default_factory=list)
+    # The pictures the prompt writer was shown, sent or not: lineage counts them too, so a
+    # result can't lose "from an upload" by the writer describing a photo it didn't send.
+    offered: list[str] = Field(default_factory=list)
     mode: TurnMode = "rewrite"
     size: str = ""
+    auto_size: bool = False  # size follows <Picture 1> (it's re-picked if the writer reorders)
     draws: int = 1
     prompt: str = ""  # what H3 received
     prompt_model: str | None = None  # the text model that wrote it ("rewrite")
@@ -89,8 +95,14 @@ class ExpTurn(BaseModel):
     status: TurnStatus = "pending"
     error: str | None = None
     refused: bool = False  # the content guard refused it (retrying won't help)
-    # Any picture is an upload or was made from one: its results may show a real person.
+    # Any picture is an upload or was made from one (provenance, for information).
     from_upload: bool = False
+    # Whether the result shows a real person's likeness (an identifiable person from an
+    # uploaded photo, or someone made to resemble a named real person): content rule 3 then
+    # applies to images made from it. None: made before this was tracked.
+    likeness: bool | None = None
+    # Restrictive mode (top-of-page switch) when the message was sent.
+    restrictive: bool = False
     results: list[ExpResult] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
@@ -138,6 +150,92 @@ def known_refs(turns: list[ExpTurn]) -> set[str]:
     return refs
 
 
+# Every image of a chat (upload or result) gets a number when it's made, never reused:
+# "#7". Messages refer to earlier images by it ("hair like #3").
+# Up to 4 digits: "#222222" is a color, not image 222222.
+_MENTION = re.compile(r"(?<![\w#])#(\d{1,4})(?![\w])")
+# Quoted text is lettering for the image ("Room #3"), never a reference.
+_QUOTED = re.compile(r"\"[^\"]*\"|“[^”]*”")
+
+
+def sub_mentions(text: str, repl: Any) -> str:
+    """Replace image mentions (#3) outside quotes with repl(number) (a str, or None to
+    leave the mention as it is)."""
+
+    def one(m: re.Match[str]) -> str:
+        r = repl(int(m[1]))
+        return r if r is not None else m[0]
+
+    def outside(chunk: str) -> str:
+        return _MENTION.sub(one, chunk)
+
+    out, at = [], 0
+    for q in _QUOTED.finditer(text):
+        out += [outside(text[at : q.start()]), q[0]]
+        at = q.end()
+    out.append(outside(text[at:]))
+    return "".join(out)
+
+
+def image_labels(turns: list[ExpTurn]) -> dict[int, str]:
+    """Image number -> reference string, for every numbered image of a chat."""
+    out: dict[int, str] = {}
+    for t in turns:
+        for a, label in zip(t.attachments, t.attachment_labels, strict=False):
+            out[label] = f"asset:{a}"
+        for n, r in enumerate(t.results):
+            if r.label is not None:
+                out[r.label] = f"turn:{t.turn_id}:{n}"
+    return out
+
+
+def ref_label(ref: str, turns: list[ExpTurn]) -> int | None:
+    return next((k for k, v in image_labels(turns).items() if v == ref), None)
+
+
+def turn_label(turn: ExpTurn, ref: str, turns: list[ExpTurn]) -> int | None:
+    """A picture's number, including this turn's own attachments."""
+    others = [t for t in turns if t.turn_id != turn.turn_id]
+    return ref_label(ref, [*others, turn])
+
+
+def mentions(text: str) -> list[int]:
+    """Image numbers a message mentions (#3), in order of first mention."""
+    seen: list[int] = []
+
+    def note(n: int) -> None:
+        if n not in seen:
+            seen.append(n)
+
+    sub_mentions(text, note)
+    return seen
+
+
+def unlabeled(turns: list[ExpTurn]) -> int:
+    """Images made before numbering existed (to number once, oldest first)."""
+    return sum(
+        max(0, len(t.attachments) - len(t.attachment_labels))
+        + sum(1 for r in t.results if r.label is None)
+        for t in turns
+    )
+
+
+def apply_labels(turns: list[ExpTurn], labels: list[int]) -> list[ExpTurn]:
+    """Give unnumbered images the given numbers, oldest first; returns the changed turns."""
+    it = iter(labels)
+    changed: list[ExpTurn] = []
+    for t in sorted(turns, key=lambda t: t.index):
+        before = t.model_dump()
+        while len(t.attachment_labels) < len(t.attachments):
+            t.attachment_labels.append(next(it))
+        for r in t.results:
+            if r.label is None:
+                r.label = next(it)
+        if t.model_dump() != before:
+            changed.append(t)
+    return changed
+
+
 def nearest_size(width: int | None, height: int | None) -> str:
     if not width or not height:
         return DEFAULT_SIZE
@@ -160,6 +258,7 @@ def plan_turn(
     mode: Literal["rewrite", "exact"],
     draws: int,
     size: str | None,
+    restrictive: bool = False,
 ) -> ExpTurn:
     """The next turn of a session (not saved). Raises ExpError."""
     text = text.strip()
@@ -181,27 +280,39 @@ def plan_turn(
         text=text,
         attachments=attachments,
         draws=max(1, min(draws, MAX_DRAWS)),
+        restrictive=restrictive,
     )
     if not text:
         turn.mode, turn.status, turn.finished_at = "upload", "done", utcnow()
         turn.references = [f"asset:{a}" for a in attachments]
         return turn
-    refs = ([session.current] if session.current else []) + [f"asset:{a}" for a in attachments]
+    # Pictures: the current image, then earlier images the message mentions (#3), then this
+    # message's attachments. (In "rewrite" mode the writer may reorder or drop them, e.g.
+    # "go back to #3" makes #3 the base.)
+    labels = image_labels(turns)
+    if unknown := [n for n in mentions(text) if n not in labels]:
+        raise ExpError(f"There's no image {', '.join(f'#{n}' for n in unknown)} in this chat.")
+    refs = [session.current] if session.current else []
+    refs += [labels[n] for n in mentions(text) if labels[n] not in refs]
+    refs += [f"asset:{a}" for a in attachments]
     if len(refs) > MAX_REFERENCES:
         raise ExpError(
             f"At most {MAX_REFERENCES} pictures per message, the current image included."
         )
-    turn.mode, turn.references = mode, refs
+    turn.mode, turn.references, turn.offered = mode, refs, list(refs)
     turn.from_upload = any(_from_upload(r, turns) for r in refs)
     if mode == "exact":
-        if len(text) > MAX_PROMPT_CHARS:
+        # "#3" in an exact prompt becomes the picture it is sent as.
+        prompt = sub_mentions(text, lambda n: f"<Picture {refs.index(labels[n]) + 1}>")
+        if len(prompt) > MAX_PROMPT_CHARS:
             raise ExpError(f"The prompt is longer than {MAX_PROMPT_CHARS} characters.")
-        turn.prompt = text
-        if missing := cited_beyond(text, len(refs)):
+        turn.prompt = prompt
+        if missing := cited_beyond(prompt, len(refs)):
             raise ExpError(
                 f"The prompt cites {', '.join(missing)}, but this message sends "
                 f"{len(refs)} picture{'s' if len(refs) != 1 else ''}."
             )
+    turn.auto_size = (size or session.size) == "auto"
     turn.size = _size_for(size or session.size, refs, turns, assets)
     return turn
 
@@ -223,17 +334,74 @@ def _from_upload(ref: str, turns: list[ExpTurn]) -> bool:
         if made is None:
             return True
         todo.extend(made.references)
+        todo.extend(made.offered)
     return False
+
+
+def likeness_of(ref: str, turns: list[ExpTurn]) -> bool | None:
+    """Whether a picture shows a real person's likeness: True/False for results judged when
+    they were made, None for uploads (the model judges who is in them) and older results."""
+    kind, ident, _ = parse_ref(ref)
+    if kind == "asset":
+        return None
+    made = next((t for t in turns if t.turn_id == ident), None)
+    return made.likeness if made is not None else None
 
 
 def picture_kind(ref: str, turns: list[ExpTurn]) -> str:
     """How the content rules see a picture (see content_guard rule 3)."""
     kind, _, _ = parse_ref(ref)
     if kind == "asset":
-        return "uploaded photo"
-    if _from_upload(ref, turns):
-        return "uploaded photo, as edited in this chat (may show a real person)"
-    return "generated image (made in this chat from text only)"
+        return (
+            "uploaded photo (judge whether it shows an identifiable real person, and whether "
+            "this message takes their likeness or only clothing, a place or an object)"
+        )
+    match likeness_of(ref, turns):
+        case True:
+            return "made in this chat; shows a real person's likeness"
+        case False:
+            return "made in this chat; no real person's likeness (fictional)"
+    return (
+        "made in this chat before likeness was tracked: judge from the picture and the "
+        "prompt that made it whether it shows a real person's likeness"
+    )
+
+
+ANCESTRY_STEPS = 30
+ANCESTRY_PROMPT_CHARS = 800
+
+
+def ancestry(turn: ExpTurn, by_id: dict[str, ExpTurn]) -> list[dict[str, str]]:
+    """The messages and prompts an image was made from, back to where its chain started
+    (oldest first): what a likeness judgment needs when none was stored, however far back
+    a real person was named."""
+    seen: set[str] = set()
+    chain: list[ExpTurn] = []
+    todo = [turn]
+    while todo and len(chain) < ANCESTRY_STEPS:
+        t = todo.pop()
+        if t.turn_id in seen:
+            continue
+        seen.add(t.turn_id)
+        chain.append(t)
+        for ref in [*t.references, *t.offered]:
+            kind, ident, _ = parse_ref(ref)
+            if kind == "turn" and ident in by_id:
+                todo.append(by_id[ident])
+    return [
+        {"message": t.text, "prompt": t.prompt[:ANCESTRY_PROMPT_CHARS]}
+        for t in sorted(chain, key=lambda t: t.index)
+        if t.mode != "upload"
+    ]
+
+
+def inherited_likeness(turn: ExpTurn, turns: list[ExpTurn]) -> bool:
+    """The floor under the model's own judgment: a result keeps the likeness of the picture
+    it changes (<Picture 1>), and a result made from no picture after the writer looked at
+    one with a likeness keeps it too (it may describe that person)."""
+    if turn.references:
+        return likeness_of(turn.references[0], turns) is True
+    return any(likeness_of(r, turns) is True for r in turn.offered)
 
 
 def _size_for(
@@ -277,10 +445,12 @@ WRITER_GUIDE = """\
 ## Your input
 
 - `message`: what the user wants now.
-- `pictures`: the pictures this message sends, in order, as <Picture 1>, <Picture 2>, ... \
-Each is attached to this request right after its label, so look at them. <Picture 1> is \
-normally the current image (the one the user is changing); later pictures are images the user \
-attached to this message.
+- `pictures`: the pictures offered with this message, each attached to this request right \
+after its label, so look at them. Each has an `id` (#7): every image in the chat has a \
+number, and the user refers to earlier images by it ("hair like #3", "go back to #5"). By \
+default <Picture 1> is the current image (the one the user is changing), then the earlier \
+images the message mentions, then images attached to this message. `made_by_prompt` is the \
+prompt that made a picture, when it came from this chat.
 - `current_image_prompt`: the prompt that made the current image, when it came from this chat. \
 Treat it as the description of <Picture 1>; it does not need to be repeated.
 - `history`: earlier messages and the prompts written for them, oldest first, for context \
@@ -300,7 +470,13 @@ End with "No other lettering is added." unless the user wants text in the image.
 end with "The image contains no text, letters or numbers." unless the user wants text.
 - Turn vague wishes into visible details (not "more professional" but what makes it look so). \
 Keep names as the user wrote them. Write in English; quote any lettering exactly.
-- Never cite a picture that is not listed.
+- Never cite a picture that is not listed. Never write "#7" in the prompt: the image model \
+only knows <Picture N>.
+- Choosing the pictures: return `pictures`, the ids to send, in <Picture N> order. Put the \
+image to change first: usually the current image, but the mentioned image when the user wants \
+to start from it ("go back to #3 and add a hat": just #3; "like #3 but with #5's jacket": \
+#3 then #5). Leave out pictures the result doesn't need. Number the prompt's <Picture N> by \
+your list. Return null to send them as offered.
 
 ## What may be drawn
 
@@ -308,29 +484,43 @@ Each picture has a `kind`. These rules decide what you may write a prompt for:
 
 {rules}
 
+{mode}
+
+Also return `real_person`: whether the person in the image you're asking for has a real \
+person's likeness (rule 3): kept from a picture that has one, taken from an identifiable \
+person in an uploaded photo (anyone whose face is visible in one counts), or because the \
+message makes someone resemble a named or described real person. An uploaded photo used only \
+for its clothing, a place or an object gives no likeness. For a picture made before likeness \
+was tracked, read its `ancestry` (the messages and prompts it was made from, oldest first).
+
 If the request breaks a rule, don't write a prompt: return allowed=false, an empty prompt, and \
 in `refusal` one short sentence to the user naming the rule. Don't write a toned-down version \
 of a refused request.
 
 ## Output
 
-Return {{"allowed": true, "prompt": ..., "reply": ..., "refusal": ""}}: `prompt` is the prompt \
-only, as plain text; `reply` is one or two short sentences to the user saying what you \
+Return {{"allowed": true, "real_person": false, "pictures": ["#3", ...] or null, "prompt": ..., "reply": ..., \
+"refusal": ""}}: `prompt` is the prompt only, as plain text; `reply` is one or two short sentences to the user saying what you \
 changed or how you read the request (no prompt text in it).\
 """
 
 
 class ExpPromptOutput(BaseModel):
     allowed: bool = True
+    # Required: an answer without it is a failed rewrite (the message then goes through
+    # the content check), never a silent "no likeness".
+    real_person: bool
+    # Ids of the pictures to send, in <Picture N> order; None: as offered.
+    pictures: list[str] | None = None
     prompt: str = ""
     reply: str = ""
     refusal: str = ""
 
 
-def writer_instructions() -> str:
+def writer_instructions(restrictive: bool = False) -> str:
     from .prompts import load_h3_image_examples, load_h3_image_rules
 
-    guide = WRITER_GUIDE.format(rules=CONTENT_RULES)
+    guide = WRITER_GUIDE.format(rules=CONTENT_RULES, mode=mode_rule(restrictive))
     parts = [WRITER_ROLE, load_h3_image_rules(), load_h3_image_examples(), guide]
     return "\n\n".join(parts)
 
@@ -348,7 +538,9 @@ def fixture_prompt(request: GenerationRequest) -> ExpPromptOutput:
         )
     else:
         prompt = f"A photograph: {msg}. The image contains no text, letters or numbers."
-    return ExpPromptOutput(prompt=prompt, reply="Offline sample: your message, lightly wrapped.")
+    return ExpPromptOutput(
+        real_person=False, prompt=prompt, reply="Offline sample: your message, lightly wrapped."
+    )
 
 
 def _aspect(size: str) -> str:
@@ -395,12 +587,12 @@ class ExperimentRunner:
         turn.status = "running"
         self.repo.save_exp_turn(turn)
         try:
-            # Read in a thread: up to nine images of several MB each.
-            refs = await asyncio.to_thread(self._references, turn)
             if not turn.prompt:
-                await self._write_prompt(turn)
+                await self._write_prompt(turn)  # may choose which pictures to send
                 self.repo.save_exp_turn(turn)
             await self._guard(turn)
+            # Read in a thread: up to nine images of several MB each.
+            refs = await asyncio.to_thread(self._references, turn)
             for n in range(len(turn.results), turn.draws):
                 seed = random.randint(1, 2**31 - 1)
                 async with self._gpu:
@@ -411,8 +603,15 @@ class ExperimentRunner:
                 from .images import make_thumb
 
                 thumb = await asyncio.to_thread(make_thumb, self.media, rel)
+                [label] = self.repo.allocate_exp_labels(turn.session_id, 1)
                 turn.results.append(
-                    ExpResult(file=rel, thumb=thumb, content_type=result.content_type, seed=seed)
+                    ExpResult(
+                        label=label,
+                        file=rel,
+                        thumb=thumb,
+                        content_type=result.content_type,
+                        seed=seed,
+                    )
                 )
                 self.repo.save_exp_turn(turn)  # each draw shows as soon as it's done
         except asyncio.CancelledError:
@@ -513,9 +712,18 @@ class ExperimentRunner:
                 what = "an image the user uploaded earlier"
             if i == 1:
                 what = f"the current image: {what}"
-            parts.append(
-                {"picture": f"<Picture {i}>", "what": what, "kind": picture_kind(ref, turns)}
-            )
+            label = turn_label(turn, ref, turns)
+            part = {
+                "picture": f"<Picture {i}>",
+                "id": f"#{label}" if label is not None else "",
+                "what": what,
+                "kind": picture_kind(ref, turns),
+            }
+            if kind == "turn" and ident in made:
+                part["made_by_prompt"] = made[ident].prompt
+                if made[ident].likeness is None:  # older: let the model read where it came from
+                    part["ancestry"] = ancestry(made[ident], made)
+            parts.append(part)
             path, mime = self.ref_file(ref, variant="thumb")  # the model only needs to see it
             if path is not None:
                 media.append(MediaPart(label=f"<Picture {i}>", path=path, mime=mime))
@@ -528,8 +736,19 @@ class ExperimentRunner:
         if reason := text_guard(turn.prompt) or text_guard(turn.text):
             raise GuardRefused(reason)
         if turn.prompt_model is None:
-            parts, media, _, _ = self._for_model(turn)
-            await screen(self.writer_client, turn.prompt, pictures=parts, media=media)
+            parts, media, _, turns = self._for_model(turn)
+            verdict = await screen(
+                self.writer_client,
+                turn.prompt,
+                pictures=parts,
+                media=media,
+                message=turn.text if turn.text != turn.prompt else None,
+                restrictive=turn.restrictive,
+            )
+            # Only ever adds a likeness (the writer may already have found one).
+            turn.likeness = (
+                turn.likeness is True or verdict.real_person or inherited_likeness(turn, turns)
+            )
 
     async def _write_prompt(self, turn: ExpTurn) -> None:
         if reason := text_guard(turn.text):  # clear cases need no model call
@@ -542,7 +761,7 @@ class ExperimentRunner:
         ][-HISTORY_TURNS:]
         request = GenerationRequest(
             stage=STAGE,  # type: ignore[arg-type]
-            instructions=writer_instructions(),
+            instructions=writer_instructions(turn.restrictive),
             context={
                 "message": turn.text,
                 "pictures": parts,
@@ -561,6 +780,13 @@ class ExperimentRunner:
             return
         if not out.allowed:
             raise GuardRefused(out.refusal.strip() or "This image isn't allowed here.")
+        offered = list(turn.references)
+        if out.pictures is not None:
+            chosen = self._choose(turn, out.pictures, turns)
+            if chosen is None:
+                self._send_as_written(turn, ValueError(f"unknown pictures {out.pictures}"))
+                return
+            self._set_references(turn, chosen, turns)
         prompt = out.prompt.strip()
         problem = (
             "the writer returned an empty prompt"
@@ -573,21 +799,54 @@ class ExperimentRunner:
             else None
         )
         if problem:
+            self._set_references(turn, offered, turns)  # the writer's choice goes with it
             self._send_as_written(turn, ValueError(problem))
             return
         turn.prompt = prompt
         turn.reply = out.reply.strip()
         turn.prompt_model = request.model
+        turn.likeness = out.real_person or inherited_likeness(turn, turns)
+
+    def _choose(self, turn: ExpTurn, ids: list[str], turns: list[ExpTurn]) -> list[str] | None:
+        """The references for the writer's picture ids, or None if one wasn't offered."""
+        offered = {f"#{turn_label(turn, r, turns)}": r for r in turn.references}
+        chosen = [offered.get(i.strip()) for i in ids]
+        if any(c is None for c in chosen) or len(set(ids)) != len(ids):
+            return None
+        return [c for c in chosen if c is not None]
+
+    def _set_references(self, turn: ExpTurn, refs: list[str], turns: list[ExpTurn]) -> None:
+        """Send these pictures instead; lineage and an automatic size follow."""
+        if refs == turn.references:
+            return
+        turn.references = refs
+        # What the writer saw counts too (see ExpTurn.offered).
+        turn.from_upload = any(_from_upload(r, turns) for r in [*refs, *turn.offered])
+        if turn.auto_size:
+            assets = self.repo.get_source_assets(
+                [r.removeprefix("asset:") for r in refs if r.startswith("asset:")]
+            )
+            turn.size = _size_for("auto", refs, turns, assets)
 
     def _send_as_written(self, turn: ExpTurn, exc: Exception) -> None:
         """Fallback when the writer fails: the message is the prompt, with the same checks
-        as an exact prompt (prompt_model stays None, so _guard screens it)."""
-        if missing := cited_beyond(turn.text, len(turn.references)):
+        as an exact prompt (prompt_model stays None, so _guard screens it). "#3" becomes the
+        picture it is sent as."""
+        turns = self.repo.list_exp_turns(turn.session_id)
+
+        def picture(n: int) -> str | None:
+            for i, ref in enumerate(turn.references, 1):
+                if turn_label(turn, ref, turns) == n:
+                    return f"<Picture {i}>"
+            return None
+
+        text = sub_mentions(turn.text, picture)
+        if missing := cited_beyond(text, len(turn.references)):
             raise ExpError(
                 f"Couldn't rewrite your message ({exc}), and as written it cites "
                 f"{', '.join(missing)}, which this message doesn't send."
             ) from exc
-        turn.prompt = turn.text
+        turn.prompt = text
         turn.reply = (
             f"Couldn't rewrite your message ({exc}); sent it to the image model as written."
         )

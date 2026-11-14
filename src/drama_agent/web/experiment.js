@@ -18,9 +18,18 @@ const exp = {
   error: "",
   sending: {},  // session id -> label of the send in progress ("Uploading 1 of 2…")
   renaming: false,  // the title is being edited: polls leave the header alone
+  labels: {},  // image numbers of the open chat, by reference (see labelsOf)
+  likeness: {},  // results that show a real person's likeness, by reference
 };
 
 const EXP_POLL_MS = 1000;
+
+// Restrictive mode: a top-of-page switch, off by default, remembered in this browser.
+const restrictiveBox = document.getElementById("restrictive");
+try { restrictiveBox.checked = localStorage.getItem("drama.restrictive") === "1"; } catch { /* storage blocked */ }
+restrictiveBox.addEventListener("change", () => {
+  try { localStorage.setItem("drama.restrictive", restrictiveBox.checked ? "1" : "0"); } catch { /* storage blocked */ }
+});
 const expBusy = (v) => v && v.turns.some((t) => t.status === "pending" || t.status === "running");
 const inExp = () => document.body.dataset.mode === "exp";
 
@@ -166,9 +175,34 @@ async function patchExp(body) {
 
 // Main view ------------------------------------------------------------------------
 
+// Image numbers (#7) by reference string ("asset:<id>", "turn:<id>:<n>").
+function labelsOf(v) {
+  const out = {};
+  for (const t of v.turns) {
+    t.attachments.forEach((a, i) => { if (t.attachment_labels[i] != null) out[`asset:${a}`] = t.attachment_labels[i]; });
+    t.results.forEach((r, n) => { if (r.label != null) out[`turn:${t.turn_id}:${n}`] = r.label; });
+  }
+  return out;
+}
+
+function insertMention(n) {
+  const el = exp.el.text, d = expDraft(exp.sid);
+  const at = el.selectionStart ?? el.value.length;
+  const before = el.value.slice(0, at), after = el.value.slice(el.selectionEnd ?? at);
+  const token = `${before && !/\s$/.test(before) ? " " : ""}#${n} `;
+  el.value = before + token + after;
+  d.text = el.value;
+  el.focus();
+  el.selectionStart = el.selectionEnd = before.length + token.length;
+  updateSendButton();
+}
+
 function renderExp() {
   const v = exp.view;
   if (!v) return;
+  exp.labels = labelsOf(v);
+  exp.likeness = {};
+  for (const t of v.turns) t.results.forEach((_, n) => { if (t.likeness) exp.likeness[`turn:${t.turn_id}:${n}`] = true; });
   if (exp.mounted !== v.session.session_id) mountExp(v);
   const nearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 120;
   const before = exp.el.transcript.childElementCount;
@@ -190,7 +224,7 @@ function mountExp(v) {
   el.transcript = h("div", { class: "exp-transcript" });
   el.text = h("textarea", {
     rows: 3, "aria-label": "Message",
-    placeholder: "Describe the change, e.g. \"gather her hair into a low bun at the nape\" (Enter to send, Shift+Enter for a new line)",
+    placeholder: "Describe the change, e.g. \"gather her hair into a low bun\". Refer to earlier images by number: \"go back to #3 and add a hat\", \"hair like #4\". (Enter to send, Shift+Enter for a new line)",
     oninput: (e) => { d.text = e.target.value; updateSendButton(); },
     onkeydown: (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -318,8 +352,11 @@ function renderTurn(t) {
   const meta = [
     t.size,
     t.results.length && `seed${t.results.length > 1 ? "s" : ""} ${t.results.map((r) => r.seed).join(", ")}`,
-    t.references.length ? `${t.references.length} picture${t.references.length > 1 ? "s" : ""} sent` : "new image (no picture)",
+    t.references.length
+      ? `sent ${t.references.map((r) => (exp.labels[r] != null ? `#${exp.labels[r]}` : "an image")).join(", ")}`
+      : "new image (no picture)",
     t.prompt_model && `prompt by ${t.prompt_model}`,
+    t.restrictive && "restrictive mode",
   ].filter(Boolean).join(" · ");
   const bot = h("div", { class: "exp-msg bot" },
     h("div", { class: "bubble" },
@@ -344,14 +381,20 @@ function renderTurn(t) {
 
 function expImage(ref, current, label, result) {
   const isCurrent = ref === current;
+  const n = exp.labels[ref];
   return h("figure", { class: `exp-image${isCurrent ? " current" : ""}` },
     h("a", { href: refUrl(ref, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
-      h("img", { src: refUrl(ref, "thumb"), alt: label, loading: "lazy" })),
+      h("img", { src: refUrl(ref, "thumb"), alt: n != null ? `#${n} ${label}` : label, loading: "lazy" })),
     h("figcaption", {},
+      n != null && h("button", {
+        type: "button", class: "exp-id", title: `Image #${n}: click to mention it in your message`,
+        onclick: () => insertMention(n),
+      }, `#${n}`),
       isCurrent
         ? h("span", { class: "chip accent" }, "current")
         : h("button", { type: "button", class: "btn small", disabled: expBusy(exp.view), onclick: () => patchExp({ current: ref }) }, "Edit this one"),
       result && h("span", { class: "muted small" }, `seed ${result.seed}`),
+      result && exp.likeness[ref] && h("span", { class: "chip warn", title: "Shows a real person's likeness: nothing intimate or revealing can be made from it" }, "real-person likeness"),
     ),
   );
 }
@@ -401,7 +444,7 @@ function renderComposer(v) {
     ? h("div", { class: "exp-current-row" },
       h("img", { src: refUrl(current), alt: "Current image" }),
       h("div", {},
-        h("strong", {}, "Editing the current image"),
+        h("strong", {}, `Editing the current image${exp.labels[current] != null ? ` (#${exp.labels[current]})` : ""}`),
         h("div", { class: "muted small" }, d.files.length ? `Sent as <Picture 1>; your attachments follow as <Picture 2>${d.files.length > 1 ? `–${d.files.length + 1}` : ""}.` : "Sent as <Picture 1> with your message.")),
       h("button", { type: "button", class: "btn ghost small", disabled: busy, onclick: () => patchExp({ clear_current: true }) }, "Start a new image"))
     : h("div", { class: "muted small" }, d.files.length
@@ -472,7 +515,7 @@ async function sendExp() {
     progress("Sending…");
     await api(`/v1/experiments/${encodeURIComponent(sid)}/turns`, {
       method: "POST",
-      body: JSON.stringify({ text: d.text, attachments: files.map((f) => f.asset.asset_id), mode: d.mode, draws: d.draws }),
+      body: JSON.stringify({ text: d.text, attachments: files.map((f) => f.asset.asset_id), mode: d.mode, draws: d.draws, restrictive: restrictiveBox.checked }),
     });
     for (const f of files) URL.revokeObjectURL(f.url);
     d.files = [];

@@ -19,9 +19,10 @@ from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
-# v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns. Each step is additive, so older files upgrade in
+# v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns.
+# v7: exp_sessions.next_label. Each step is additive, so older files upgrade in
 # place (see _migrate).
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -106,7 +107,8 @@ CREATE INDEX IF NOT EXISTS design_options_pkg ON design_options (package_id, rev
 CREATE TABLE IF NOT EXISTS exp_sessions (
     session_id  TEXT PRIMARY KEY,
     updated_at  TEXT NOT NULL,
-    data        TEXT NOT NULL
+    data        TEXT NOT NULL,
+    next_label  INTEGER NOT NULL DEFAULT 1  -- next image number (#N); saves don't touch it
 );
 CREATE TABLE IF NOT EXISTS exp_turns (
     turn_id     TEXT PRIMARY KEY,
@@ -152,6 +154,11 @@ class SqliteRepository:
         if "pause_requested" not in cols:
             self._conn.execute(
                 "ALTER TABLE job_queue ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
+            )
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(exp_sessions)")}
+        if "next_label" not in cols:
+            self._conn.execute(
+                "ALTER TABLE exp_sessions ADD COLUMN next_label INTEGER NOT NULL DEFAULT 1"
             )
 
     def close(self) -> None:
@@ -592,6 +599,20 @@ class SqliteRepository:
             t.status, t.error, t.finished_at = "failed", error, utcnow()
             self.save_exp_turn(t)
         return len(rows)
+
+    def allocate_exp_labels(self, session_id: str, n: int) -> list[int]:
+        """The next n image numbers of a chat (1, 2, ...), never handed out twice. One
+        atomic UPDATE, so the API and the runner can't hand out the same number."""
+        with self._lock:
+            row = self._conn.execute(
+                "UPDATE exp_sessions SET next_label = next_label + ? WHERE session_id = ? "
+                "RETURNING next_label",
+                (n, session_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(session_id)
+        end = row[0]
+        return list(range(end - n, end))
 
     def asset_in_use(self, asset_id: str) -> bool:
         """Whether a job, a reference image or a chat message uses this upload. Asset ids
