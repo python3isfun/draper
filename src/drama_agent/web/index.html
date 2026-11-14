@@ -12,11 +12,16 @@
       <span class="brand-mark" aria-hidden="true">▶</span>
       <span>Drama Agent</span>
     </div>
+    <nav class="modes" aria-label="Sections">
+      <a href="#" data-mode="drama" class="active" aria-current="page">Drama</a>
+      <a href="#exp" data-mode="exp">Experiment</a>
+    </nav>
     <div class="topbar-meta" id="meta">…</div>
   </header>
 
   <div class="layout">
     <aside class="sidebar">
+      <div id="drama-side" class="sidebar-pane">
       <form id="new-job" class="card new-job">
         <h2>New job</h2>
         <div id="offline-note" class="banner warn compact" hidden>
@@ -86,11 +91,25 @@
         </div>
         <ul id="job-list" class="job-list"></ul>
       </section>
+      </div>
+
+      <div id="exp-side" class="sidebar-pane" hidden>
+        <section class="card">
+          <h2>Image chat</h2>
+          <p class="hint">Upload a base image, then describe changes. Each message edits the current image with the image model, and the whole chat is kept.</p>
+          <button type="button" class="btn primary" id="new-exp">New chat</button>
+        </section>
+        <section class="jobs">
+          <div class="section-head"><h2>Chats</h2></div>
+          <ul id="exp-list" class="job-list"></ul>
+        </section>
+      </div>
     </aside>
 
     <main id="main" class="main"></main>
   </div>
 
   <script src="app.js"></script>
+  <script src="experiment.js"></script>
 </body>
 </html>

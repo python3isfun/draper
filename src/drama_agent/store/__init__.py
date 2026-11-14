@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from ..experiment import ExpSession, ExpTurn
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
@@ -49,6 +50,17 @@ class Repository(Protocol):
         self, package_id: str, revision_id: str | None = None
     ) -> list[DesignOption]: ...
     def requeue_running_images(self, older_than_s: float = 0.0) -> int: ...
+    # Experiment chat sessions
+    def save_exp_session(self, session: ExpSession) -> None: ...
+    def get_exp_session(self, session_id: str) -> ExpSession | None: ...
+    def list_exp_sessions(self) -> list[ExpSession]: ...
+    def delete_exp_session(self, session_id: str) -> None: ...
+    def save_exp_turn(self, turn: ExpTurn) -> None: ...
+    def get_exp_turn(self, turn_id: str) -> ExpTurn | None: ...
+    def list_exp_turns(self, session_id: str) -> list[ExpTurn]: ...
+    def fail_unfinished_exp_turns(self, error: str) -> int: ...
+    def asset_in_use(self, asset_id: str) -> bool: ...
+    def delete_source_asset(self, asset_id: str) -> None: ...
 
 
 class InMemoryRepository:
@@ -69,6 +81,8 @@ class InMemoryRepository:
         self.llm_calls: dict[str, LLMCall] = {}
         self.images: dict[str, GeneratedImage] = {}
         self.options: dict[str, DesignOption] = {}
+        self.exp_sessions: dict[str, ExpSession] = {}
+        self.exp_turns: dict[str, ExpTurn] = {}
 
     def save_source_asset(self, asset_id: str, meta: dict[str, Any]) -> None:
         self.source_assets[asset_id] = meta
@@ -232,6 +246,59 @@ class InMemoryRepository:
             if img.status == "running" and started <= cutoff:
                 img.status, img.started_at, n = "pending", None, n + 1
         return n
+
+    # Experiment chat sessions ------------------------------------------------
+
+    def save_exp_session(self, session: ExpSession) -> None:
+        self.exp_sessions[session.session_id] = session.model_copy(deep=True)
+
+    def get_exp_session(self, session_id: str) -> ExpSession | None:
+        s = self.exp_sessions.get(session_id)
+        return s.model_copy(deep=True) if s else None
+
+    def list_exp_sessions(self) -> list[ExpSession]:
+        """Most recently active first."""
+        return [
+            s.model_copy(deep=True)
+            for s in sorted(self.exp_sessions.values(), key=lambda s: s.updated_at, reverse=True)
+        ]
+
+    def delete_exp_session(self, session_id: str) -> None:
+        self.exp_sessions.pop(session_id, None)
+        for tid in [t.turn_id for t in self.exp_turns.values() if t.session_id == session_id]:
+            del self.exp_turns[tid]
+
+    def save_exp_turn(self, turn: ExpTurn) -> None:
+        self.exp_turns[turn.turn_id] = turn.model_copy(deep=True)
+
+    def get_exp_turn(self, turn_id: str) -> ExpTurn | None:
+        t = self.exp_turns.get(turn_id)
+        return t.model_copy(deep=True) if t else None
+
+    def list_exp_turns(self, session_id: str) -> list[ExpTurn]:
+        return [
+            t.model_copy(deep=True)
+            for t in sorted(self.exp_turns.values(), key=lambda t: t.index)
+            if t.session_id == session_id
+        ]
+
+    def fail_unfinished_exp_turns(self, error: str) -> int:
+        n = 0
+        for t in self.exp_turns.values():
+            if t.status in ("pending", "running"):
+                t.status, t.error, t.finished_at, n = "failed", error, utcnow(), n + 1
+        return n
+
+    def asset_in_use(self, asset_id: str) -> bool:
+        """Whether a job, a reference image or a chat message uses this upload."""
+        return (
+            any(asset_id in j.model_dump_json() for j in self.jobs.values())
+            or any(asset_id in i.reference_ids for i in self.images.values())
+            or any(asset_id in t.attachments for t in self.exp_turns.values())
+        )
+
+    def delete_source_asset(self, asset_id: str) -> None:
+        self.source_assets.pop(asset_id, None)
 
 
 def __getattr__(name: str) -> Any:

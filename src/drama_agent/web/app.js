@@ -77,6 +77,15 @@ function go(jobId, tab = "overview") {
 window.addEventListener("hashchange", route);
 
 async function route() {
+  const params = new URLSearchParams(location.hash.slice(1));
+  if (params.has("exp")) {
+    clearTimeout(state.pollTimer);
+    stopActivity();
+    await expRoute(params.get("exp") || null);
+    return;
+  }
+  stopExp();
+  setMode("drama");
   const { job, tab } = readHash();
   state.tab = tab;
   clearTimeout(state.pollTimer);
@@ -414,6 +423,8 @@ document.addEventListener("selectionchange", () => {
 });
 
 function renderMain() {
+  // A drama poll that lands while the Experiment tab is open must not draw over it.
+  if (document.body.dataset.mode === "exp") return;
   const main = $("#main");
   const job = state.job;
   if (!readHash().job) {

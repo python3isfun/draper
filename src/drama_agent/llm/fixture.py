@@ -76,6 +76,10 @@ class FixtureModelClient:
                     if output_model is ImageTakesOutput
                     else fixture_prompts(request)
                 )
+            case "experiment":
+                from ..experiment import fixture_prompt
+
+                output = fixture_prompt(request)
             case _:
                 raise ValueError(f"unknown stage {request.stage}")
 

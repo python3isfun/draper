@@ -13,14 +13,15 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from ..experiment import ExpSession, ExpTurn
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
-# v4: generated_images. v5: design_options. Each step is additive, so older files upgrade in
+# v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns. Each step is additive, so older files upgrade in
 # place (see _migrate).
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -102,6 +103,19 @@ CREATE TABLE IF NOT EXISTS design_options (
     data        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS design_options_pkg ON design_options (package_id, revision_id);
+CREATE TABLE IF NOT EXISTS exp_sessions (
+    session_id  TEXT PRIMARY KEY,
+    updated_at  TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS exp_turns (
+    turn_id     TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    idx         INTEGER NOT NULL,
+    status      TEXT NOT NULL,              -- pending | running | done | failed
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS exp_turns_session ON exp_turns (session_id, idx);
 """
 
 
@@ -516,3 +530,80 @@ class SqliteRepository:
             self.save_image(img)
             n += 1
         return n
+
+    # Experiment chat sessions ------------------------------------------------
+
+    def save_exp_session(self, session: ExpSession) -> None:
+        self._exec(
+            "INSERT INTO exp_sessions (session_id, updated_at, data) VALUES (?, ?, ?) "
+            "ON CONFLICT (session_id) DO UPDATE SET updated_at = excluded.updated_at, "
+            "data = excluded.data",
+            (session.session_id, session.updated_at.isoformat(), session.model_dump_json()),
+        )
+
+    def get_exp_session(self, session_id: str) -> ExpSession | None:
+        raw = self._one("SELECT data FROM exp_sessions WHERE session_id = ?", (session_id,))
+        return ExpSession.model_validate_json(raw) if raw else None
+
+    def list_exp_sessions(self) -> list[ExpSession]:
+        """Most recently active first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM exp_sessions ORDER BY updated_at DESC"
+            ).fetchall()
+        return [ExpSession.model_validate_json(r[0]) for r in rows]
+
+    def delete_exp_session(self, session_id: str) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM exp_turns WHERE session_id = ?", (session_id,))
+                self._conn.execute("DELETE FROM exp_sessions WHERE session_id = ?", (session_id,))
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            self._conn.execute("COMMIT")
+
+    def save_exp_turn(self, turn: ExpTurn) -> None:
+        self._exec(
+            "INSERT INTO exp_turns (turn_id, session_id, idx, status, data) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (turn_id) DO UPDATE SET status = excluded.status, data = excluded.data",
+            (turn.turn_id, turn.session_id, turn.index, turn.status, turn.model_dump_json()),
+        )
+
+    def get_exp_turn(self, turn_id: str) -> ExpTurn | None:
+        raw = self._one("SELECT data FROM exp_turns WHERE turn_id = ?", (turn_id,))
+        return ExpTurn.model_validate_json(raw) if raw else None
+
+    def list_exp_turns(self, session_id: str) -> list[ExpTurn]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM exp_turns WHERE session_id = ? ORDER BY idx", (session_id,)
+            ).fetchall()
+        return [ExpTurn.model_validate_json(r[0]) for r in rows]
+
+    def fail_unfinished_exp_turns(self, error: str) -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM exp_turns WHERE status IN ('pending', 'running')"
+            ).fetchall()
+        for (raw,) in rows:
+            t = ExpTurn.model_validate_json(raw)
+            t.status, t.error, t.finished_at = "failed", error, utcnow()
+            self.save_exp_turn(t)
+        return len(rows)
+
+    def asset_in_use(self, asset_id: str) -> bool:
+        """Whether a job, a reference image or a chat message uses this upload. Asset ids
+        are random and unique, so finding the id in a stored document means it's used."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM jobs WHERE instr(data, ?) "
+                "UNION ALL SELECT 1 FROM generated_images WHERE instr(data, ?) "
+                "UNION ALL SELECT 1 FROM exp_turns WHERE instr(data, ?) LIMIT 1",
+                (asset_id, asset_id, asset_id),
+            ).fetchone()
+        return row is not None
+
+    def delete_source_asset(self, asset_id: str) -> None:
+        self._exec("DELETE FROM source_assets WHERE asset_id = ?", (asset_id,))

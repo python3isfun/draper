@@ -27,6 +27,19 @@ from ..config import (
     repo_from_env,
     worker_settings,
 )
+from ..experiment import (
+    MAX_DRAWS,
+    ExperimentRunner,
+    ExpError,
+    ExpSession,
+    ExpTurn,
+    is_busy,
+    known_refs,
+    new_session,
+    plan_turn,
+)
+from ..experiment import MAX_PROMPT_CHARS as EXP_MAX_PROMPT_CHARS
+from ..experiment import SIZES as EXP_SIZES
 from ..export import build_export
 from ..image_prompts import MAX_PROMPT_CHARS, ImagePromptWriter, problems
 from ..imagegen import FixtureImageClient, ImageClient
@@ -66,6 +79,7 @@ from ..models import (
 )
 from ..models.design_sheets import SHEET_SCHEMAS
 from ..models.images import DesignOption, GeneratedImage
+from ..models.package import utcnow
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
@@ -180,6 +194,31 @@ class EditTakeRequest(BaseModel):
     draws: int | None = Field(None, ge=1, le=6)  # default: as many as the source take has
 
 
+class ExpSessionCreate(BaseModel):
+    title: str | None = Field(None, max_length=120)
+
+
+class ExpSessionPatch(BaseModel):
+    title: str | None = Field(None, min_length=1, max_length=120)
+    size: str | None = None  # "auto" or one of EXP_SIZES
+    current: str | None = None  # an image of the session: "asset:<id>" or "turn:<id>:<n>"
+    clear_current: bool = False  # the next message makes a new image (text to image)
+
+
+class ExpTurnRequest(BaseModel):
+    text: str = Field("", max_length=EXP_MAX_PROMPT_CHARS)
+    attachments: list[str] = Field(default_factory=list, max_length=9)  # source asset ids
+    mode: Literal["rewrite", "exact"] = "rewrite"
+    draws: int = Field(1, ge=1, le=MAX_DRAWS)
+    size: str | None = None  # overrides the session's size for this message
+
+
+class ExpSessionView(BaseModel):
+    session: ExpSession
+    turns: list[ExpTurn]
+    sizes: dict[str, str]  # aspect ratio -> size
+
+
 EXPORT_DIR = Path(tempfile.gettempdir()) / "drama-exports"
 EXPORT_MAX_AGE_S = 3600
 
@@ -235,11 +274,14 @@ def create_app(
     images = image_client or FixtureImageClient()
     wakeup = asyncio.Event()
     image_wakeup = asyncio.Event()
+    experiments = ExperimentRunner(repo, media, images, orchestrator.client)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         # Stories from before the app became English-only are archived, not deleted.
         archive_non_english(repo)
+        if n := experiments.recover():
+            log.info("marked %d interrupted experiment turns failed", n)
         n = recover(repo, queue)
         if n:
             log.info("enqueued %d unfinished jobs without a queue entry", n)
@@ -275,6 +317,7 @@ def create_app(
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await experiments.aclose()
             if close := getattr(images, "aclose", None):
                 await close()
 
@@ -582,6 +625,131 @@ def create_app(
         if rel is None:
             raise HTTPException(404, f"image is {img.status}")
         return _file(rel, "image/jpeg" if rel.endswith(".jpg") else img.content_type)
+
+    # Experiment: chat with the image model -------------------------------------
+
+    def _exp_session_or_404(session_id: str) -> ExpSession:
+        session = repo.get_exp_session(session_id)
+        if session is None:
+            raise HTTPException(404, "session not found")
+        return session
+
+    def _exp_view(session: ExpSession) -> ExpSessionView:
+        return ExpSessionView(
+            session=session, turns=repo.list_exp_turns(session.session_id), sizes=EXP_SIZES
+        )
+
+    @app.get("/v1/experiments", response_model=list[ExpSession])
+    async def list_experiments() -> list[ExpSession]:
+        return repo.list_exp_sessions()
+
+    @app.post("/v1/experiments", status_code=201, response_model=ExpSession)
+    async def create_experiment(req: ExpSessionCreate) -> ExpSession:
+        session = new_session(req.title)
+        repo.save_exp_session(session)
+        return session
+
+    @app.get("/v1/experiments/{session_id}", response_model=ExpSessionView)
+    async def get_experiment(session_id: str) -> ExpSessionView:
+        return _exp_view(_exp_session_or_404(session_id))
+
+    @app.patch("/v1/experiments/{session_id}", response_model=ExpSession)
+    async def update_experiment(session_id: str, req: ExpSessionPatch) -> ExpSession:
+        session = _exp_session_or_404(session_id)
+        if req.title is not None:
+            session.title = req.title.strip() or session.title
+        if req.size is not None:
+            if req.size != "auto" and req.size not in EXP_SIZES.values():
+                raise HTTPException(422, f"unsupported size {req.size}")
+            session.size = req.size
+        if (req.clear_current or req.current is not None) and is_busy(
+            repo.list_exp_turns(session_id)
+        ):
+            # The running message makes its result the current image when it finishes.
+            raise HTTPException(409, "Wait for the current image to finish first.")
+        if req.clear_current:
+            session.current = None
+        elif req.current is not None:
+            if req.current not in known_refs(repo.list_exp_turns(session_id)):
+                raise HTTPException(422, "that image is not part of this session")
+            session.current = req.current
+        session.updated_at = utcnow()
+        repo.save_exp_session(session)
+        return session
+
+    @app.delete("/v1/experiments/{session_id}", status_code=204)
+    async def delete_experiment(session_id: str) -> None:
+        _exp_session_or_404(session_id)
+        turns = repo.list_exp_turns(session_id)
+        if is_busy(turns):
+            raise HTTPException(409, "An image is still being made; delete when it's done.")
+        uploads = sorted({a for t in turns for a in t.attachments})
+        repo.delete_exp_session(session_id)
+        await asyncio.to_thread(experiments.delete_files, session_id, uploads)
+
+    @app.post("/v1/experiments/{session_id}/turns", status_code=202, response_model=ExpTurn)
+    async def send_experiment_turn(session_id: str, req: ExpTurnRequest) -> ExpTurn:
+        session = _exp_session_or_404(session_id)
+        turns = repo.list_exp_turns(session_id)
+        # Uploads: this message's, plus the current image when it is an earlier upload
+        # (its dimensions pick the "auto" size).
+        asset_ids = list(req.attachments)
+        if session.current and session.current.startswith("asset:"):
+            asset_ids.append(session.current.removeprefix("asset:"))
+        try:
+            turn = plan_turn(
+                session,
+                turns,
+                repo.get_source_assets(asset_ids),
+                text=req.text,
+                attachments=req.attachments,
+                mode=req.mode,
+                draws=req.draws,
+                size=req.size,
+            )
+        except ExpError as exc:
+            raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
+        repo.save_exp_turn(turn)
+        if turn.mode == "upload":
+            session.current = f"asset:{turn.attachments[0]}"
+        if session.title == "New chat" and turn.text:
+            session.title = turn.text[:60] + ("…" if len(turn.text) > 60 else "")
+        session.updated_at = turn.created_at
+        repo.save_exp_session(session)
+        if turn.status == "pending":
+            experiments.start(turn.turn_id)
+        return turn
+
+    def _exp_turn_or_404(turn_id: str) -> ExpTurn:
+        turn = repo.get_exp_turn(turn_id)
+        if turn is None:
+            raise HTTPException(404, "turn not found")
+        return turn
+
+    @app.post("/v1/experiment-turns/{turn_id}/retry", status_code=202, response_model=ExpTurn)
+    async def retry_experiment_turn(turn_id: str) -> ExpTurn:
+        """Run a failed turn again; draws already made and a prompt already written are kept."""
+        turn = _exp_turn_or_404(turn_id)
+        if turn.status != "failed":
+            raise HTTPException(409, "only a failed message can be retried")
+        if is_busy(repo.list_exp_turns(turn.session_id)):
+            raise HTTPException(409, "Wait for the current image to finish first.")
+        turn.status, turn.error, turn.finished_at = "pending", None, None
+        repo.save_exp_turn(turn)
+        experiments.start(turn.turn_id)
+        return turn
+
+    @app.get("/v1/experiment-turns/{turn_id}/results/{n}/{variant}", response_class=FileResponse)
+    async def experiment_result_file(
+        turn_id: str, n: int, variant: Literal["content", "thumb"]
+    ) -> FileResponse:
+        turn = _exp_turn_or_404(turn_id)
+        if not 0 <= n < len(turn.results):
+            raise HTTPException(404, "no such image")
+        r = turn.results[n]
+        if variant == "thumb" and r.thumb:
+            return _file(r.thumb, "image/jpeg")
+        return _file(r.file, r.content_type)
 
     @app.get("/v1/drama-jobs", response_model=list[JobSummary])
     async def list_jobs(

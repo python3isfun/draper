@@ -266,6 +266,36 @@ team one file to produce and shoot from. Inside a folder named after the title a
 Everything uses names, not IDs, where people read it. CSVs are UTF-8 with a BOM so Excel
 and Google Sheets open them correctly. Archived stories can't be exported.
 
+### Experiment: chat with the image model
+
+The **Experiment** tab (top bar) is a chat for trying MiniMax-H3-Image by hand. Chats are
+saved and listed on the left.
+
+1. **New chat**, then attach a base image (button or drag and drop) and send it without
+   text: it becomes the *current image* (outlined, marked "current").
+2. Describe a change ("gather her hair into a low bun at the nape"). The current image is
+   sent as `<Picture 1>`; images attached to the same message follow as `<Picture 2>`, ...
+   With no current image, a message makes a new image (text to image).
+3. **Rewrite with GPT** (default): the text model looks at the pictures, the prompt that
+   made the current image and the earlier messages, and writes a full H3 edit prompt
+   (what is preserved, what changes) with the shared H3 rules; its note says what it
+   changed. **Exact prompt** sends your text as written. Every reply shows the prompt
+   sent; **Edit this prompt** copies it into the box in Exact mode.
+4. The result becomes the current image, so the next message builds on it. **Edit this
+   one** makes any earlier result or upload current instead (branching); **Start a new
+   image** clears it. **Draws** (1–4) renders several seeds of the same prompt.
+
+Size: "match the current image" picks the H3 size nearest the current image's aspect
+ratio (about 16 MP), or choose one. One message runs at a time per chat; a failed one
+can be retried (a prompt already written is kept). With the offline fixture clients the
+replies and images are placeholders; real images need `DRAMA_MODEL_CLIENT=mcphub` (or
+`DRAMA_IMAGE_CLIENT=minimax`), and each draw is a paid GPU call.
+
+API: `GET/POST /v1/experiments`, `GET/PATCH/DELETE /v1/experiments/{id}`,
+`POST /v1/experiments/{id}/turns` (`text`, `attachments` asset ids from
+`POST /v1/source-assets`, `mode` rewrite|exact, `draws`, `size`),
+`POST /v1/experiment-turns/{id}/retry`, `GET /v1/experiment-turns/{id}/results/{n}/content|thumb`.
+
 ### Storage
 
 The server stores everything in SQLite by default, at `data/drama.db` relative to the
@@ -384,6 +414,7 @@ src/drama_agent/
   media.py         Uploaded images/videos: storage, type sniffing, keyframes, audio
   imagegen.py      Image generation clients (MiniMax-H3-Image on MCPHub, offline fixture)
   images.py        Reference image planning, prompts, references and the image worker
+  experiment.py    Experiment tab: image chat sessions, the GPT prompt rewriter, the runner
   worker.py        Job workers; `drama-worker` entry point
   api/             FastAPI routes (spec §9) + /v1/meta, job listing
   web/             Web UI (HTML/CSS/JS, served at /)

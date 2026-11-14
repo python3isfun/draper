@@ -1062,22 +1062,27 @@ class ImageWorker:
         path.write_bytes(data)
 
     def _thumb(self, rel: str) -> str | None:
-        """A 512 px JPEG for the UI (full-size images are ~16 MP)."""
-        if not ffmpeg_available():
-            return None
-        src = self.media.path(rel)
-        out = src.with_name(f"{src.stem}_thumb.jpg")
-        try:
-            subprocess.run(
-                ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src),
-                 "-vf", "scale='if(gt(iw,ih),512,-2)':'if(gt(iw,ih),-2,512)'", "-q:v", "4",
-                 str(out)],
-                capture_output=True, timeout=60, check=True,
-            )  # fmt: skip
-        except (subprocess.SubprocessError, OSError):
-            log.warning("no thumbnail for %s", rel)
-            return None
-        return str(out.relative_to(self.media.root))
+        return make_thumb(self.media, rel)
+
+
+def make_thumb(media: MediaStore, rel: str) -> str | None:
+    """A 512 px JPEG next to a stored image, for the UI (full-size images are ~16 MP).
+    Blocking (runs ffmpeg); None without ffmpeg or when the image can't be read."""
+    if not ffmpeg_available():
+        return None
+    src = media.path(rel)
+    out = src.with_name(f"{src.stem}_thumb.jpg")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src),
+             "-vf", "scale='if(gt(iw,ih),512,-2)':'if(gt(iw,ih),-2,512)'", "-q:v", "4",
+             str(out)],
+            capture_output=True, timeout=60, check=True,
+        )  # fmt: skip
+    except (subprocess.SubprocessError, OSError):
+        log.warning("no thumbnail for %s", rel)
+        return None
+    return str(out.relative_to(media.root))
 
 
 def image_client_from_env() -> ImageClient:
