@@ -261,6 +261,57 @@ def test_writer_output_is_checked(tmp_path):
         assert "longer than" in turn["reply"]
 
 
+class DrawsWriter(FixtureModelClient):
+    """A writer that reads a draw count from the message (as "do 4 draws" would)."""
+
+    def __init__(self, draws):
+        super().__init__()
+        self.draws = draws
+
+    async def generate(self, request, output_model):
+        if request.stage == "experiment":
+            self.calls.append(request)
+            return output_model(
+                real_person=False,
+                draws=self.draws,
+                prompt="A cat on a sofa. The image contains no text, letters or numbers.",
+                reply="Four draws of one cat.",
+            )
+        return await super().generate(request, output_model)
+
+
+def writer_call(c):
+    return next(r for r in reversed(c.text.calls) if r.stage == "experiment")
+
+
+@pytest.mark.parametrize(("asked", "rendered"), [(4, 4), (9, 4), (0, 1)])
+def test_writer_sets_the_number_of_draws(tmp_path, asked, rendered):
+    with Chat(tmp_path, text=DrawsWriter(asked)) as c:
+        c.send(text=f"a cat, do {asked} draws")
+        turn = c.wait()["turns"][-1]
+        assert turn["status"] == "done", turn["error"]
+        assert turn["draws"] == rendered and len(turn["results"]) == rendered
+        assert len(c.images.calls) == rendered
+        assert len({r["seed"] for r in turn["results"]}) == rendered  # one seed per draw
+        assert writer_call(c).context["draws"] == 1  # the writer saw the user's setting
+
+
+def test_writer_without_a_draw_count_keeps_the_setting(tmp_path):
+    with Chat(tmp_path, text=DrawsWriter(None)) as c:
+        c.send(text="a cat", draws=2)
+        turn = c.wait()["turns"][-1]
+        assert turn["draws"] == 2 and len(turn["results"]) == 2
+        assert writer_call(c).context["draws"] == 2
+
+
+def test_writer_is_told_to_use_draws_not_grids():
+    from drama_agent.experiment import writer_instructions
+
+    text = writer_instructions()
+    assert "`draws`" in text and "Never show alternatives as a grid" in text
+    assert "1 to 4" in text
+
+
 def test_fallback_text_gets_the_exact_prompt_check(tmp_path):
     with Chat(tmp_path, text=BrokenWriter()) as c:
         c.send(text="<Picture 2> is a hat")

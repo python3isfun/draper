@@ -335,7 +335,9 @@ saved and listed on the left.
    with the `<Picture N>` it is sent as.
 5. The result becomes the current image, so the next message builds on it. **Edit this
    one** makes any earlier result or upload current instead (branching); **Start a new
-   image** clears it. **Draws** (1–4) renders several seeds of the same prompt.
+   image** clears it. **Draws** (1–4) renders several seeds of the same prompt. In Rewrite mode a message
+   can set it too ("do 4 draws", "give me three versions"): the writer returns the count and
+   writes one prompt, never a grid of options in one image.
 
 Size: "match the current image" picks the H3 size nearest the current image's aspect
 ratio (about 16 MP), or choose one. One message runs at a time per chat; a failed one

@@ -459,6 +459,21 @@ Treat it as the description of <Picture 1>; it does not need to be repeated.
 - `history`: earlier messages and the prompts written for them, oldest first, for context \
 ("again", "undo that", "back to the earlier hair").
 - `size` and `aspect`: the output canvas.
+- `draws`: how many images the user's Draws setting renders from your prompt, each with its \
+own random seed.
+
+## Draws
+
+A draw is one separate render of your prompt with a new seed. When the message asks for a \
+number of separate images ("do 4 draws", "give me three versions", "show me a few options"), \
+return that number in `draws` (1 to {max_draws}; for more, return {max_draws} and say so in \
+`reply`; for "a few" or "some", return 3) and write the prompt for ONE image: every draw \
+renders the same prompt. Otherwise return null and the user's setting stays. Never show \
+alternatives as a grid, collage, comparison sheet or panels within one image unless the user \
+asks for one image laid out that way (e.g. "a turnaround sheet"). Draws differ only by seed, \
+so an edit that preserves most of <Picture 1> gives close results; if the user wants clearly \
+different designs, say in `reply` that one message per design gives more variety.
+
 ## How to write it
 
 - With pictures: write an edit prompt, one paragraph, in the order the rules give: define each \
@@ -501,8 +516,8 @@ of a refused request.
 
 ## Output
 
-Return {{"allowed": true, "real_person": false, "pictures": ["#3", ...] or null, "prompt": ..., "reply": ..., \
-"refusal": ""}}: `prompt` is the prompt only, as plain text; `reply` is one or two short sentences to the user saying what you \
+Return {{"allowed": true, "real_person": false, "pictures": ["#3", ...] or null, "draws": 4 or null, \
+"prompt": ..., "reply": ..., "refusal": ""}}: `prompt` is the prompt only, as plain text; `reply` is one or two short sentences to the user saying what you \
 changed or how you read the request (no prompt text in it).\
 """
 
@@ -514,6 +529,8 @@ class ExpPromptOutput(BaseModel):
     real_person: bool
     # Ids of the pictures to send, in <Picture N> order; None: as offered.
     pictures: list[str] | None = None
+    # Separate renders the message asks for ("do 4 draws"); None: keep the user's setting.
+    draws: int | None = None
     prompt: str = ""
     reply: str = ""
     refusal: str = ""
@@ -522,7 +539,9 @@ class ExpPromptOutput(BaseModel):
 def writer_instructions(restrictive: bool = False) -> str:
     from .prompts import load_h3_image_examples, load_h3_image_rules
 
-    guide = WRITER_GUIDE.format(rules=CONTENT_RULES, mode=mode_rule(restrictive))
+    guide = WRITER_GUIDE.format(
+        rules=CONTENT_RULES, mode=mode_rule(restrictive), max_draws=MAX_DRAWS
+    )
     parts = [WRITER_ROLE, load_h3_image_rules(), load_h3_image_examples(), guide]
     return "\n\n".join(parts)
 
@@ -823,6 +842,7 @@ class ExperimentRunner:
                 "history": history,
                 "size": turn.size,
                 "aspect": _aspect(turn.size),
+                "draws": turn.draws,
             },
             media=media,
         )
@@ -857,6 +877,8 @@ class ExperimentRunner:
             self._send_as_written(turn, ValueError(problem))
             return
         turn.prompt = prompt
+        if out.draws is not None and not turn.seeds:  # fixed seeds set their own count
+            turn.draws = max(1, min(out.draws, MAX_DRAWS))
         turn.reply = out.reply.strip()
         turn.prompt_model = request.model
         turn.likeness = out.real_person or inherited_likeness(turn, turns)
