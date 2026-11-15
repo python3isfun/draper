@@ -16,7 +16,13 @@ from ..models.package import utcnow
 from ..prompts import load_orchestrator_prompt
 from ..store import Repository
 from ..tracing import Tracer
-from .steps import OUTPUT_RULES, STEP_GROUPS, PipelineState, Step, completed_in_order
+from .steps import (
+    OUTPUT_RULES,
+    STEP_GROUPS,
+    PipelineState,
+    Step,
+    completed_in_order,
+)
 
 log = logging.getLogger(__name__)
 
@@ -158,7 +164,9 @@ class Orchestrator:
                         stage=step.name,
                         attempt=attempt,
                     )
-                context = state.context(include_sheets=step.sees_sheets)
+                context = state.context(
+                    include_sheets=step.sees_sheets, include_storyboard=step.sees_storyboard
+                )
                 if media_ctx:
                     context["source_media"] = media_ctx
                 gen = GenerationRequest(

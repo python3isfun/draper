@@ -228,10 +228,13 @@ class PipelineState:
         )
         return state, cp.completed_stages
 
-    def context(self, include_sheets: bool = True) -> dict[str, Any]:
+    def context(
+        self, include_sheets: bool = True, include_storyboard: bool = False
+    ) -> dict[str, Any]:
         """Upstream artifacts handed to the model as JSON. The sheet steps run concurrently
         and get include_sheets=False, so what they see never depends on which finished
-        first."""
+        first. The storyboard (shots, timing, asset requirements) goes only to steps after
+        it; the storyboard step itself writes it from scratch."""
         ctx: dict[str, Any] = {"request": self.request.model_dump(mode="json")}
         if self.source_brief:
             ctx["source_brief"] = self.source_brief.model_dump(mode="json")
@@ -242,6 +245,11 @@ class PipelineState:
         for key in ("cast_sheet", "set_sheet", "prop_sheet") if include_sheets else ():
             if (sheet := getattr(self, key)) is not None:
                 ctx[key] = sheet.model_dump(mode="json")
+        if include_storyboard:
+            ctx["shot_list"] = [s.model_dump(mode="json") for s in self.shots]
+            ctx["timing"] = [t.model_dump(mode="json") for t in self.timing]
+            if self.asset_requirements is not None:
+                ctx["asset_requirements"] = self.asset_requirements.model_dump(mode="json")
         return ctx
 
     def sheets(self) -> DesignSheets:
@@ -289,6 +297,7 @@ class Step:
     output_model: type[BaseModel]
     directive: str
     sees_sheets = True  # whether the design sheets are in this step's context
+    sees_storyboard = False  # whether shots, timing and asset requirements are
 
     def apply(self, state: PipelineState, output: Any) -> None:
         raise NotImplementedError
@@ -573,9 +582,13 @@ class ReviewStep(Step):
     name = "review"
     output_model = CreativeReviewOutput
     directive = (
-        "Current step: creative review. Report issues with object_id, evidence, severity and "
-        "fix_scope. Do not describe scores as ad-performance predictions."
+        "Current step: creative review of the whole package: story bible, scripts, design "
+        "sheets, the storyboard (shot_list and timing) and asset_requirements are all in the "
+        "context. Report issues with object_id, evidence, severity and fix_scope. Do not "
+        "describe scores as ad-performance predictions. spoken_timing_verified is always "
+        "false until a voice-measurement step exists; it is not an issue."
     )
+    sees_storyboard = True
 
     def apply(self, state: PipelineState, output: CreativeReviewOutput) -> None:
         # Hard checks already passed at the storyboard gate and review does not modify the

@@ -148,3 +148,22 @@ def test_review_runs_once_and_does_not_gate(monkeypatch):
     pkg = repo.get_package(job.package_id)
     assert pkg.qa_report.hard_issues == []
     assert [i.object_id for i in pkg.qa_report.creative_issues] == ["ep_02"]
+
+
+# Review saw only the scripts, so it reported the storyboard and asset requirements as
+# missing on every package.
+def test_review_sees_the_storyboard_and_asset_requirements():
+    client = FixtureModelClient()
+    job, repo = run_pipeline(client)
+    assert job.status == "completed"
+    pkg = repo.get_package(job.package_id)
+    by_stage = {c.stage: c.context for c in client.calls}
+
+    review = by_stage["review"]
+    assert [s["shot_id"] for s in review["shot_list"]] == [s.shot_id for s in pkg.shot_list]
+    assert [t["episode_id"] for t in review["timing"]] == [t.episode_id for t in pkg.timing]
+    assert len(review["asset_requirements"]["items"]) == len(pkg.asset_requirements.items)
+    # The storyboard step writes the storyboard from scratch; earlier steps never see one.
+    for stage in ("ingest", "outline", "script", "cast", "sets", "props", "storyboard"):
+        assert "shot_list" not in by_stage[stage], stage
+        assert "asset_requirements" not in by_stage[stage], stage
