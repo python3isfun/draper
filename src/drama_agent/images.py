@@ -561,12 +561,19 @@ def _names(pkg: ProductionPackage) -> dict[str, str]:
 
 
 def slot_title(pkg: ProductionPackage, key: tuple[str, str]) -> str:
-    """ "Frank Collins, front face" for messages."""
+    """ "Frank Collins, front face" or "Frank Collins, rain look, full body" for messages."""
     slot = next((s for s in _slots(pkg) if s.key == key), None)
     if slot is None:
         return key[1]
-    entity, _ = _subject(slot.req)
-    return f"{_names(pkg).get(entity, entity)}, {slot.view}"
+    entity, variant = _subject(slot.req)
+    name = _names(pkg).get(entity, entity)
+    if slot.req.asset_type == "character_look" and variant:
+        # Looks have only an id ("lk_frank_rain"): its words after the character's name.
+        words = variant.removeprefix("lk_").split("_")
+        first = entity.removeprefix("ch_").split("_")[0]
+        label = " ".join(words[1:] if words[:1] == [first] and len(words) > 1 else words)
+        return f"{name}, {label} look, {slot.view}"
+    return f"{name}, {slot.view}"
 
 
 class NeedsPick(ValueError):
@@ -815,6 +822,26 @@ def _selected_design(
     return {"label": opt.label, "profile": opt.profile}
 
 
+def intimate_looks(pkg: ProductionPackage) -> set[tuple[str, str]]:
+    """(character_id, look_id) of looks worn only in scenes staged as implied or simulated
+    intimacy that the character is part of: costumes that exist for those scenes (the
+    morning after, the outfit torn open). A look also worn elsewhere is everyday clothing,
+    and so is a kiss-level scene's."""
+    intimate = {
+        sc.scene_id: set(sc.intimacy.character_ids)
+        for ep in pkg.episodes
+        for sc in ep.scenes
+        if sc.intimacy is not None and sc.intimacy.level in ("implied", "simulated")
+    }
+    worn: dict[tuple[str, str], bool] = {}  # look -> worn only in intimate scenes so far
+    for sh in pkg.shot_list:
+        for r in sh.character_look_refs:
+            key = (r.character_id, r.look_id)
+            here = r.character_id in intimate.get(sh.scene_id, set())
+            worn[key] = worn.get(key, True) and here
+    return {key for key, only in worn.items() if only}
+
+
 def develop(
     pkg: ProductionPackage,
     options: list[DesignOption],
@@ -823,14 +850,20 @@ def develop(
     draws: int,
     draft: bool,
     job_id: str | None,
-) -> tuple[list[DesignOption], list[GeneratedImage], list[tuple[str, str]]]:
+) -> tuple[list[DesignOption], list[GeneratedImage], list[tuple[str, str]], list[str]]:
     """One take with `draws` draws for every dependent deliverable whose parent has a
     selected image and that has no take yet. Returns (options, images, the parents still
-    waiting for a pick)."""
+    waiting for a pick, notes on deliverables left out).
+
+    A look worn only in intimate scenes (see intimate_looks) is left out when the picked face
+    shows a real person's likeness (content rule 3): it is drawn from the face, so it would
+    put that person into an intimate scene's costume."""
     g = _graph(pkg)
     anchors = set(g.anchors)
     has_take = {key_of(o) for o in options}
+    intimate = intimate_looks(pkg)
     waiting: set[tuple[str, str]] = set()
+    notes: list[str] = []
     new_opts, new_imgs = [], []
     for slot in g.slots:
         key = slot.key
@@ -840,13 +873,67 @@ def develop(
         if parent is not None and not _picked(images, parent):
             waiting.add(parent)
             continue
+        face = selected_image(images, parent) if parent is not None else None
+        if (
+            face is not None
+            and face.likeness
+            and slot.req.asset_type == "character_look"
+            and _subject(slot.req) in intimate
+        ):
+            notes.append(
+                f"{slot_title(pkg, key)} is worn only in intimate scenes, and the picked face "
+                "shows a real person's likeness, so it is not drawn from that face. Pick a "
+                "face without a likeness to draw it."
+            )
+            continue
         o, i = _new_take_group(
             pkg, slot, g.slots, takes=1, draws=draws, draft=draft, job_id=job_id, first_index=1,
             selected_design=_selected_design(options, images, parent),
         )  # fmt: skip
         new_opts += o
         new_imgs += i
-    return new_opts, new_imgs, sorted(waiting)
+    return new_opts, new_imgs, sorted(waiting), notes
+
+
+def import_pick(
+    pkg: ProductionPackage,
+    key: tuple[str, str],
+    *,
+    file: str,
+    thumb: str | None,
+    content_type: str,
+    prompt: str,
+    likeness: bool,
+    imported_from: str,
+    job_id: str | None,
+) -> GeneratedImage:
+    """An existing image (e.g. from the Experiment tab) as the pick for a deliverable: a
+    finished, selected image, so looks and other states are developed from it."""
+    slot = _graph(pkg).slot(key)
+    if slot is None:
+        raise KeyError(f"{key[1]} is not a deliverable of {key[0]}")
+    return GeneratedImage(
+        image_id=f"img_{uuid.uuid4().hex[:12]}",
+        package_id=pkg.package_id,
+        revision_id=pkg.revision_id,
+        requirement_id=key[0],
+        deliverable_id=key[1],
+        status="done",
+        prompt=prompt,
+        prompt_source="user",
+        brief={"deliverable": slot.view, "imported_from": imported_from},
+        job_id=job_id,
+        # Full size (not a draft), so picking it never queues a full-size re-render.
+        size=SIZES.get(slot.view, DEFAULT_SIZE)[0],
+        seed=0,
+        model="imported",
+        file=file,
+        thumb=thumb,
+        content_type=content_type,
+        likeness=likeness,
+        imported_from=imported_from,
+        finished_at=utcnow(),
+    )
 
 
 def select(images: list[GeneratedImage], image_id: str) -> tuple[str, GeneratedImage | None]:
@@ -1002,12 +1089,15 @@ class ImageWorker:
     async def _generate(self, img: GeneratedImage) -> None:
         from .content_guard import GuardRefused, text_guard, upload_guard
 
+        references, missing, likeness = await asyncio.to_thread(self._references, img)
+        img.likeness = img.likeness or likeness
         # Every prompt, however it was written. A job with uploaded photos may show real
-        # people, so its images also get the uploaded-photo rule.
-        check = upload_guard if package_has_uploads(self.repo, img.package_id) else text_guard
+        # people, and an image drawn from a picture with a real person's likeness does, so
+        # those get the uploaded-photo rule.
+        strict = img.likeness or package_has_uploads(self.repo, img.package_id)
+        check = upload_guard if strict else text_guard
         if reason := check(img.prompt):
             raise GuardRefused(f"Not drawn: {reason}")
-        references, missing = await asyncio.to_thread(self._references, img)
         if missing:
             # The prompt defines each <Picture N> as a <Subject N> with its relationship;
             # without the picture it would describe something the model never receives.
@@ -1030,10 +1120,12 @@ class ImageWorker:
             # still picked (one atomic step, so it can't race with the user's next pick).
             self.repo.move_selection(img.finalizes, img.image_id)
 
-    def _references(self, img: GeneratedImage) -> tuple[list[Reference], list[str]]:
-        """(the reference images, ids of those not available)."""
+    def _references(self, img: GeneratedImage) -> tuple[list[Reference], list[str], bool]:
+        """(the reference images, ids of those not available, whether any shows a real
+        person's likeness)."""
         refs: list[Reference] = []
         skipped: list[str] = []
+        likeness = False
         siblings: list[GeneratedImage] | None = None
         for rid in img.reference_ids:
             path, mime = None, "image/jpeg"
@@ -1045,10 +1137,12 @@ class ImageWorker:
                 ref = selected_image(siblings, (req_id, deliverable_id))
                 if ref and ref.file:
                     path, mime = self.media.path(ref.file), ref.content_type
+                    likeness = likeness or ref.likeness
             elif rid.startswith("img_"):
                 ref = self.repo.get_image(rid)
                 if ref and ref.status == "done" and ref.file:
                     path, mime = self.media.path(ref.file), ref.content_type
+                    likeness = likeness or ref.likeness
             else:
                 raw = self.repo.get_source_asset(rid)
                 if raw:
@@ -1061,7 +1155,7 @@ class ImageWorker:
                 refs.append(Reference(path.name, path.read_bytes(), mime))
             else:
                 skipped.append(rid)
-        return refs, skipped
+        return refs, skipped, likeness
 
     def _write(self, rel: str, data: bytes) -> None:
         path = self.media.path(rel)

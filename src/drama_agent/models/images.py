@@ -82,6 +82,11 @@ class GeneratedImage(BaseModel):
     option_id: str | None = None  # the take this image draws
     draw: int = 1
     selected: bool = False  # the chosen image for its deliverable (one per deliverable)
+    # Shows a real person's likeness: imported from an Experiment image that had one, or
+    # drawn with such an image as a reference. The stricter image rules then apply.
+    likeness: bool = False
+    # Where an imported image came from (e.g. "experiment exp_x #17"); None if drawn here.
+    imported_from: str | None = None
     finalizes: str | None = None  # the draft image this full-size render replaces
     model: str = ""
     file: str | None = None  # relative to the media store

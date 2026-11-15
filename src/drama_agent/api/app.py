@@ -38,6 +38,7 @@ from ..experiment import (
     image_labels,
     is_busy,
     known_refs,
+    likeness_of,
     new_session,
     plan_turn,
     unlabeled,
@@ -56,7 +57,9 @@ from ..images import (
     design_slots,
     draws_for,
     image_client_from_env,
+    import_pick,
     latest_images,
+    make_thumb,
     package_has_uploads,
     plan_images,
     slot_title,
@@ -170,6 +173,20 @@ class ExploreRequest(BaseModel):
     draws: int = Field(3, ge=1, le=6)
     draft: bool = True
     scope: list[Literal["cast", "sets", "props"]] = ["cast", "sets", "props"]
+    revision_id: str | None = None
+    job_id: str | None = None
+
+
+class ImportImageRequest(BaseModel):
+    """An Experiment image (#N in a chat) as the pick for a package deliverable."""
+
+    session_id: str
+    image: int = Field(..., ge=1)  # the image's number in the chat (#N)
+    requirement_id: str
+    deliverable_id: str | None = None  # default: the requirement's first deliverable
+    # None: as the Experiment recorded it (unknown counts as a likeness). False is for an
+    # invented person whose image inherited the mark from someone else in its source.
+    likeness: bool | None = None
     revision_id: str | None = None
     job_id: str | None = None
 
@@ -472,7 +489,7 @@ def create_app(
         selection yet are left for later (listed in `notes`)."""
         pkg = _package_or_404(package_id, req.revision_id)
         job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
-        opts, imgs, waiting = develop_plan(
+        opts, imgs, waiting, left_out = develop_plan(
             pkg,
             repo.list_options(pkg.package_id, pkg.revision_id),
             repo.list_images(pkg.package_id, pkg.revision_id),
@@ -482,7 +499,62 @@ def create_app(
         )
         _save_new(opts, imgs)
         notes = [f"Pick an image for {slot_title(pkg, k)} first." for k in waiting]
-        return _images_view(pkg, notes)
+        return _images_view(pkg, notes + left_out)
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/images/import",
+        status_code=201,
+        response_model=GeneratedImage,
+    )
+    async def import_image(package_id: str, req: ImportImageRequest) -> GeneratedImage:
+        """Use an Experiment image as the pick for a deliverable (e.g. a character's face).
+        Develop then draws the dependent deliverables (the looks) from it. Its likeness mark
+        carries over: images drawn from it get the stricter rules, and a likeness face's
+        looks worn in intimate scenes are not drawn."""
+        pkg = _package_or_404(package_id, req.revision_id)
+        job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
+        session = _exp_session_or_404(req.session_id)
+        turns = _exp_turns(session.session_id)
+        ref = image_labels(turns).get(req.image)
+        if ref is None:
+            raise HTTPException(404, f"no image #{req.image} in this chat")
+        reqmt = next(
+            (r for r in pkg.asset_requirements.items if r.requirement_id == req.requirement_id),
+            None,
+        )
+        if reqmt is None or not reqmt.deliverables:
+            raise HTTPException(404, f"requirement {req.requirement_id} not found")
+        deliverable = req.deliverable_id or reqmt.deliverables[0].deliverable_id
+        path, mime = experiments.ref_file(ref, variant="full")
+        if path is None:
+            raise HTTPException(409, f"image #{req.image} is not available")
+        recorded = likeness_of(ref, turns)
+        likeness = (recorded is not False) if req.likeness is None else req.likeness
+        made = next((t for t in turns if ref.startswith(f"turn:{t.turn_id}:")), None)
+        ext = "png" if mime == "image/png" else "jpg"
+        rel = f"generated/{pkg.package_id}/import_{session.session_id}_{req.image}.{ext}"
+        data = await asyncio.to_thread(path.read_bytes)
+        dest = media.path(rel)
+        await asyncio.to_thread(dest.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(dest.write_bytes, data)
+        thumb = await asyncio.to_thread(make_thumb, media, rel)
+        try:
+            img = import_pick(
+                pkg,
+                (reqmt.requirement_id, deliverable),
+                file=rel,
+                thumb=thumb,
+                content_type=mime,
+                prompt=made.prompt if made else "",
+                likeness=likeness,
+                imported_from=f"experiment {session.session_id} #{req.image}",
+                job_id=job and job.job_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from None
+        repo.save_image(img)
+        repo.set_selected(img.image_id)
+        return repo.get_image(img.image_id)
 
     @app.post(
         "/v1/drama-packages/{package_id}/images/takes",

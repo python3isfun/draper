@@ -254,6 +254,14 @@ anything else is drawn, so the team chooses from options instead of accepting on
    your change. The prompt goes to the image model as written (no text-model rewrite). A
    prompt citing a `<Picture N>` the take doesn't have is refused; other H3 rule misses
    (e.g. no "The image contains no text..." sentence) are shown as warnings.
+6. Use an Experiment image instead (`POST /v1/drama-packages/{id}/images/import` with
+   `session_id`, `image` (its #N), `requirement_id`, optional `deliverable_id`): it
+   becomes the item's pick, at full size, and Develop draws its looks or states from it.
+   It keeps the Experiment's real-person likeness mark (`likeness`; pass `false` for an
+   invented person whose image only inherited the mark from someone else in its source).
+   Images drawn from a likeness pick carry the mark and get the uploaded-photo rules
+   (no underwear, undressing, bed scenes or swimwear), and a likeness face's looks worn
+   only in implied or simulated intimate scenes are not drawn (Develop says which).
 
 Takes are stored as `design_options` (schema v5); images record their take, draw and
 pick. The export puts each item's pick in `05_assets/reference_images/`, writes the
