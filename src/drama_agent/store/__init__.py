@@ -46,6 +46,8 @@ class Repository(Protocol):
     def move_selection(self, from_id: str, to_id: str) -> bool: ...
     def save_option(self, option: DesignOption) -> None: ...
     def get_option(self, option_id: str) -> DesignOption | None: ...
+    def delete_images(self, image_ids: list[str]) -> None: ...
+    def delete_option(self, option_id: str) -> None: ...
     def list_options(
         self, package_id: str, revision_id: str | None = None
     ) -> list[DesignOption]: ...
@@ -218,6 +220,13 @@ class InMemoryRepository:
 
     def save_option(self, option: DesignOption) -> None:
         self.options[option.option_id] = option.model_copy(deep=True)
+
+    def delete_images(self, image_ids: list[str]) -> None:
+        for i in image_ids:
+            self.images.pop(i, None)
+
+    def delete_option(self, option_id: str) -> None:
+        self.options.pop(option_id, None)
 
     def get_option(self, option_id: str) -> DesignOption | None:
         opt = self.options.get(option_id)

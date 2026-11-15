@@ -262,6 +262,10 @@ anything else is drawn, so the team chooses from options instead of accepting on
    Images drawn from a likeness pick carry the mark and get the uploaded-photo rules
    (no underwear, undressing, bed scenes or swimwear), and a likeness face's looks worn
    only in implied or simulated intimate scenes are not drawn (Develop says which).
+7. Remove what you don't want: `DELETE /v1/image-options/{id}` deletes a take with all
+   its draws, and `DELETE /v1/generated-images/{id}` deletes one image (with its
+   full-size render). Both remove the files, so nothing deleted reaches the export, and
+   refuse (409) while one of those images is still being drawn.
 
 Takes are stored as `design_options` (schema v5); images record their take, draw and
 pick. The export puts each item's pick in `05_assets/reference_images/`, writes the

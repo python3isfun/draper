@@ -172,3 +172,44 @@ def test_a_kiss_scene_costume_is_drawn_from_a_likeness_face(package):
     )
     assert frank_looks(imgs) == {f"ar_character_look_ch_frank_{lk}" for lk in looks}
     assert notes == []
+
+
+def test_delete_a_take_and_an_imported_pick(tmp_path):
+    media = MediaStore(tmp_path)
+    app = create_app(
+        client=FixtureModelClient(), image_client=FixtureImageClient(), media=media, poll_s=0.01
+    )
+    with TestClient(app) as http:
+        job = wait_job(http, http.post("/v1/drama-jobs", json=BODY).json()["job_id"])
+        sid = http.post("/v1/experiments", json={}).json()["session_id"]
+        http.post(f"/v1/experiments/{sid}/turns", json={"text": "a man in a grey coat"})
+        deadline = time.monotonic() + 10
+        while http.get(f"/v1/experiments/{sid}").json()["turns"][-1]["status"] != "done":
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        base = f"/v1/drama-packages/{job['package_id']}/images"
+        face = http.post(
+            f"{base}/import", json={"session_id": sid, "image": 1, "requirement_id": FRANK_FACE[0]}
+        ).json()
+        http.post(f"{base}/develop", json={"job_id": job["job_id"], "draws": 2})
+        deadline = time.monotonic() + 10
+        while http.get(base).json()["queued"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        v = http.get(base).json()
+        take = next(
+            o for o in v["options"] if o["requirement_id"].startswith("ar_character_look_ch_frank")
+        )
+        draws = [i for i in v["images"] if i["option_id"] == take["option_id"]]
+        assert len(draws) == 2 and all(media.path(i["file"]).is_file() for i in draws)
+
+        assert http.delete(f"/v1/image-options/{take['option_id']}").status_code == 204
+        v = http.get(base).json()
+        assert take["option_id"] not in {o["option_id"] for o in v["options"]}
+        assert not {i["image_id"] for i in draws} & {i["image_id"] for i in v["images"]}
+        assert not any(media.path(i["file"]).exists() for i in draws)
+
+        assert http.delete(f"/v1/generated-images/{face['image_id']}").status_code == 204
+        assert http.get(f"/v1/generated-images/{face['image_id']}/content").status_code == 404
+        assert http.delete(f"/v1/generated-images/{face['image_id']}").status_code == 404
+        assert http.delete("/v1/image-options/opt_nope").status_code == 404

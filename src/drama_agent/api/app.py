@@ -690,6 +690,41 @@ def create_app(
             raise HTTPException(404, "image not found")
         return img
 
+    def _delete_images(doomed: list[GeneratedImage]) -> None:
+        """Remove images (and their files) with the full-size renders made from them."""
+        ids = {i.image_id for i in doomed}
+        if not ids:
+            return
+        siblings = repo.list_images(doomed[0].package_id)
+        doomed = doomed + [i for i in siblings if i.finalizes in ids and i.image_id not in ids]
+        if any(i.status == "running" for i in doomed):
+            raise HTTPException(409, "an image is being drawn; delete it when it finishes")
+        repo.delete_images([i.image_id for i in doomed])
+        for i in doomed:
+            for rel in (i.file, i.thumb):
+                if rel:
+                    with contextlib.suppress(OSError):
+                        media.path(rel).unlink()
+
+    @app.delete("/v1/generated-images/{image_id}", status_code=204)
+    async def delete_image(image_id: str) -> None:
+        """Delete an image (e.g. an imported pick), with its full-size render. If it was
+        the pick, its item has none until you pick another."""
+        _delete_images([_image_or_404(image_id)])
+
+    @app.delete("/v1/image-options/{option_id}", status_code=204)
+    async def delete_option(option_id: str) -> None:
+        """Delete a take with all its draws (and their full-size renders), so it is no
+        longer on the board or in the export."""
+        opt = repo.get_option(option_id)
+        if opt is None:
+            raise HTTPException(404, "take not found")
+        draws = [
+            i for i in repo.list_images(opt.package_id, opt.revision_id) if i.option_id == option_id
+        ]
+        _delete_images(draws)
+        repo.delete_option(option_id)
+
     @app.post(
         "/v1/generated-images/{image_id}/regenerate",
         status_code=202,

@@ -505,6 +505,13 @@ class SqliteRepository:
             ),
         )
 
+    def delete_images(self, image_ids: list[str]) -> None:
+        for i in image_ids:
+            self._exec("DELETE FROM generated_images WHERE image_id = ?", (i,))
+
+    def delete_option(self, option_id: str) -> None:
+        self._exec("DELETE FROM design_options WHERE option_id = ?", (option_id,))
+
     def get_option(self, option_id: str) -> DesignOption | None:
         raw = self._one("SELECT data FROM design_options WHERE option_id = ?", (option_id,))
         return DesignOption.model_validate_json(raw) if raw else None
