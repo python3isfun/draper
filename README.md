@@ -66,7 +66,10 @@ once its current model call finishes, so that call's work is kept. **Stop now**
 call that hangs); the interrupted step restarts on resume. Every model call also has an
 overall deadline (`MCPHUB_CALL_TIMEOUT_S`, default 1200 s; storyboard calls take 5-8 min):
 MCPHub keeps a stalled stream open with keep-alive lines, which reset httpx's read timeout,
-so without it a stalled call would wait forever. A call past the deadline is retried. **Resume**
+so without it a stalled call would wait forever. A call past the deadline is retried. The deadline is
+measured on the wall clock, because asyncio's clock stops while a Mac sleeps; if a call
+notices the machine slept (its connection is then presumed dead), it restarts at once.
+To stop idle sleep during long runs, start the server under `caffeinate -i`. **Resume**
 (`POST .../resume`) continues from the checkpoint; pausing doesn't use up a retry attempt.
 
 To try the live view offline, run with `DRAMA_MODEL_CLIENT=fixture

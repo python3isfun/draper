@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -57,6 +59,14 @@ class ModelOutputInvalid(ModelClientError):
 
 class _Retryable(Exception):
     """A failure worth retrying the HTTP request for (network, 5xx, 429)."""
+
+
+class _Slept(Exception):
+    """The machine slept during a call (its connection is presumed dead)."""
+
+
+# Wall-clock time beyond monotonic time, between two watchdog checks, that counts as sleep.
+SLEEP_GAP_S = 30.0
 
 
 def build_messages(request: GenerationRequest) -> list[dict[str, str]]:
@@ -145,6 +155,7 @@ class MCPHubClient:
         max_repair_turns: int = 1,
         backoff_s: float = 2.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        watch_s: float = 5.0,
     ) -> None:
         if not api_key:
             raise ValueError("MCPHub API key is empty")
@@ -158,8 +169,13 @@ class MCPHubClient:
         # Whole-call deadline. httpx's timeout counts the gap between bytes, and MCPHub keeps
         # an idle stream open with keep-alive lines, so without this a stalled call hangs
         # forever (seen live: a storyboard call silent for 48 min). Storyboard calls, the
-        # longest, take 5-8 min.
+        # longest, take 5-8 min. It is measured on the wall clock: asyncio's clock stops
+        # while a Mac sleeps, which once left a call dead on a dropped connection for 45
+        # min before the deadline had counted 9 (see _within_deadline).
         self.call_timeout_s = call_timeout_s
+        self.watch_s = watch_s
+        self._wall = time.time  # clocks, replaceable in tests
+        self._mono = time.monotonic
         self.max_repair_turns = max_repair_turns
         self.backoff_s = backoff_s
         self._http = httpx.AsyncClient(
@@ -303,12 +319,25 @@ class MCPHubClient:
     ) -> _Streamed:
         for attempt in range(self.max_http_retries + 1):
             try:
-                async with asyncio.timeout(self.call_timeout_s):
-                    if self.api == "responses":
-                        return await self._stream_responses(
-                            model, messages, output_model, schema, rec
-                        )
-                    return await self._stream_chat(model, messages, output_model, schema, rec)
+                if self.api == "responses":
+                    stream = self._stream_responses(model, messages, output_model, schema, rec)
+                else:
+                    stream = self._stream_chat(model, messages, output_model, schema, rec)
+                return await self._within_deadline(stream)
+            except _Slept as exc:
+                # The connection almost certainly died while the machine slept: start over
+                # at once (no backoff). Counts as an attempt, so repeated sleeps still end.
+                if attempt == self.max_http_retries:
+                    raise ModelClientError(f"MCPHub call interrupted: {exc}") from exc
+                rec.finish(error=f"{exc}; retrying")
+                rec.note("model_retry", f"The model call was interrupted: {exc}; retrying now.")
+                rec.start(
+                    model=model,
+                    api=self.api,
+                    request=recorded,
+                    turn=getattr(getattr(rec, "call", None), "turn", 0),
+                )
+                continue
             except TimeoutError as exc:
                 if attempt == self.max_http_retries:
                     raise ModelClientError(
@@ -344,6 +373,37 @@ class MCPHubClient:
                 )
                 await asyncio.sleep(delay)
         raise AssertionError("unreachable")
+
+    async def _within_deadline(self, coro: Any) -> Any:
+        """Await one streamed call under the whole-call deadline, on the wall clock.
+
+        asyncio's clock (and so asyncio.timeout) stops while a Mac sleeps, and the
+        connection usually dies meanwhile. So a watchdog wakes every watch_s: if the wall
+        clock passed the deadline it raises TimeoutError, and if the wall clock moved well
+        ahead of the monotonic one since the last check (the machine slept) it raises _Slept
+        so the call restarts at once."""
+        task = asyncio.ensure_future(coro)
+        poll = max(0.001, min(self.watch_s, self.call_timeout_s / 4))
+        deadline = self._wall() + self.call_timeout_s
+        last_wall, last_mono = self._wall(), self._mono()
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=poll)
+                if done:
+                    return task.result()
+                wall, mono = self._wall(), self._mono()
+                slept = (wall - last_wall) - (mono - last_mono)
+                last_wall, last_mono = wall, mono
+                if slept > max(SLEEP_GAP_S, 2 * poll):
+                    raise _Slept(f"the computer slept for about {slept / 60:.0f} min")
+                if wall >= deadline:
+                    raise TimeoutError
+        finally:
+            if not task.done():
+                task.cancel()
+                # Let the stream close; a second cancel of this task (Stop now) still ends it.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
     async def _sse(self, path: str, payload: dict[str, Any]):
         """Yield parsed JSON objects from a server-sent-events response."""

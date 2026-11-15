@@ -457,3 +457,88 @@ def test_a_stream_of_keepalives_hits_the_call_deadline_and_is_retried():
         asyncio.run(client.generate(request(recorder=rec), SourceBrief))
     assert len(calls) == 2  # retried once, then gave up
     assert [kind for kind, _ in rec.notes] == ["model_retry"]
+
+
+class Stalled(httpx.AsyncByteStream):
+    """A stream that sends keep-alive lines forever (a stalled generation)."""
+
+    async def __aiter__(self):
+        while True:
+            yield b": keep-alive\n\n"
+            await asyncio.sleep(0.005)
+
+
+def stall_then_answer(calls):
+    def handler(req):
+        calls.append(req)
+        if len(calls) == 1:
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=Stalled()
+            )
+        return responses_sse(json.dumps(VALID_BRIEF))
+
+    return handler
+
+
+def test_a_sleeping_computer_restarts_the_call_at_once():
+    """asyncio's clock stops while a Mac sleeps and the connection dies meanwhile: seen
+    live, a storyboard call sat on a dead stream for 45 min. A wall-clock jump between
+    watchdog checks restarts the call immediately, without waiting for the deadline."""
+    calls, rec = [], FakeRecorder()
+    client = MCPHubClient(
+        "https://hub.test/v1", "sk-test", "gpt-6.1-sol", backoff_s=60, max_http_retries=1,
+        call_timeout_s=1200, watch_s=0.02, transport=httpx.MockTransport(stall_then_answer(calls)),
+    )  # fmt: skip
+    slept = {"s": 0.0}
+    real_wall = client._wall
+
+    def wall():  # an hour passes on the wall clock once the stall has started
+        if calls and not slept["s"]:
+            slept["s"] = 3600.0
+        return real_wall() + slept["s"]
+
+    client._wall = wall
+    out = asyncio.run(asyncio.wait_for(client.generate(request(recorder=rec), SourceBrief), 5))
+    assert out.language == "en-US"
+    assert len(calls) == 2  # restarted without the 60 s backoff
+    [(kind, message)] = rec.notes
+    assert kind == "model_retry" and "slept for about 60 min" in message
+
+
+def test_the_call_deadline_counts_wall_clock_time():
+    """Monotonic time barely moves (as during sleep) but the wall clock passes the
+    deadline in small steps (no single jump counts as sleep): still a timeout."""
+    calls = []
+    client = MCPHubClient(
+        "https://hub.test/v1", "sk-test", "gpt-6.1-sol", backoff_s=0, max_http_retries=0,
+        call_timeout_s=1200, watch_s=0.02, transport=httpx.MockTransport(stall_then_answer(calls)),
+    )  # fmt: skip
+    now = {"t": 0.0}
+
+    def wall():
+        now["t"] += 20.0  # 20 s per check: under the sleep threshold, past 1200 s in 60 checks
+        return now["t"]
+
+    client._wall = wall
+    with pytest.raises(ModelClientError, match="no complete response within 1200s"):
+        asyncio.run(asyncio.wait_for(client.generate(request(), SourceBrief), 5))
+    assert len(calls) == 1
+
+
+def test_cancelling_a_call_under_the_watchdog_still_stops_it():
+    """Stop now cancels the job's task: the watchdog must pass that on, not swallow it."""
+    calls, rec = [], FakeRecorder()
+    client = MCPHubClient(
+        "https://hub.test/v1", "sk-test", "gpt-6.1-sol", watch_s=0.02,
+        transport=httpx.MockTransport(stall_then_answer(calls)),
+    )  # fmt: skip
+
+    async def run():
+        task = asyncio.create_task(client.generate(request(recorder=rec), SourceBrief))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+    assert len(calls) == 1
