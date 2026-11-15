@@ -35,6 +35,7 @@ from ..experiment import (
     ExpSession,
     ExpTurn,
     apply_labels,
+    image_labels,
     is_busy,
     known_refs,
     new_session,
@@ -44,6 +45,7 @@ from ..experiment import (
 from ..experiment import MAX_PROMPT_CHARS as EXP_MAX_PROMPT_CHARS
 from ..experiment import SIZES as EXP_SIZES
 from ..export import build_export
+from ..face_lab import new_study, plan_describe, plan_test, source_photo
 from ..image_prompts import MAX_PROMPT_CHARS, ImagePromptWriter, problems
 from ..imagegen import FixtureImageClient, ImageClient
 from ..images import (
@@ -200,6 +202,21 @@ class EditTakeRequest(BaseModel):
 
 class ExpSessionCreate(BaseModel):
     title: str | None = Field(None, max_length=120)
+    kind: Literal["chat", "face"] = "chat"  # face: a Face Lab study
+
+
+class FaceDescribeRequest(BaseModel):
+    asset_id: str | None = None  # a new photo; default: the study's photo again
+    hint: str = Field("", max_length=500)  # what to focus on ("the eyes", "older")
+    restrictive: bool = False
+
+
+class FaceTestRequest(BaseModel):
+    prompt: str = Field(..., max_length=EXP_MAX_PROMPT_CHARS)
+    draws: int = Field(1, ge=1, le=MAX_DRAWS)
+    seeds: list[int] | None = Field(None, max_length=MAX_DRAWS)  # fixed seeds (one per draw)
+    size: str | None = None
+    restrictive: bool = False
 
 
 class ExpSessionPatch(BaseModel):
@@ -678,14 +695,75 @@ def create_app(
         return ExpSessionView(session=session, turns=turns, sizes=EXP_SIZES)
 
     @app.get("/v1/experiments", response_model=list[ExpSession])
-    async def list_experiments() -> list[ExpSession]:
-        return repo.list_exp_sessions()
+    async def list_experiments(
+        kind: Literal["chat", "face"] | None = None,
+    ) -> list[ExpSession]:
+        return [s for s in repo.list_exp_sessions() if kind in (None, s.kind)]
 
     @app.post("/v1/experiments", status_code=201, response_model=ExpSession)
     async def create_experiment(req: ExpSessionCreate) -> ExpSession:
-        session = new_session(req.title)
+        session = new_study(req.title) if req.kind == "face" else new_session(req.title)
         repo.save_exp_session(session)
         return session
+
+    def _start_face_turn(session: ExpSession, turn: ExpTurn) -> ExpTurn:
+        if turn.attachments:
+            # The same photo described again keeps its number.
+            known = {
+                ref.removeprefix("asset:"): n
+                for n, ref in image_labels(repo.list_exp_turns(session.session_id)).items()
+                if ref.startswith("asset:")
+            }
+            new = [a for a in turn.attachments if a not in known]
+            fresh = iter(repo.allocate_exp_labels(session.session_id, len(new)) if new else [])
+            turn.attachment_labels = [known.get(a) or next(fresh) for a in turn.attachments]
+        repo.save_exp_turn(turn)
+        session.updated_at = turn.created_at
+        repo.save_exp_session(session)
+        experiments.start(turn.turn_id)
+        return turn
+
+    @app.post("/v1/experiments/{session_id}/describe", status_code=202, response_model=ExpTurn)
+    async def describe_face(session_id: str, req: FaceDescribeRequest) -> ExpTurn:
+        """Face Lab: write the most descriptive text prompt for a photo (nothing drawn)."""
+        session = _exp_session_or_404(session_id)
+        turns = _exp_turns(session_id)
+        ids = [i for i in [req.asset_id or source_photo(turns)] if i]
+        assets = repo.get_source_assets(ids)
+        try:
+            turn = plan_describe(
+                session,
+                turns,
+                assets,
+                asset_id=req.asset_id,
+                hint=req.hint,
+                restrictive=req.restrictive,
+            )
+        except ExpError as exc:
+            raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
+        if session.title == "New face study" and req.asset_id:
+            name = (assets.get(req.asset_id) or {}).get("filename") or ""
+            session.title = Path(name).stem[:60] or session.title
+        return _start_face_turn(session, turn)
+
+    @app.post("/v1/experiments/{session_id}/tests", status_code=202, response_model=ExpTurn)
+    async def test_face_prompt(session_id: str, req: FaceTestRequest) -> ExpTurn:
+        """Face Lab: render a prompt from text alone, with fixed seeds if given."""
+        session = _exp_session_or_404(session_id)
+        turns = _exp_turns(session_id)
+        try:
+            turn = plan_test(
+                session,
+                turns,
+                prompt=req.prompt,
+                draws=req.draws,
+                seeds=req.seeds,
+                size=req.size,
+                restrictive=req.restrictive,
+            )
+        except ExpError as exc:
+            raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
+        return _start_face_turn(session, turn)
 
     @app.get("/v1/experiments/{session_id}", response_model=ExpSessionView)
     async def get_experiment(session_id: str) -> ExpSessionView:
@@ -728,6 +806,8 @@ def create_app(
     @app.post("/v1/experiments/{session_id}/turns", status_code=202, response_model=ExpTurn)
     async def send_experiment_turn(session_id: str, req: ExpTurnRequest) -> ExpTurn:
         session = _exp_session_or_404(session_id)
+        if session.kind != "chat":
+            raise HTTPException(422, "This is a Face Lab study: use describe or tests.")
         turns = _exp_turns(session_id)  # numbered, so the message can mention any image
         # Uploads: this message's, plus the current image when it is an earlier upload
         # (its dimensions pick the "auto" size).

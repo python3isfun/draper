@@ -54,6 +54,7 @@ function setMode(mode) {
   document.body.dataset.mode = mode;
   $("#drama-side").hidden = mode !== "drama";
   $("#exp-side").hidden = mode !== "exp";
+  $("#face-side").hidden = mode !== "face";
   for (const a of document.querySelectorAll(".modes a")) {
     const on = a.dataset.mode === mode;
     a.classList.toggle("active", on);
@@ -100,7 +101,7 @@ async function expRoute(sid) {
 
 async function loadExpSessions() {
   try {
-    exp.sessions = await api("/v1/experiments");
+    exp.sessions = await api("/v1/experiments?kind=chat");
   } catch {
     exp.sessions = [];
   }

@@ -348,6 +348,34 @@ API: `GET/POST /v1/experiments`, `GET/PATCH/DELETE /v1/experiments/{id}`,
 `POST /v1/source-assets`, `mode` rewrite|exact, `draws`, `size`),
 `POST /v1/experiment-turns/{id}/retry`, `GET /v1/experiment-turns/{id}/results/{n}/content|thumb`.
 
+### Face Lab: from a photo to a reusable prompt
+
+The **Face Lab** tab turns a photo of a face into the most descriptive text prompt GPT can
+write, then tests that prompt by itself, so you can see how close words alone get, and keep
+a description that works as a reusable, castable character prompt.
+
+1. **New study from a photo:** GPT looks at the photo (at up to 1,536 px) and writes a
+   text-to-image prompt recreating it: framing and pose, then the face feature by feature
+   (skin, face shape, brows, eyes, nose, lips, hair, expression), wardrobe, background and
+   light. It never names the person, and its notes say what will be hard to match from
+   words. Nothing is drawn.
+2. **Describe again**, optionally with a focus ("more detail on the eyes"): GPT improves on
+   the last description. **Use another photo** starts over with a new one.
+3. **Test the prompt:** edit it, then **Render**. The prompt goes to H3 alone (no
+   picture). Choose **Random** seeds with 1–4 draws, or **Fixed** seeds (e.g. `11, 22, 33`);
+   **Same as last** reuses the previous test's seeds, so only your wording changes between
+   tests. Each test shows the photo next to its renders, with each render's seed and number.
+   **Load this prompt** brings back any earlier version.
+
+If the photo shows an identifiable person, renders of its description carry that person's
+likeness (content rule 3: nothing sexualized). With **Restrictive mode** on, GPT describes a
+type rather than a replica (no distinctive identifying details).
+
+A study is an Experiment session of kind `face`: `POST /v1/experiments {"kind": "face"}`,
+`POST /v1/experiments/{id}/describe` (`asset_id`, `hint`, `restrictive`),
+`POST /v1/experiments/{id}/tests` (`prompt`, `draws` or `seeds`, `size`, `restrictive`);
+`GET /v1/experiments?kind=face` lists studies.
+
 ### Storage
 
 The server stores everything in SQLite by default, at `data/drama.db` relative to the
@@ -467,6 +495,7 @@ src/drama_agent/
   imagegen.py      Image generation clients (MiniMax-H3-Image on MCPHub, offline fixture)
   images.py        Reference image planning, prompts, references and the image worker
   experiment.py    Experiment tab: image chat sessions, the GPT prompt rewriter, the runner
+  face_lab.py      Face Lab: photo-to-prompt descriptions and seeded prompt tests
   content_guard.py What image prompts may ask for (word lists + a model screen)
   worker.py        Job workers; `drama-worker` entry point
   api/             FastAPI routes (spec §9) + /v1/meta, job listing

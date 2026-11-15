@@ -80,6 +80,10 @@ class FixtureModelClient:
                 from ..content_guard import ScreenOutput
 
                 output = ScreenOutput(allowed=True, real_person=False)
+            case "face_describe":
+                from ..face_lab import fixture_describe
+
+                output = fixture_describe(request)
             case "experiment":
                 from ..experiment import fixture_prompt
 

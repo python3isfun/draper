@@ -61,7 +61,8 @@ SIZES: dict[str, str] = {
 DEFAULT_SIZE = SIZES["1:1"]
 
 TurnStatus = Literal["pending", "running", "done", "failed"]
-TurnMode = Literal["rewrite", "exact", "upload"]
+# describe: Face Lab's photo-to-prompt step (draws nothing).
+TurnMode = Literal["rewrite", "exact", "upload", "describe"]
 PictureVariant = Literal["full", "model", "thumb"]
 
 
@@ -89,6 +90,7 @@ class ExpTurn(BaseModel):
     size: str = ""
     auto_size: bool = False  # size follows <Picture 1> (it's re-picked if the writer reorders)
     draws: int = 1
+    seeds: list[int] = Field(default_factory=list)  # fixed seeds, one per draw (else random)
     prompt: str = ""  # what H3 received
     prompt_model: str | None = None  # the text model that wrote it ("rewrite")
     reply: str = ""  # the writer's short note on what it changed
@@ -110,6 +112,7 @@ class ExpTurn(BaseModel):
 
 class ExpSession(BaseModel):
     session_id: str
+    kind: Literal["chat", "face"] = "chat"  # face: a Face Lab study (see face_lab.py)
     title: str = "New chat"
     size: str = "auto"  # "auto": the current image's aspect ratio
     current: str | None = None  # the image the next message changes (a reference string)
@@ -456,7 +459,6 @@ Treat it as the description of <Picture 1>; it does not need to be repeated.
 - `history`: earlier messages and the prompts written for them, oldest first, for context \
 ("again", "undo that", "back to the earlier hair").
 - `size` and `aspect`: the output canvas.
-
 ## How to write it
 
 - With pictures: write an edit prompt, one paragraph, in the order the rules give: define each \
@@ -587,14 +589,16 @@ class ExperimentRunner:
         turn.status = "running"
         self.repo.save_exp_turn(turn)
         try:
-            if not turn.prompt:
+            if turn.mode == "describe":
+                await self._describe(turn)
+            elif not turn.prompt:
                 await self._write_prompt(turn)  # may choose which pictures to send
                 self.repo.save_exp_turn(turn)
             await self._guard(turn)
             # Read in a thread: up to nine images of several MB each.
-            refs = await asyncio.to_thread(self._references, turn)
+            refs = await asyncio.to_thread(self._references, turn) if turn.draws else []
             for n in range(len(turn.results), turn.draws):
-                seed = random.randint(1, 2**31 - 1)
+                seed = turn.seeds[n] if n < len(turn.seeds) else random.randint(1, 2**31 - 1)
                 async with self._gpu:
                     result = await self.images.generate(turn.prompt, turn.size, seed, refs)
                 ext = "png" if result.content_type == "image/png" else "jpg"
@@ -640,7 +644,8 @@ class ExperimentRunner:
         self.repo.save_exp_turn(turn)
         session = self.repo.get_exp_session(turn.session_id)
         if session is not None:
-            session.current = f"turn:{turn.turn_id}:0"
+            if session.kind == "chat" and turn.results:
+                session.current = f"turn:{turn.turn_id}:0"
             session.updated_at = utcnow()
             self.repo.save_exp_session(session)
 
@@ -728,6 +733,55 @@ class ExperimentRunner:
             if path is not None:
                 media.append(MediaPart(label=f"<Picture {i}>", path=path, mime=mime))
         return parts, media, current_prompt, turns
+
+    async def _describe(self, turn: ExpTurn) -> None:
+        """Face Lab: the text model writes a prompt recreating the photo (nothing drawn)."""
+        from .face_lab import STAGE as DESCRIBE_STAGE
+        from .face_lab import DescribeOutput, describe_instructions
+
+        if reason := text_guard(turn.text):
+            raise GuardRefused(reason)
+        asset = turn.attachments[0]
+        # The model copy (up to 1,536 px) shows the face in detail; thumbs are too small.
+        path, mime = self.ref_file(f"asset:{asset}", variant="model")
+        if path is None:
+            raise ExpError("The photo is no longer available.")
+        previous = next(
+            (
+                t.prompt
+                for t in sorted(self.repo.list_exp_turns(turn.session_id), key=lambda t: -t.index)
+                # Only this photo's: another person's description would blend in.
+                if t.mode == "describe"
+                and t.index < turn.index
+                and t.prompt
+                and t.attachments == turn.attachments
+            ),
+            None,
+        )
+        request = GenerationRequest(
+            stage=DESCRIBE_STAGE,  # type: ignore[arg-type]
+            instructions=describe_instructions(turn.restrictive),
+            context={"hint": turn.text or None, "previous_prompt": previous},
+            media=[MediaPart(label="<Photo>", path=path, mime=mime)],
+        )
+        out = await self.writer_client.generate(request, DescribeOutput)
+        if not out.allowed:
+            raise GuardRefused(out.refusal.strip() or "This photo can't be described here.")
+        prompt = out.prompt.strip()
+        if not prompt:
+            raise ExpError("The description came back empty. Try again.")
+        if len(prompt) > MAX_PROMPT_CHARS:
+            raise ExpError(f"The description is longer than {MAX_PROMPT_CHARS} characters.")
+        if cited := cited_beyond(prompt, 0):  # copied from the edit examples
+            raise ExpError(
+                f"The description cites {', '.join(cited)}, but Face Lab tests send no "
+                "pictures. Retry for a new description."
+            )
+        if reason := text_guard(prompt):
+            raise GuardRefused(reason)
+        turn.prompt, turn.reply = prompt, out.notes.strip()
+        turn.prompt_model = request.model or "unknown"
+        turn.likeness = out.real_person
 
     async def _guard(self, turn: ExpTurn) -> None:
         """Raise GuardRefused unless the turn's prompt may be drawn. A prompt the writer

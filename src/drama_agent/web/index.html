@@ -18,6 +18,7 @@
     <nav class="modes" aria-label="Sections">
       <a href="#" data-mode="drama" class="active" aria-current="page">Drama</a>
       <a href="#exp" data-mode="exp">Experiment</a>
+      <a href="#face" data-mode="face">Face Lab</a>
     </nav>
     <div class="topbar-meta" id="meta">…</div>
   </header>
@@ -115,6 +116,22 @@
           <ul id="exp-list" class="job-list"></ul>
         </section>
       </div>
+
+      <div id="face-side" class="sidebar-pane" hidden>
+        <section class="card">
+          <h2>Face Lab</h2>
+          <p class="hint">Upload a photo: GPT writes the most descriptive prompt it can for it.
+            Then edit the prompt and test it by itself, with chosen draws and seeds, to see how
+            close words alone get.</p>
+          <input type="file" id="face-file" accept="image/jpeg,image/png,image/webp" hidden>
+          <button type="button" class="btn primary" id="new-face">New study from a photo</button>
+          <p class="form-error" id="face-side-error" role="alert"></p>
+        </section>
+        <section class="jobs">
+          <div class="section-head"><h2>Studies</h2></div>
+          <ul id="face-list" class="job-list"></ul>
+        </section>
+      </div>
     </aside>
 
     <main id="main" class="main"></main>
@@ -122,5 +139,6 @@
 
   <script src="app.js"></script>
   <script src="experiment.js"></script>
+  <script src="face.js"></script>
 </body>
 </html>

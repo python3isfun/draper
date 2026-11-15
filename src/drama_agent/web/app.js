@@ -78,13 +78,20 @@ window.addEventListener("hashchange", route);
 
 async function route() {
   const params = new URLSearchParams(location.hash.slice(1));
-  if (params.has("exp")) {
+  if (params.has("exp") || params.has("face")) {
     clearTimeout(state.pollTimer);
     stopActivity();
-    await expRoute(params.get("exp") || null);
+    if (params.has("exp")) {
+      stopFace();
+      await expRoute(params.get("exp") || null);
+    } else {
+      stopExp();
+      await faceRoute(params.get("face") || null);
+    }
     return;
   }
   stopExp();
+  stopFace();
   setMode("drama");
   const { job, tab } = readHash();
   state.tab = tab;
@@ -425,7 +432,7 @@ document.addEventListener("selectionchange", () => {
 
 function renderMain() {
   // A drama poll that lands while the Experiment tab is open must not draw over it.
-  if (document.body.dataset.mode === "exp") return;
+  if (document.body.dataset.mode && document.body.dataset.mode !== "drama") return;
   const main = $("#main");
   const job = state.job;
   if (!readHash().job) {
