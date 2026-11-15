@@ -298,7 +298,7 @@ OUTPUT_RULES = f"{ID_CONVENTIONS}\n\n{PROSE_RULES}"
 
 # Added to every step's instructions when request.options.reference_mode is "adaptation".
 # Bump ADAPTATION_RULES_VERSION when they change (recorded in provenance.prompt_versions).
-ADAPTATION_RULES_VERSION = "1"
+ADAPTATION_RULES_VERSION = "2"
 ADAPTATION_RULES = (
     'Adaptation mode (request.options.reference_mode is "adaptation"): the sources are the '
     "story to adapt, not inspiration.\n"
@@ -313,7 +313,9 @@ ADAPTATION_RULES = (
     "- Where the source contradicts itself (a pronoun or a count that changes, a typo), "
     "follow the reading that most of the source supports and say so in notes.\n"
     "- Say in notes what you cut or merged and why.\n"
-    "- In the ingest step, list every must_keep item word for word under user_constraints."
+    "- In the ingest step, list every must_keep item word for word under user_constraints, "
+    "with the user's other stated requirements. These rules are instructions to you, not "
+    "user constraints: don't copy them there."
 )
 
 
@@ -602,7 +604,9 @@ class StoryboardStep(Step):
         "schedule. Each episode timeline must total exactly the episode duration. Shots must "
         "not add plot. Mark needs_shot_reference only where a composition image is necessary. "
         "Timing goes only in start_ms, duration_ms and dialogue cues; sound and action "
-        "descriptions are prose."
+        "descriptions are prose. Each visible character wears exactly one look per shot: "
+        "when clothing changes on screen (torn, removed, put on), end the shot on the change "
+        "and start the next shot in the new look."
     )
 
     def apply(self, state: PipelineState, output: StoryboardOutput) -> None:
@@ -635,7 +639,9 @@ class ReviewStep(Step):
         "sheets, the storyboard (shot_list and timing) and asset_requirements are all in the "
         "context. Report issues with object_id, evidence, severity and fix_scope. Do not "
         "describe scores as ad-performance predictions. spoken_timing_verified is always "
-        "false until a voice-measurement step exists; it is not an issue."
+        "false until a voice-measurement step exists; it is not an issue. An asset "
+        "requirement's source_refs can only point to uploaded images or videos, so empty "
+        "source_refs are correct when the job has none."
     )
     sees_storyboard = True
 

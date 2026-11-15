@@ -10,12 +10,33 @@ import re
 from collections import defaultdict
 from collections.abc import Callable
 
-from ..models import INTIMACY_ORDER, RATING_LIMITS, Issue, JobOptions, ProductionPackage
+from ..models import INTIMACY_ORDER, RATING_LIMITS, Issue, JobOptions, ProductionPackage, Shot
 from ..pipeline.asset_aggregation import required_units_for_shot, shot_reference_unit
 from .index import PackageIndex, design_entries, lockable_objects
 from .prose import find_prose_leaks
 
 Check = Callable[[ProductionPackage, PackageIndex, JobOptions], list[Issue]]
+
+
+def _look_ref_problem(sh: Shot) -> str:
+    """Why a shot's look refs don't give each visible character exactly one look, with the
+    fix (a model retry gets this as feedback)."""
+    looks: dict[str, list[str]] = {}
+    for r in sh.character_look_refs:
+        looks.setdefault(r.character_id, []).append(r.look_id)
+    parts = []
+    for cid, ids in looks.items():
+        if len(ids) > 1:
+            parts.append(
+                f"{cid} has {len(ids)} looks ({', '.join(ids)}): a character wears one look per "
+                "shot, so split the shot where the look changes and give each part its look"
+            )
+        if cid not in sh.character_ids:
+            parts.append(f"{cid} has a look ref but is not in character_ids")
+    parts += [
+        f"{cid} is visible but has no look ref" for cid in sh.character_ids if cid not in looks
+    ]
+    return "each visible character needs exactly one look ref: " + "; ".join(parts)
 
 
 def _issue(check: str, object_id: str, evidence: str, fix_scope: str = "") -> Issue:
@@ -215,7 +236,7 @@ def check_references(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -
                 bad(_issue("ref", sid, f"character {cid} not declared in scene"))
         look_chars = [r.character_id for r in sh.character_look_refs]
         if sorted(look_chars) != sorted(set(sh.character_ids)):
-            bad(_issue("ref", sid, "each visible character needs exactly one look ref"))
+            bad(_issue("ref", sid, _look_ref_problem(sh)))
         for r in sh.character_look_refs:
             lk = idx.looks.get(r.look_id)
             if lk is None or lk.character_id != r.character_id:

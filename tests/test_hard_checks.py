@@ -102,3 +102,33 @@ def test_locked_object_modified(package):
     base.locked_ids = ["dl_01_01_01"]
     package.episodes[0].scenes[0].beats[0].dialogue.text = "changed"
     assert [i.object_id for i in check_locks(base, package)] == ["dl_01_01_01"]
+
+
+def look_issues(pkg, options) -> list[str]:
+    return [i.evidence for i in run_hard_checks(pkg, options) if "look ref" in i.evidence]
+
+
+def test_two_looks_in_one_shot_says_to_split_it(package, options):
+    """Seen live: a shirt torn on screen got both looks in one shot, twice, because the
+    feedback didn't say how to fix it."""
+    sh = next(s for s in package.shot_list if s.character_look_refs)
+    ref = sh.character_look_refs[0]
+    sh.character_look_refs.append(ref.model_copy())
+    [evidence] = look_issues(package, options)
+    assert f"{ref.character_id} has 2 looks" in evidence
+    assert "split the shot where the look changes" in evidence
+
+
+def test_a_visible_character_without_a_look_is_named(package, options):
+    sh = next(s for s in package.shot_list if s.character_look_refs)
+    missing = sh.character_look_refs.pop(0).character_id
+    [evidence] = look_issues(package, options)
+    assert f"{missing} is visible but has no look ref" in evidence
+
+
+def test_storyboard_and_review_instructions():
+    from drama_agent.pipeline.steps import ADAPTATION_RULES, ReviewStep, StoryboardStep
+
+    assert "end the shot on the change" in StoryboardStep.directive
+    assert "empty source_refs are correct" in ReviewStep.directive
+    assert "don't copy them there" in ADAPTATION_RULES

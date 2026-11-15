@@ -6,7 +6,7 @@ from drama_agent.fixtures import sample
 from drama_agent.llm import FixtureModelClient
 from drama_agent.models import Job, JobRequest
 from drama_agent.pipeline.orchestrator import Orchestrator
-from drama_agent.pipeline.steps import ADAPTATION_RULES
+from drama_agent.pipeline.steps import ADAPTATION_RULES, ADAPTATION_RULES_VERSION
 from drama_agent.store import InMemoryRepository
 
 KEEP = ["Ryder is a woman", "The last episode echoes the first line"]
@@ -38,7 +38,7 @@ def test_adaptation_rules_go_to_every_step():
     assert {c.stage for c in client.calls} >= {"ingest", "outline", "script", "review"}
     assert all(ADAPTATION_RULES in c.instructions for c in client.calls)
     pkg = repo.get_package(job.package_id)
-    assert pkg.provenance.prompt_versions["adaptation_rules"] == "1"
+    assert pkg.provenance.prompt_versions["adaptation_rules"] == ADAPTATION_RULES_VERSION
 
 
 def test_inspiration_mode_gets_no_adaptation_rules():
