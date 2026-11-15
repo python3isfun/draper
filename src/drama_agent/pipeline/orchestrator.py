@@ -22,6 +22,7 @@ from .steps import (
     PipelineState,
     Step,
     completed_in_order,
+    mode_rules,
 )
 
 log = logging.getLogger(__name__)
@@ -171,7 +172,16 @@ class Orchestrator:
                     context["source_media"] = media_ctx
                 gen = GenerationRequest(
                     stage=step.name,
-                    instructions=f"{self.base_prompt}\n\n{step.directive}\n\n{OUTPUT_RULES}",
+                    instructions="\n\n".join(
+                        p
+                        for p in (
+                            self.base_prompt,
+                            step.directive,
+                            mode_rules(state.request),
+                            OUTPUT_RULES,
+                        )
+                        if p
+                    ),
                     context=context,
                     feedback=issues,
                     attempt=attempt,

@@ -116,6 +116,18 @@ keyframes, transcript), `.../content` (the file, supports range requests),
 | `DRAMA_TRANSCRIBE_MAX_S` | `1800` | audio after this is not transcribed (marked unknown) |
 | `MCPHUB_TRANSCRIBE_MODEL` | `whisper-1` | speech-to-text model |
 
+### Adapting an existing script
+
+Set `options.reference_mode` to `adaptation` (Options → Reference mode) to adapt a source
+instead of using it as inspiration. Every step then gets the adaptation rules: keep the
+source's characters, order of events, reversals, jokes, callbacks and tone; reuse its
+dialogue, trimming rather than rewriting; cut and merge to fit 3 x 120 s rather than invent
+plot; resolve the source's own contradictions by the majority reading; and say in notes what
+was cut. Each source's `must_keep` items are requirements: the ingest step must list each
+one word for word under `user_constraints`, or it is retried with the missing items as
+feedback. `may_change` lists what may be altered. Packages record
+`provenance.prompt_versions.adaptation_rules`.
+
 ### Cast, set and prop sheets
 
 Each package includes three standalone design documents. Each one has its own versioned

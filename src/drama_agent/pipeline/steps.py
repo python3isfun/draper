@@ -178,6 +178,11 @@ class PipelineState:
                 prompt_versions={
                     "orchestrator": ORCHESTRATOR_PROMPT_VERSION,
                     "output_rules": OUTPUT_RULES_VERSION,
+                    **(
+                        {"adaptation_rules": ADAPTATION_RULES_VERSION}
+                        if self.request.options.reference_mode == "adaptation"
+                        else {}
+                    ),
                 },
             ),
             qa_report=self.qa_report,
@@ -291,6 +296,49 @@ PROSE_RULES = (
 
 OUTPUT_RULES = f"{ID_CONVENTIONS}\n\n{PROSE_RULES}"
 
+# Added to every step's instructions when request.options.reference_mode is "adaptation".
+# Bump ADAPTATION_RULES_VERSION when they change (recorded in provenance.prompt_versions).
+ADAPTATION_RULES_VERSION = "1"
+ADAPTATION_RULES = (
+    'Adaptation mode (request.options.reference_mode is "adaptation"): the sources are the '
+    "story to adapt, not inspiration.\n"
+    "- Keep the source's characters (names, genders, roles, relationships), premise, order "
+    "of events, key reversals, running jokes and callbacks, and its tone.\n"
+    "- Reuse the source's dialogue wherever it fits, trimming rather than rewriting; write "
+    "new lines only to bridge cuts or merges.\n"
+    "- To fit the episode count and length, cut and merge scenes and beats instead of "
+    "inventing plot; when material must go, keep what sets up a later payoff.\n"
+    "- Every item in a source's must_keep is a requirement. may_change lists what you may "
+    "alter; anything else changes only as much as the format requires.\n"
+    "- Where the source contradicts itself (a pronoun or a count that changes, a typo), "
+    "follow the reading that most of the source supports and say so in notes.\n"
+    "- Say in notes what you cut or merged and why.\n"
+    "- In the ingest step, list every must_keep item word for word under user_constraints."
+)
+
+
+def mode_rules(request: JobRequest) -> str:
+    """Instructions that depend on the request's options (empty when none apply)."""
+    return ADAPTATION_RULES if request.options.reference_mode == "adaptation" else ""
+
+
+def missing_must_keep(request: JobRequest, brief: SourceBrief) -> list[Issue]:
+    """Adaptation: each source's must_keep items must reach the brief's user_constraints
+    (the later steps work from the brief), compared ignoring case and spacing."""
+    if request.options.reference_mode != "adaptation":
+        return []
+    have = " \n ".join(" ".join(c.split()).casefold() for c in brief.user_constraints)
+    return [
+        Issue(
+            check="must_keep",
+            object_id=f"source[{i}]",
+            evidence=f"must_keep item missing from user_constraints: {item!r}",
+        )
+        for i, src in enumerate(request.sources)
+        for item in src.must_keep
+        if " ".join(item.split()).casefold() not in have
+    ]
+
 
 class Step:
     name: StageName
@@ -341,6 +389,7 @@ class IngestStep(Step):
             for i in range(len(sources))
             if i not in covered
         ]
+        issues += missing_must_keep(state.request, brief)
         for cov in brief.source_coverage:
             if not 0 <= cov.source_index < len(sources):
                 continue
