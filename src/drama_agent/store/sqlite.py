@@ -17,13 +17,13 @@ from ..experiment import ExpSession, ExpTurn
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
-from ..shot_frames import ShotPlan, ShotTake, approval_changes
+from ..shot_frames import PromptVersion, ShotPlan, ShotTake, approval_changes
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
 # v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns.
-# v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. Each step is additive, so
-# older files upgrade in place (see _migrate).
-SCHEMA_VERSION = 9
+# v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. v10: shot_prompts. Each
+# step is additive, so older files upgrade in place (see _migrate).
+SCHEMA_VERSION = 10
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -130,6 +130,16 @@ CREATE TABLE IF NOT EXISTS shot_takes (
     data        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS shot_takes_pkg ON shot_takes (package_id, revision_id, shot_id);
+CREATE TABLE IF NOT EXISTS shot_prompts (
+    version_id  TEXT PRIMARY KEY,
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    shot_id     TEXT NOT NULL,
+    sub_shot    INTEGER NOT NULL,
+    v           INTEGER NOT NULL,           -- 1, 2, ... per shot and sub-shot
+    data        TEXT NOT NULL,
+    UNIQUE (package_id, revision_id, shot_id, sub_shot, v)
+);
 CREATE TABLE IF NOT EXISTS shot_plans (
     package_id  TEXT NOT NULL,
     revision_id TEXT NOT NULL,
@@ -735,6 +745,41 @@ class SqliteRepository:
             p.status, p.error = "failed", error
             self.save_shot_plan(p)
         return len(rows)
+
+    def add_prompt_version(self, version: PromptVersion) -> PromptVersion:
+        """Store a new prompt version, numbered next for its shot and sub-shot (in one
+        transaction, so the writer and an editor never get the same number)."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                (last,) = self._conn.execute(
+                    "SELECT coalesce(max(v), 0) FROM shot_prompts WHERE package_id = ? "
+                    "AND revision_id = ? AND shot_id = ? AND sub_shot = ?",
+                    (version.package_id, version.revision_id, version.shot_id,
+                     version.sub_shot),
+                ).fetchone()  # fmt: skip
+                version = version.model_copy(update={"v": last + 1})
+                self._conn.execute(
+                    "INSERT INTO shot_prompts (version_id, package_id, revision_id, shot_id, "
+                    "sub_shot, v, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (version.version_id, version.package_id, version.revision_id,
+                     version.shot_id, version.sub_shot, version.v, version.model_dump_json()),
+                )  # fmt: skip
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            self._conn.execute("COMMIT")
+        return version
+
+    def list_prompt_versions(self, package_id: str, revision_id: str) -> list[PromptVersion]:
+        """Every keyframe prompt version of a package revision, oldest first per sub-shot."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM shot_prompts WHERE package_id = ? AND revision_id = ? "
+                "ORDER BY shot_id, sub_shot, v",
+                (package_id, revision_id),
+            ).fetchall()
+        return [PromptVersion.model_validate_json(r[0]) for r in rows]
 
     def fail_unfinished_shot_takes(self, error: str) -> int:
         with self._lock:

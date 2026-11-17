@@ -8,7 +8,8 @@
  */
 
 const frames = { key: null, view: null, error: "", notes: [], timer: null, loading: false,
-  draws: 2, rounds: 3, directions: {}, prompts: {}, plans: {}, episode: "all" };
+  draws: 2, rounds: 3, directions: {}, prompts: {}, plans: {}, episode: "all",
+  sel: {}, notes2: {}, compare: {}, diffs: new Map() };
 
 const framesKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
 const framesBase = (pkg) => `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/keyframes`;
@@ -107,7 +108,9 @@ function renderFrameTake(take) {
         ? h("span", { class: "chip ok" }, "passed")
         : h("span", { class: "chip warn" }, take.auto && take.round < take.max_rounds ? "revising…" : "no draw passed: your call")),
       take.direction && h("span", { class: "chip" }, `“${take.direction}”`),
+      take.prompt_version && h("span", { class: "chip", title: "The prompt version this take draws" }, `prompt v${take.prompt_version}`),
       take.prompt_source === "user" && h("span", { class: "chip" }, "your prompt"),
+      take.warnings && take.warnings.length > 0 && h("span", { class: "chip warn", title: take.warnings.join("\n") }, `${take.warnings.length} rule finding${take.warnings.length > 1 ? "s" : ""}`),
       take.prompt_source === "template" && h("span", { class: "chip warn" }, "template prompt"),
       h("span", { class: "take-actions" },
         uncheckable && h("button", { type: "button", class: "btn ghost small",
@@ -128,33 +131,112 @@ function renderFrameTake(take) {
   );
 }
 
+// Word-level diff of two prompts (longest common subsequence) as [kind, text] parts, kind
+// "=", "-" or "+". Cached per pair of texts: the board redraws every 2 s while busy.
+function wordDiff(a, b) {
+  const key = `${a}\u0000${b}`;
+  if (frames.diffs.has(key)) return frames.diffs.get(key);
+  const x = a.split(/(\s+)/), y = b.split(/(\s+)/);
+  const n = x.length, m = y.length;
+  const L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (x[i] === y[j]) { out.push(["=", x[i]]); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) out.push(["-", x[i++]]);
+    else out.push(["+", y[j++]]);
+  }
+  while (i < n) out.push(["-", x[i++]]);
+  while (j < m) out.push(["+", y[j++]]);
+  if (frames.diffs.size > 50) frames.diffs.clear();
+  frames.diffs.set(key, out);
+  return out;
+}
+
+const diffNodes = (parts) => parts.map(([k, t]) => (k === "=" ? t : h(k === "-" ? "del" : "ins", {}, t)));
+
+const SOURCE_LABEL = { model: "written by the model", template: "built-in template", user: "your edit" };
+
+// The sub-shot's prompt: its versions, an editor (save as the next version), compare with an
+// earlier version, and draw any version with the last take's seeds.
+function renderPromptVersions(pkg, shot, sub) {
+  const key = `${shot.shot_id}|${sub.index}`;
+  const versions = sub.versions || [];
+  const latest = versions[versions.length - 1];
+  const nextV = sub.next_version || (latest ? latest.v + 1 : 1);
+  const selV = frames.sel[key] ?? (latest ? latest.v : null);
+  const sel = versions.find((v) => v.v === selV) || latest;
+  const url = `${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}`;
+  const draft = frames.prompts[key];
+  const text = draft ?? (sel ? sel.prompt : "");
+  const box = h("textarea", { class: "prompt-edit", rows: 9, spellcheck: "false",
+    placeholder: "Write the prompt: <Picture N> are the reference pictures above, in order.",
+    oninput: (e) => { frames.prompts[key] = e.target.value; sync(); } });
+  box.value = text;
+  const note = h("input", { type: "text", placeholder: "What you changed (optional)",
+    oninput: (e) => { frames.notes2[key] = e.target.value; } });
+  note.value = frames.notes2[key] || "";
+  const edited = () => sel ? box.value.trim() !== sel.prompt.trim() : box.value.trim() !== "";
+  const saveBtn = h("button", { type: "button", class: "btn small", onclick: async (e) => {
+    const out = await frameAction(`${url}/prompts`, e.currentTarget, { revision_id: pkg.revision_id, sub_shot: sub.index, prompt: box.value, based_on: sel ? sel.v : null, note: frames.notes2[key] || "" });
+    if (out && !frames.error) { delete frames.prompts[key]; delete frames.notes2[key]; frames.sel[key] = out.v; renderMain(); }
+  } }, `Save as v${nextV}`);
+  const drawBtn = h("button", { type: "button", class: "btn small", onclick: async (e) => {
+    const body = { revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws };
+    if (edited()) Object.assign(body, { prompt: box.value, based_on: sel ? sel.v : null, note: frames.notes2[key] || "" });
+    else body.prompt_version = sel.v;
+    await frameAction(url, e.currentTarget, body);
+    if (!frames.error) { delete frames.prompts[key]; delete frames.notes2[key]; delete frames.sel[key]; renderMain(); }
+  } }, "");
+  const counter = h("span", { class: "muted small" });
+  function sync() {
+    const changed = edited();
+    saveBtn.disabled = !changed || !box.value.trim();
+    drawBtn.disabled = !box.value.trim();
+    drawBtn.textContent = changed ? "Save and draw" : sel ? `Draw v${sel.v}` : "Draw";
+    counter.textContent = `${box.value.length.toLocaleString()} characters${changed ? " · edited" : ""}`;
+  }
+  sync();
+  const against = frames.compare[key];
+  const base = against != null && against !== sel?.v && versions.find((v) => v.v === against);
+  return stickyDetails(`kfv:${key}`, versions.length ? `Prompt · v${sel.v} · ${versions.length} version${versions.length > 1 ? "s" : ""}` : "Prompt",
+    versions.length > 0 && h("div", { class: "version-row" },
+      h("label", { class: "small" }, "Version ",
+        h("select", { "aria-label": "Prompt version", onchange: (e) => { frames.sel[key] = Number(e.target.value); delete frames.prompts[key]; delete frames.compare[key]; renderMain(); } },
+          [...versions].reverse().map((v) => h("option", { value: v.v, selected: v.v === sel.v },
+            `v${v.v} · ${SOURCE_LABEL[v.source] || v.source}${v.based_on ? ` from v${v.based_on}` : ""} · ${timeAgo(v.created_at)}`)))),
+      versions.length > 1 && h("label", { class: "small" }, " compare with ",
+        h("select", { "aria-label": "Compare with", onchange: (e) => { frames.compare[key] = e.target.value === "" ? null : Number(e.target.value); renderMain(); } },
+          h("option", { value: "" }, "—"),
+          versions.filter((v) => v.v !== sel.v).reverse().map((v) => h("option", { value: v.v, selected: v.v === against }, `v${v.v}`))))),
+    sel && sel.note && h("p", { class: "small muted" }, sel.note),
+    sel && sel.findings.length > 0 && h("div", { class: "small warn-text" }, h("strong", {}, `v${sel.v} breaks the H3 image rules:`),
+      h("ul", { class: "plain" }, sel.findings.map((f) => h("li", {}, f)))),
+    base && h("div", { class: "prompt-diff small" }, h("div", { class: "muted" }, `Changes from v${base.v} to v${sel.v}:`), diffNodes(wordDiff(base.prompt, sel.prompt))),
+    box,
+    h("div", { class: "prompt-edit-actions" }, note),
+    h("div", { class: "prompt-edit-actions" }, saveBtn, drawBtn,
+      draft != null && h("button", { type: "button", class: "btn ghost small", onclick: () => { delete frames.prompts[key]; renderMain(); } }, "Discard edits"),
+      counter),
+    h("p", { class: "muted small" }, "Saving keeps every version. Drawing a version uses the last take's seeds, so its draws compare one for one; a version is drawn as written, never rewritten. To restore an old version, pick it and draw it, or save it again as the newest."));
+}
+
 function renderNewFrameTake(pkg, shot, sub) {
   const key = `${shot.shot_id}|${sub.index}`;
-  const input = h("input", { type: "text", placeholder: "Direction (optional), e.g. tighter on the speaker, rain on the window",
+  const input = h("input", { type: "text", placeholder: "Direction for the writer (optional), e.g. tighter on the speaker, rain on the window",
     oninput: (e) => { frames.directions[key] = e.target.value; } });
   input.value = frames.directions[key] || "";
-  const box = h("textarea", { class: "prompt-edit", rows: 6, spellcheck: "false", placeholder: "Your own prompt: <Picture N> are the reference pictures above, in order.",
-    oninput: (e) => { frames.prompts[key] = e.target.value; } });
-  box.value = frames.prompts[key] || "";
   const url = `${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}`;
-  const body = (extra) => ({ revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws, max_rounds: frames.rounds, ...extra });
   return h("div", {},
+    renderPromptVersions(pkg, shot, sub),
     h("div", { class: "new-take" }, input,
-      h("button", { type: "button", class: "btn small", onclick: async (e) => {
+      h("button", { type: "button", class: "btn small", title: "The model writes a new prompt version and draws it", onclick: async (e) => {
         const direction = (frames.directions[key] || "").trim();
-        await frameAction(url, e.currentTarget, body({ direction: direction || null }));
+        await frameAction(url, e.currentTarget, { revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws, max_rounds: frames.rounds, direction: direction || null });
         if (!frames.error) { frames.directions[key] = ""; renderMain(); }
       } }, "New take")),
-    stickyDetails(`kfp:${key}`, "Write the prompt yourself",
-      box,
-      h("div", { class: "prompt-edit-actions" },
-        h("button", { type: "button", class: "btn small", onclick: async (e) => {
-          const prompt = (frames.prompts[key] || "").trim();
-          if (!prompt) return;
-          await frameAction(url, e.currentTarget, body({ prompt, auto: false }));
-          if (!frames.error) { frames.prompts[key] = ""; renderMain(); }
-        } }, "Draw my prompt"),
-        h("span", { class: "muted small" }, "Checked like any other take, but never rewritten automatically."))),
   );
 }
 

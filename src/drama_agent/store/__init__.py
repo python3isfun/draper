@@ -9,7 +9,7 @@ from ..experiment import ExpSession, ExpTurn
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
-from ..shot_frames import ShotPlan, ShotTake, approval_changes
+from ..shot_frames import PromptVersion, ShotPlan, ShotTake, approval_changes
 
 
 class Repository(Protocol):
@@ -75,6 +75,8 @@ class Repository(Protocol):
     def get_shot_plan(self, package_id: str, revision_id: str, shot_id: str) -> ShotPlan | None: ...
     def list_shot_plans(self, package_id: str, revision_id: str) -> list[ShotPlan]: ...
     def fail_unfinished_shot_plans(self, error: str) -> int: ...
+    def add_prompt_version(self, version: PromptVersion) -> PromptVersion: ...
+    def list_prompt_versions(self, package_id: str, revision_id: str) -> list[PromptVersion]: ...
 
 
 class InMemoryRepository:
@@ -100,6 +102,7 @@ class InMemoryRepository:
         self.exp_next_label: dict[str, int] = {}
         self.shot_takes: dict[str, ShotTake] = {}
         self.shot_plans: dict[tuple[str, str, str], ShotPlan] = {}
+        self.prompt_versions: list[PromptVersion] = []
 
     def save_source_asset(self, asset_id: str, meta: dict[str, Any]) -> None:
         self.source_assets[asset_id] = meta
@@ -369,6 +372,25 @@ class InMemoryRepository:
     def list_shot_plans(self, package_id: str, revision_id: str) -> list[ShotPlan]:
         return [p.model_copy(deep=True) for (pid, rid, _), p in self.shot_plans.items()
                 if (pid, rid) == (package_id, revision_id)]  # fmt: skip
+
+    def add_prompt_version(self, version: PromptVersion) -> PromptVersion:
+        key = (version.package_id, version.revision_id, version.shot_id, version.sub_shot)
+        last = max((v.v for v in self.prompt_versions
+                    if (v.package_id, v.revision_id, v.shot_id, v.sub_shot) == key), default=0)  # fmt: skip
+        version = version.model_copy(update={"v": last + 1}, deep=True)
+        self.prompt_versions.append(version)
+        return version.model_copy(deep=True)
+
+    def list_prompt_versions(self, package_id: str, revision_id: str) -> list[PromptVersion]:
+        mine = [
+            v
+            for v in self.prompt_versions
+            if (v.package_id, v.revision_id) == (package_id, revision_id)
+        ]
+        return [
+            v.model_copy(deep=True)
+            for v in sorted(mine, key=lambda v: (v.shot_id, v.sub_shot, v.v))
+        ]
 
     def fail_unfinished_shot_plans(self, error: str) -> int:
         n = 0

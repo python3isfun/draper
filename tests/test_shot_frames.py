@@ -24,6 +24,7 @@ from drama_agent.shot_frames import (
     NotReady,
     PlannedSubShot,
     PlanOutput,
+    PromptVersion,
     ShotFrameRunner,
     ShotPicks,
     ShotPlan,
@@ -31,14 +32,17 @@ from drama_agent.shot_frames import (
     current_sub,
     make_sub_shots,
     next_round,
+    picture_sentences,
     plan_of,
     plan_take,
     planned_sub_shots,
+    prompt_findings,
     score,
     shot_of,
     shot_references,
     single_plan,
     stale_approvals,
+    template_prompt,
 )
 from drama_agent.store import InMemoryRepository
 from drama_agent.store.sqlite import SqliteRepository
@@ -793,3 +797,265 @@ def test_sqlite_keeps_plans(tmp_path, package):
     repo.save_shot_plan(plan)
     assert repo.fail_unfinished_shot_plans("restarted") == 1
     assert repo.get_shot_plan(plan.package_id, plan.revision_id, plan.shot_id).status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# H3 prompt rules and prompt versions
+
+PASTED = (
+    "The woman in <Picture 1> is <Subject 1>. The man in <Picture 2> is <Subject 2>. "
+    "The apartment in <Picture 3> is <Subject 3>. The woman's grooming in <Picture 4> is "
+    "<Subject 4>. The target image is a still frame from a live-action short drama. Both are "
+    "fully clothed in a non-intimate morning conversation. <Subject 1> is partially preserved. "
+    "<Subject 2> is partially preserved. <Subject 3> is partially preserved. <Subject 4> serves "
+    "as a weak reference for natural makeup only, without transferring facial features. The bed "
+    "is unoccupied, with nobody beneath it. Frame both faces clearly and retain the foreground "
+    "floor. No other lettering is added."
+)
+
+
+def face_take(package):
+    """A take on the busiest shot: looks, the set, props and faces."""
+    shot = busiest(package)
+    return plan_take(package, done_images(package), [], single_plan(package, shot))
+
+
+def test_the_rule_check_finds_what_was_wrong_with_the_pasted_prompt(package):
+    take = face_take(package)
+    refs = take.references[:4]
+    refs[3] = refs[3].model_copy(update={"kind": "face"})
+    found = " | ".join(prompt_findings(PASTED, refs))
+    assert "uses negation (nobody, without)" in found
+    assert "gives instructions (frame)" in found
+    assert "story or intent words" in found and "non-intimate" in found
+    assert "weakens <Subject 4>, a face picture" in found
+
+
+def test_the_template_follows_the_rules_and_transfers_faces(package):
+    take = face_take(package)
+    prompt = template_prompt(package, take)
+    assert prompt_findings(prompt, take.references) == []
+    sentences = picture_sentences(package, take)
+    faces = [x for x, r in zip(sentences, take.references, strict=True) if r.kind == "face"]
+    assert faces and all("supplies the exact facial features transferred to" in x["relationship"]
+                         for x in faces)  # fmt: skip
+    # A later sub-shot's template too (previous keyframe first).
+    plan = two_cuts(package, busiest(package))
+    one = finished(plan_take(package, done_images(package), [], plan))
+    two = plan_take(package, done_images(package), [one], plan, sub_shot=2)
+    assert prompt_findings(template_prompt(package, two), two.references) == []
+
+
+class SloppyThenFixed(FixtureModelClient):
+    """The writer's first draft breaks the rules; its repair follows them."""
+
+    async def generate(self, request, output_model):
+        out = await super().generate(request, output_model)
+        if request.stage == "shot_frames" and request.attempt == 0:
+            out.prompt = out.prompt.replace("The target image", "Keep the faces. The target image")
+        return out
+
+
+def test_a_prompt_that_breaks_the_rules_is_repaired_once(tmp_path):
+    with Board(tmp_path, text=SloppyThenFixed()) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        first, second = b.calls("shot_frames")
+        assert first.context["pictures"][0]["define"].endswith("is <Subject 1>.")
+        assert any("instructions (keep)" in f for f in second.context["fixes"])
+        assert take["prompt_source"] == "model" and take["warnings"] == []
+        assert "Keep the faces" not in take["prompt"] and take["prompt_version"] == 1
+
+
+class AlwaysSloppy(FixtureModelClient):
+    async def generate(self, request, output_model):
+        out = await super().generate(request, output_model)
+        if request.stage == "shot_frames":
+            out.prompt = out.prompt.replace("The target image", "Nobody else. The target image")
+        return out
+
+
+def test_a_prompt_still_off_after_repair_is_kept_with_warnings(tmp_path):
+    with Board(tmp_path, text=AlwaysSloppy()) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        assert take["prompt_source"] == "model" and "Nobody else" in take["prompt"]
+        assert any("negation" in w for w in take["warnings"])
+        [version] = b.shot(sid)["sub_shots"][0]["versions"]
+        assert version["v"] == 1 and version["findings"] == take["warnings"]
+
+
+def test_prompt_versions_can_be_edited_compared_and_drawn(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 2})
+        [first] = b.wait() and b.takes(sid)
+        [v1] = b.shot(sid)["sub_shots"][0]["versions"]
+        assert v1["v"] == 1 and v1["source"] == "model" and v1["take_id"] == first["take_id"]
+        # An edit is saved as v2, with its findings; nothing is drawn.
+        edited = v1["prompt"].replace("No other lettering", "Warm lamp light. No other lettering")
+        r = b.http.post(f"{b.base}/{sid}/prompts",
+                        json={"prompt": edited, "based_on": 1, "note": "warmer"})  # fmt: skip
+        assert r.status_code == 201, r.text
+        v2 = r.json()
+        assert (v2["v"], v2["source"], v2["based_on"], v2["note"]) == (2, "user", 1, "warmer")
+        assert len(b.takes(sid)) == 1
+        bad = b.http.post(f"{b.base}/{sid}/prompts", json={"prompt": "<Picture 30> is it."})
+        assert bad.status_code == 422 and "<Picture 30>" in bad.json()["detail"]
+        sloppy = b.http.post(f"{b.base}/{sid}/prompts",
+                             json={"prompt": edited.replace("Warm", "Do not dim the")})  # fmt: skip
+        assert sloppy.status_code == 201 and sloppy.json()["findings"]
+        # Drawing v2 uses the last take's seeds, so the draws compare one for one.
+        r = b.http.post(f"{b.base}/{sid}", json={"prompt_version": 2})
+        assert r.status_code == 202, r.text
+        take = r.json()
+        assert take["prompt"] == edited and take["prompt_version"] == 2 and not take["auto"]
+        assert take["seeds"] == first["seeds"] and take["prompt_source"] == "user"
+        b.wait()
+        assert [v["v"] for v in b.shot(sid)["sub_shots"][0]["versions"]] == [1, 2, 3]
+        assert b.http.post(f"{b.base}/{sid}", json={"prompt_version": 9}).status_code == 404
+        # A new plan for the sub-shot starts its own history.
+        shot = b.shot(sid)
+        if shot["duration_ms"] >= 2000 and shot["people"]:
+            b.http.post(f"{b.base}/{sid}/plan", json=b.two_cuts(shot))
+            assert b.shot(sid)["sub_shots"][0]["versions"] == []
+            r = b.http.post(f"{b.base}/{sid}", json={"prompt_version": 2})
+            assert r.status_code == 409 and "older plan" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_prompt_versions_are_numbered_per_sub_shot(kind, package, tmp_path):
+    repo = InMemoryRepository() if kind == "memory" else SqliteRepository(tmp_path / "t.db")
+    shot = busiest(package)
+    plan = two_cuts(package, shot)
+
+    def add(sub):
+        return repo.add_prompt_version(PromptVersion(
+            package_id=package.package_id, revision_id=package.revision_id,
+            shot_id=shot.shot_id, sub_shot=sub, spec=plan.sub(sub), prompt="p", source="user",
+        ))  # fmt: skip
+
+    assert [add(1).v, add(1).v, add(2).v, add(1).v] == [1, 2, 1, 3]
+    got = repo.list_prompt_versions(package.package_id, package.revision_id)
+    assert [(v.sub_shot, v.v) for v in got] == [(1, 1), (1, 2), (1, 3), (2, 1)]
+
+
+class RoundTwoSloppy(FixtureModelClient):
+    """The judge fails round 1; round 2's first draft breaks a rule; its repair is clean."""
+
+    async def generate(self, request, output_model):
+        out = await super().generate(request, output_model)
+        if request.stage == "shot_check" and "FIXED" not in request.context["prompt"]:
+            out.items.append(CheckItem(item="Frank: wardrobe", kind="wardrobe", passed=False,
+                                       finding="the coat is blue"))  # fmt: skip
+        if request.stage == "shot_frames" and request.context["fixes"]:
+            out.prompt += " FIXED"
+            if request.attempt == 0:
+                out.prompt = out.prompt.replace("The target image", "Keep it. The target image")
+        return out
+
+
+def test_the_repair_keeps_the_rounds_own_fixes(tmp_path):
+    with Board(tmp_path, text=RoundTwoSloppy()) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        _, two = b.wait() and b.takes(sid)
+        repair = b.calls("shot_frames")[-1]
+        assert repair.attempt == 1
+        assert "Frank: wardrobe: the coat is blue" in repair.context["fixes"]
+        assert any(f.startswith("The rule check:") for f in repair.context["fixes"])
+        assert two["warnings"] == [] and "Keep it" not in two["prompt"]
+
+
+class SoftThenBroken(FixtureModelClient):
+    """The first draft has a soft finding; the repair cites a picture that isn't sent."""
+
+    async def generate(self, request, output_model):
+        out = await super().generate(request, output_model)
+        if request.stage == "shot_frames":
+            if request.attempt == 0:
+                out.prompt = out.prompt.replace("The target image", "Nobody else. The target image")
+            else:
+                out.prompt += " <Picture 30> is <Subject 30>."
+        return out
+
+
+def test_a_usable_first_draft_survives_a_broken_repair(tmp_path):
+    with Board(tmp_path, text=SoftThenBroken()) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        assert take["prompt_source"] == "model" and "Nobody else" in take["prompt"]
+        assert "<Picture 30>" not in take["prompt"]
+        assert any("negation" in w for w in take["warnings"])
+
+
+class StoryWordsOnly(FixtureModelClient):
+    async def generate(self, request, output_model):
+        out = await super().generate(request, output_model)
+        if request.stage == "shot_frames":
+            out.prompt = out.prompt.replace(
+                "The target image", "A platonic moment. The target image"
+            )
+        return out
+
+
+def test_story_words_alone_dont_cost_a_second_call(tmp_path):
+    with Board(tmp_path, text=StoryWordsOnly()) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        assert len(b.calls("shot_frames")) == 1
+        assert any("story or intent" in w for w in take["warnings"])
+
+
+def test_ordinary_words_are_not_flagged():
+    text = ("Lila in <Picture 1> is <Subject 1>. The target image is a still frame of a quiet "
+            "conversation; the intimate lamp light shows her face. <Subject 1> is partially "
+            "preserved. Use of warm tones. No other lettering is added.")  # fmt: skip
+    ref = FrameRef(ref_id="img_1", role="Lila", kind="look", entity_id="ch_lila")
+    assert prompt_findings(text, [ref]) == []
+
+
+def test_save_and_draw_keeps_lineage_and_saves_nothing_when_refused(tmp_path):
+    with Board(tmp_path) as b:
+        sid = first_shot(b)
+        r = b.http.post(f"{b.base}/{sid}", json={"prompt": "x", "draws": 1})
+        assert r.status_code == 409 and "first: " in r.json()["detail"]  # no picks yet
+        assert b.shot(sid)["sub_shots"][0]["versions"] == []
+        b.design()
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        [v1] = b.shot(sid)["sub_shots"][0]["versions"]
+        edited = v1["prompt"].replace(
+            "No other lettering", "Rain streaks the window. No other lettering"
+        )
+        r = b.http.post(f"{b.base}/{sid}",
+                        json={"prompt": edited, "based_on": 1, "note": "rain", "draws": 1})  # fmt: skip
+        assert r.status_code == 202, r.text
+        b.wait()
+        v2 = b.shot(sid)["sub_shots"][0]["versions"][-1]
+        assert (v2["v"], v2["based_on"], v2["note"]) == (2, 1, "rain")
+        assert b.shot(sid)["sub_shots"][0]["next_version"] == 3
+        # After a re-plan the list starts afresh, but numbering continues.
+        shot = b.shot(sid)
+        if shot["duration_ms"] >= 2000 and shot["people"]:
+            b.http.post(f"{b.base}/{sid}/plan", json=b.two_cuts(shot))
+            sub = b.shot(sid)["sub_shots"][0]
+            assert sub["versions"] == [] and sub["next_version"] == 3
+
+
+def test_a_definition_never_loses_its_subject(package):
+    take = face_take(package)
+    take.references = [r.model_copy(update={"entity_id": "ch_unknown"}) if r.kind in ("look", "face")
+                       else r for r in take.references]  # fmt: skip
+    for x in picture_sentences(package, take):
+        assert not x["define"].startswith(" ") and x["define"][0].isupper()

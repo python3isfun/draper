@@ -21,6 +21,7 @@ from ..shot_frames import (
     MAX_ROUNDS,
     MAX_SUB_SHOTS,
     NotReady,
+    PromptVersion,
     ShotFrameRunner,
     ShotPlan,
     ShotTake,
@@ -28,13 +29,16 @@ from ..shot_frames import (
     current_sub,
     frame_ref,
     is_busy,
+    is_hard,
     make_sub_shots,
     plan_of,
     plan_take,
+    prompt_findings,
     shot_board,
     shot_of,
     shot_picks,
     stale_approvals,
+    sub_shot_for,
 )
 
 
@@ -44,9 +48,21 @@ class KeyframeRequest(BaseModel):
     draws: int = Field(DEFAULT_DRAWS, ge=1, le=MAX_DRAWS)
     seeds: list[int] = Field(default_factory=list, max_length=MAX_DRAWS)
     direction: str | None = Field(None, max_length=1000)
-    prompt: str | None = None  # the user's own prompt (no automatic rewrite)
+    # Draw a saved prompt version as it is, or `prompt` (saved as a new version first).
+    prompt_version: int | None = Field(None, ge=1)
+    prompt: str | None = None
+    based_on: int | None = Field(None, ge=1)  # with `prompt`: the version it edits
+    note: str = Field("", max_length=500)  # with `prompt`: what was changed
     auto: bool = True
     max_rounds: int = Field(MAX_ROUNDS, ge=1, le=MAX_ROUNDS)
+
+
+class PromptRequest(BaseModel):
+    revision_id: str | None = None
+    sub_shot: int = Field(1, ge=1, le=MAX_SUB_SHOTS)
+    prompt: str = Field(min_length=1)
+    based_on: int | None = Field(None, ge=1)  # the version this edits
+    note: str = Field("", max_length=500)
 
 
 class KeyframeBatchRequest(BaseModel):
@@ -103,7 +119,8 @@ def register(
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         plans = repo.list_shot_plans(pkg.package_id, pkg.revision_id)
         images = repo.list_images(pkg.package_id, pkg.revision_id)
-        shots = shot_board(pkg, images, takes, plans)
+        versions = repo.list_prompt_versions(pkg.package_id, pkg.revision_id)
+        shots = shot_board(pkg, images, takes, plans, versions)
         return KeyframeBoard(
             package_id=pkg.package_id,
             revision_id=pkg.revision_id,
@@ -179,6 +196,58 @@ def register(
             repo.approve_shot_draw(t.take_id, None)
         return plan
 
+    async def _save_version(
+        pkg: ProductionPackage, shot: Shot, plan: ShotPlan, req: PromptRequest
+    ) -> PromptVersion:
+        """A person's prompt as the sub-shot's next version: checked against the H3 image
+        rules (a picture it can't cite, empty or too long is refused; other findings are
+        kept on the version) and screened by the content guard."""
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        images = repo.list_images(pkg.package_id, pkg.revision_id)
+        try:
+            sub, refs = sub_shot_for(pkg, images, takes, plan, req.sub_shot)
+        except NotReady as exc:
+            raise HTTPException(409, str(exc)) from None
+        prompt = req.prompt.strip()
+        findings = prompt_findings(prompt, refs)
+        if hard := [f for f in findings if is_hard(f)]:
+            raise HTTPException(422, "The prompt " + "; ".join(hard) + ".")
+        try:
+            # Open-mode rules: the face and look pictures are the production's chosen
+            # designs (rule 3 still applies; the runner refuses intimacy with a likeness).
+            await screen(
+                text_client,
+                prompt,
+                pictures=[
+                    {"picture": f"<Picture {n}>", "kind": r.role} for n, r in enumerate(refs, 1)
+                ],
+                restrictive=False,
+            )
+        except GuardRefused as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return repo.add_prompt_version(
+            PromptVersion(
+                package_id=pkg.package_id, revision_id=pkg.revision_id, shot_id=shot.shot_id,
+                sub_shot=req.sub_shot, spec=sub, prompt=prompt, source="user",
+                note=req.note.strip(), based_on=req.based_on, findings=findings,
+            )
+        )  # fmt: skip
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/prompts",
+        status_code=201,
+        response_model=PromptVersion,
+    )
+    async def save_prompt_version(
+        package_id: str, shot_id: str, req: PromptRequest
+    ) -> PromptVersion:
+        """Save an edited prompt as the sub-shot's next version (nothing is drawn). Restore
+        an old version by saving its text again."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        _, plan = _plan(pkg, shot)
+        return await _save_version(pkg, shot, plan, req)
+
     @app.post(
         "/v1/drama-packages/{package_id}/keyframes/{shot_id}",
         status_code=202,
@@ -186,22 +255,47 @@ def register(
     )
     async def new_keyframe_take(package_id: str, shot_id: str, req: KeyframeRequest) -> ShotTake:
         """A new take on a sub-shot's keyframe: written by the model (steered by
-        `direction`, revising the newest take against its check), or the user's own
-        `prompt`. Drawn, checked and, with `auto`, revised until a draw passes."""
+        `direction`, revising the newest take against its check), or a prompt version
+        drawn as it is (`prompt_version`, or `prompt`, saved as a new version first) with
+        the newest take's seeds unless `seeds` are given. Drawn, checked and, for a written
+        prompt with `auto`, revised until a draw passes."""
         pkg = _writable(package_id, req.revision_id)
         shot = _shot(pkg, shot_id)
         _, plan = _plan(pkg, shot)
+        version = None
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        images = repo.list_images(pkg.package_id, pkg.revision_id)
+        if req.prompt is not None:
+            # Check the draw can start before the prompt is saved, so a refused draw
+            # leaves no version behind.
+            try:
+                plan_take(pkg, images, takes, plan, sub_shot=req.sub_shot, draws=req.draws)
+            except NotReady as exc:
+                raise HTTPException(409, str(exc)) from None
+            version = await _save_version(
+                pkg, shot, plan,
+                PromptRequest(revision_id=req.revision_id, sub_shot=req.sub_shot,
+                              prompt=req.prompt, based_on=req.based_on, note=req.note),
+            )  # fmt: skip
+        elif req.prompt_version is not None:
+            version = next(
+                (v for v in repo.list_prompt_versions(pkg.package_id, pkg.revision_id)
+                 if (v.shot_id, v.sub_shot, v.v) == (shot_id, req.sub_shot, req.prompt_version)),
+                None,
+            )  # fmt: skip
+            if version is None:
+                raise HTTPException(404, f"no prompt v{req.prompt_version} for this sub-shot")
         try:
             take = plan_take(
                 pkg,
-                repo.list_images(pkg.package_id, pkg.revision_id),
-                repo.list_shot_takes(pkg.package_id, pkg.revision_id),
+                images,
+                takes,
                 plan,
                 sub_shot=req.sub_shot,
                 draws=req.draws,
-                seeds=req.seeds,
+                seeds=req.seeds or None,
                 direction=req.direction,
-                prompt=req.prompt,
+                version=version,
                 auto=req.auto,
                 max_rounds=req.max_rounds,
             )
@@ -209,21 +303,6 @@ def register(
             raise HTTPException(409, str(exc)) from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        if take.prompt_source == "user":
-            # A person's own prompt is screened like an edited design-board prompt (the
-            # model's prompts are checked by the runner).
-            try:
-                await screen(
-                    text_client,
-                    take.prompt,
-                    pictures=[
-                        {"picture": f"<Picture {n}>", "kind": r.role}
-                        for n, r in enumerate(take.references, 1)
-                    ],
-                    restrictive=True,
-                )
-            except GuardRefused as exc:
-                raise HTTPException(422, str(exc)) from exc
         return _start(take)
 
     @app.post("/v1/drama-packages/{package_id}/keyframes", status_code=202)

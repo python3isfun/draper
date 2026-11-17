@@ -297,9 +297,27 @@ picture per cut, so characters stay consistent and each cut starts as planned:
    A check that can't run never counts as a pass (**Check again**).
 4. **Revise**: when no draw passes, the failed items and the judge's fix go back to the
    writer for the next round, drawn with the same seeds; up to 3 rounds, then a person
-   decides. A direction or your own prompt starts a new take at any time (your own prompt
-   is checked but never rewritten).
-5. **Approve** one draw per sub-shot; the next sub-shot then starts by itself. **Plan cuts
+   decides. A direction starts a new written take at any time.
+5. **Prompt versions**: every prompt the writer writes and every edit you save is a version
+   of that sub-shot's prompt (v1, v2, ...). The **Prompt** panel lists them (who wrote each,
+   from which version, your note), compares any two word by word, and saves your edit as the
+   next version. **Draw vN** draws a version as written with the last take's seeds, so the
+   draws compare one for one; each take says which version it drew. Restore an old version
+   by drawing it or saving it again.
+
+Prompts follow the H3 image rules (MiniMax's edit form). The program writes each picture's
+definition and relationship sentence, so every picture is used for what it is (a face
+picture always transfers that exact face: "<Subject 9> supplies the exact facial features
+transferred to <Subject 1>"); the writer adds the target overview, the frozen moment and
+the light. A rule check flags what H3 handles badly: a missing definition, relationship,
+overview or closing sentence, negations ("no", "without", "nobody": H3 has no negative
+prompt and draws what is named), instructions ("keep", "frame", "retain": narrate the
+finished image), story or intent words, and a face picture used as a mere style reference.
+A written prompt that breaks them is sent back to the writer once with the findings; what
+remains is shown on the version and the take. Keyframes use their own content rule, not
+the Experiment tab's restrictive mode: the picks are the production's chosen designs, so
+faces and clothes are carried over exactly; rules 1 to 3 still apply.
+6. **Approve** one draw per sub-shot; the next sub-shot then starts by itself. **Plan cuts
    and draw first keyframes for every shot** does steps 1-4 for every shot at once.
 
 The export's `05_assets/shot_keyframes/` has every approved keyframe of the current plans
@@ -313,8 +331,9 @@ Keyframes are production assets: the restrictive content rules always apply, and
 a scene staged as implied or simulated intimacy is never drawn from a pick that shows a real
 person's likeness (content rule 3). Endpoints: `GET/POST /v1/drama-packages/{id}/keyframes`
 (board; plan and draw every shot without a first keyframe), `POST .../keyframes/{shot_id}/plan`
-(model plan, or `sub_shots` of your own), `POST .../keyframes/{shot_id}` (a take on a
-`sub_shot`), `POST|DELETE /v1/shot-takes/{take_id}/approve`, `.../check`, `.../retry`,
+(model plan, or `sub_shots` of your own), `POST .../keyframes/{shot_id}/prompts` (save a
+prompt version), `POST .../keyframes/{shot_id}` (a take on a `sub_shot`: written, or a
+`prompt_version` drawn as is), `POST|DELETE /v1/shot-takes/{take_id}/approve`, `.../check`, `.../retry`,
 `DELETE /v1/shot-takes/{take_id}`, `GET /v1/shot-takes/{take_id}/draws/{n}/{content|thumb}`.
 
 ### Production hand-off zip

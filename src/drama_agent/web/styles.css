@@ -442,6 +442,11 @@ td.mono { white-space: nowrap; }
 .plan-people { display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .plan-people label { display: inline-flex; align-items: center; gap: 4px; }
 .plan-people input { width: auto; margin: 0; }
+.version-row { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 6px 0; }
+.version-row select { width: auto; padding: 3px 6px; }
+.prompt-diff { white-space: pre-wrap; font: 12px/1.5 var(--mono, ui-monospace, monospace); background: var(--surface-2); padding: 8px; border-radius: 6px; margin: 6px 0; }
+.prompt-diff del { color: var(--bad); text-decoration: line-through; }
+.prompt-diff ins { color: var(--ok); text-decoration: none; background: var(--ok-soft); }
 .prompt-view { white-space: pre-wrap; font: 12px/1.45 var(--mono, ui-monospace, monospace); background: var(--surface-2); padding: 8px; border-radius: 6px; margin: 6px 0; }
 
 /* Mode tabs (Drama / Experiment) ------------------------------------------ */

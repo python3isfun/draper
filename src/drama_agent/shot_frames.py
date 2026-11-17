@@ -50,8 +50,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from .content_guard import RULES as CONTENT_RULES
-from .content_guard import GuardRefused, mode_rule, text_guard, upload_guard
-from .experiment import MAX_PROMPT_CHARS, SIZES, cited_beyond
+from .content_guard import GuardRefused, text_guard, upload_guard
+from .experiment import SIZES, cited_beyond
 from .imagegen import MAX_REFERENCES, ImageClient, Reference
 from .images import make_thumb, package_has_uploads, selected_image
 from .llm import GenerationRequest
@@ -149,6 +149,27 @@ class ShotPlan(BaseModel):
         return next((s for s in self.sub_shots if s.index == index), None)
 
 
+class PromptVersion(BaseModel):
+    """One version of a sub-shot keyframe's prompt. The writer's prompts and a person's
+    edits are versions; any version can be drawn, compared or restored."""
+
+    version_id: str = Field(default_factory=lambda: f"spv_{uuid.uuid4().hex[:12]}")
+    package_id: str
+    revision_id: str
+    shot_id: str
+    sub_shot: int
+    spec: SubShot  # the sub-shot as planned when this version was written
+    v: int = 0  # 1, 2, ... per shot and sub-shot (set by the store)
+    prompt: str
+    source: Literal["model", "template", "user"]
+    model: str | None = None
+    note: str = ""  # the editor's note, or the writer's
+    based_on: int | None = None  # the version this one edits
+    take_id: str | None = None  # the take whose writer wrote it
+    findings: list[str] = Field(default_factory=list)  # where it breaks the H3 image rules
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class CheckItem(BaseModel):
     item: str = Field(description='What was checked, e.g. "Lila: face" or "people count".')
     kind: CheckKind
@@ -204,6 +225,8 @@ class ShotTake(BaseModel):
     prompt_source: Literal["pending", "model", "template", "user"] = "pending"
     prompt_model: str | None = None
     notes: str = ""  # the writer's note to the user
+    prompt_version: int | None = None  # the prompt version this take draws
+    warnings: list[str] = Field(default_factory=list)  # H3 rule findings on its prompt
     references: list[FrameRef] = Field(default_factory=list)
     size: str
     draws: int = DEFAULT_DRAWS
@@ -554,6 +577,29 @@ def _seeds(seeds: list[int] | None, n: int) -> list[int]:
     return out + [random.randint(1, 2**31 - 1) for _ in range(n - len(out))]
 
 
+def sub_shot_for(
+    pkg: ProductionPackage,
+    images: list[GeneratedImage],
+    takes: list[ShotTake],
+    plan: ShotPlan,
+    sub_shot: int,
+) -> tuple[SubShot, list[FrameRef]]:
+    """(the sub-shot, the pictures its keyframe is drawn from), or NotReady saying why it
+    can't be drawn now."""
+    shot = shot_of(pkg, plan.shot_id)
+    if plan.busy:
+        raise NotReady(f"the sub-shots of {shot.shot_id} are still being planned")
+    sub = plan.sub(sub_shot)
+    if sub is None:
+        raise NotReady(f"{shot.shot_id} has no sub-shot {sub_shot}")
+    refs, missing = sub_shot_references(pkg, images, takes, shot, sub)
+    if missing:
+        raise NotReady("first: " + "; ".join(missing))
+    if not refs:
+        raise NotReady(f"{shot.shot_id} has no design images to draw from")
+    return sub, refs
+
+
 def plan_take(
     pkg: ProductionPackage,
     images: list[GeneratedImage],
@@ -564,40 +610,29 @@ def plan_take(
     draws: int = DEFAULT_DRAWS,
     seeds: list[int] | None = None,
     direction: str | None = None,
-    prompt: str | None = None,
+    version: PromptVersion | None = None,
     auto: bool = True,
     max_rounds: int = MAX_ROUNDS,
 ) -> ShotTake:
     """A new take on a sub-shot's keyframe: written by the model (steered by `direction`,
-    and building on the newest take's prompt and check), or the user's own `prompt`."""
+    and building on the newest take's prompt and check), or drawn from a prompt `version`
+    as it is. Without `seeds`, a version is drawn with the newest take's seeds, so the two
+    compare draw for draw."""
     shot = shot_of(pkg, plan.shot_id)
     shot_id = shot.shot_id
-    if plan.busy:
-        raise NotReady(f"the sub-shots of {shot_id} are still being planned")
-    sub = plan.sub(sub_shot)
-    if sub is None:
-        raise NotReady(f"{shot_id} has no sub-shot {sub_shot}")
     if is_busy(takes, shot_id, sub_shot):
         raise NotReady(f"sub-shot {sub_shot} of {shot_id} is still being made")
-    refs, missing = sub_shot_references(pkg, images, takes, shot, sub)
-    if missing:
-        raise NotReady("first: " + "; ".join(missing))
-    if not refs:
-        raise NotReady(f"{shot_id} has no design images to draw from")
+    sub, refs = sub_shot_for(pkg, images, takes, plan, sub_shot)
+    if version is not None and (version.sub_shot, version.spec) != (sub_shot, sub):
+        raise NotReady(f"prompt v{version.v} was written for an older plan of this sub-shot")
     draws = max(1, min(draws, MAX_DRAWS))
     mine = sorted((t for t in takes if t.shot_id == shot_id and t.sub_shot == sub_shot
                    and current_sub(pkg, shot, plan, t) is not None),
                   key=lambda t: t.created_at)  # fmt: skip
     last = mine[-1] if mine else None
-    fixes = _fixes(last) if last is not None and direction is None and prompt is None else []
-    user_prompt = (prompt or "").strip()
-    if user_prompt:
-        if len(user_prompt) > MAX_PROMPT_CHARS:
-            raise ValueError(f"the prompt is longer than {MAX_PROMPT_CHARS} characters")
-        if over := cited_beyond(user_prompt, len(refs)):
-            raise ValueError(
-                f"the prompt cites {', '.join(over)}, which this sub-shot doesn't send"
-            )
+    if version is not None and seeds is None and last is not None:
+        seeds = last.seeds
+    fixes = _fixes(last) if last is not None and direction is None and version is None else []
     take_id = f"stk_{uuid.uuid4().hex[:12]}"
     return ShotTake(
         take_id=take_id,
@@ -607,8 +642,11 @@ def plan_take(
         sub_shot=sub_shot,
         spec=sub,
         run_id=take_id,
-        prompt=user_prompt,
-        prompt_source="user" if user_prompt else "pending",
+        prompt=version.prompt if version else "",
+        prompt_source=version.source if version else "pending",
+        prompt_model=version.model if version else None,
+        prompt_version=version.v if version else None,
+        warnings=list(version.findings) if version else [],
         references=refs,
         size=frame_size(pkg),
         draws=draws,
@@ -616,8 +654,8 @@ def plan_take(
         direction=(direction or "").strip() or None,
         previous_prompt=last.prompt if last is not None and last.prompt else None,
         fixes=fixes,
-        # A person's own prompt is theirs to revise: no automatic rewrite of it.
-        auto=auto and not user_prompt,
+        # A chosen version is drawn as it is: no automatic rewrite of it.
+        auto=auto and version is None,
         max_rounds=max(1, min(max_rounds, MAX_ROUNDS)),
         likeness=any(r.likeness for r in refs),
     )
@@ -649,6 +687,8 @@ def next_round(take: ShotTake) -> ShotTake | None:
             "prompt": "",
             "prompt_source": "pending",
             "prompt_model": None,
+            "prompt_version": None,
+            "warnings": [],
             "notes": "",
             "results": [],
             "previous_prompt": take.prompt,
@@ -684,40 +724,50 @@ WRITER_GUIDE = """\
 - `sub_shot`: the cut this keyframe opens: its number of `of`, its time in the clip, \
 framing, camera, action and `people` (exactly these on screen, `people_count` of them, no \
 one else). The keyframe is its first frame.
-- `pictures`: one entry per <Picture N>, in order, with its role. They are attached. From \
-sub-shot 2 on, <Picture 1> is the approved keyframe of the sub-shot before: the same scene \
-a moment before the cut.
+- `pictures`: one entry per <Picture N>, in order (they are attached), each with its \
+`role`, its `define` sentence and its `relationship` sentence. From sub-shot 2 on, \
+<Picture 1> is the approved keyframe of the sub-shot before: the same scene a moment \
+before the cut.
 - `shot`: the whole shot from the storyboard (framing, camera, action, continuity, notes, \
-dialogue), for context.
+dialogue with its timing), for context.
 - `scene`: where and when; `style`: medium, era, color and light; `aspect`: the canvas.
-- `previous_prompt` and `fixes`: the last round's prompt and what the quality check found \
-wrong with its best draw. Keep what worked and fix every finding.
+- `previous_prompt` and `fixes`: the last version's prompt and what was wrong with it (the \
+quality check's findings on its best draw, or the rule check's). Keep what worked and fix \
+every finding.
 - `direction`: the user's steer, if any. It wins over everything but the content rules.
 
 ## How to write it
 
-One paragraph in MiniMax's edit form:
-1. Define each picture: "The woman in <Picture 1> is <Subject 1>." (a person by what the \
-picture shows; the set as "The room in <Picture 3>"; a prop by what it is).
-2. "The target image is ...": a still frame from a live-action short drama, the shot size \
-and camera angle, then the layout: exactly how many people, who is screen-left, \
-screen-right, foreground, background, and their body orientation to the camera.
-3. One relationship per subject: a person's look picture is partially preserved (face, \
-hair, build and every costume detail remain; pose, position and expression follow this \
-description); a face picture supplies the exact facial features of that person; the set \
-is partially preserved (layout, materials, furniture, palette remain; the camera position \
-and the light of the moment follow this description); a prop is fully preserved or \
-partially preserved in the state the shot needs. From sub-shot 2 on, <Subject 1> (the \
-keyframe before the cut) is partially preserved: the set, light, people, clothing, hair and \
-props in their current state remain; the camera position, framing and poses follow this \
-sub-shot.
-4. The frozen moment: each person's pose, which hand holds or touches what, gaze, \
-expression, at the moment this sub-shot begins. A speaking person has their mouth slightly \
-open.
-5. Light (source and direction) and lens feel, then "No other lettering is added."
+One paragraph in MiniMax's edit form, in this order:
+1. **Definitions**: every picture's `define` sentence, as given, in picture order.
+2. **The target overview**, one or two sentences starting "The target image is a still \
+frame from a live-action short drama": the shot size and camera angle, then the layout: \
+exactly how many people, who is screen-left, screen-right, foreground, background, and \
+each body's orientation to the camera.
+3. **Relationships**: every picture's `relationship` sentence, as given, in picture order. \
+For a "partially preserved" one you may add, inside that sentence, which visible details of \
+this sub-shot differ (a pose, a jacket now off, a cup now empty), and nothing else.
+4. **The frozen moment**: each person's pose, which hand holds or touches what, gaze and \
+expression at the moment this sub-shot begins; a speaking person's mouth slightly open. \
+Then the set and props as this camera sees them.
+5. **Light and lens**: the light's source, direction and quality as it falls on the people, \
+and the lens feel (focal length, depth of field). End with "No other lettering is added."
 
-Never add people the shot doesn't list. Describe visible things, not story. Stay under \
-3,500 characters.
+Rules that matter for H3, which reads every word as something to draw:
+- **Narrate the finished image.** Write "her trousers are charcoal", never an instruction \
+("make", "keep", "retain", "frame", "ensure", "change", "remove", "avoid").
+- **No negations.** H3 has no negative prompt: "no", "not", "without", "nobody", "never", \
+"un-" words put the thing in the picture. Say what is there instead ("the bed is made, its \
+pale duvet smooth"), with one exception: the closing "No other lettering is added."
+- **Visible facts only.** No story, intent or safety words ("non-intimate", "a quiet \
+conversation", "fully clothed"): describe what the camera sees.
+- **Clothes come from the look pictures.** Each person wears exactly what their look \
+picture shows, unless the sub-shot's action changes it; never invent or swap garments.
+- **Faces come from the face pictures.** A face picture's sentence transfers that exact \
+face; never weaken it to a style reference.
+- Precise visual words ("a soft square jaw", "warm window light from screen-left"), not \
+judgments ("beautiful", "cinematic", "high quality"). Never add people the sub-shot \
+doesn't list. Stay under 3,500 characters.
 
 ## What may be drawn
 
@@ -725,16 +775,24 @@ Never add people the shot doesn't list. Describe visible things, not story. Stay
 
 {mode}
 
-Keyframes are production references. In a scene with intimacy, show only the clothed \
-staging the scene allows (`scene.intimacy.on_screen`), never undressing, nudity or a bed \
-scene with bodies under covers.
-
 ## Output
 
 Return {{"prompt": "...", "motion": "...", "notes": "..."}}:
 - `prompt`: the prompt only, as plain text.
 - `motion`: one sentence on how the sub-shot moves from this frame until its end.
 - `notes`: one short sentence to the user on what will be hard to get right, or "".\
+"""
+
+# Keyframes draw the production's chosen designs, so the Experiment tab's restrictive mode
+# (which forbids taking a face from a photo) would defeat them; the content rules still
+# apply, and the runner refuses intimate scenes drawn from a likeness.
+KEYFRAME_RULE = """\
+Keyframes: the look, face, set and prop pictures are the production's chosen designs for \
+this story. Carry each person's face and clothing over exactly; that is the point of a \
+keyframe. Never write a real person's name. In a scene with intimacy, show only the \
+staging `scene.intimacy.on_screen` describes, with each person dressed as their look \
+picture shows: no nudity, undressing or sexual activity is drawn (describe what is there, \
+not what is absent). Rules 1 to 3 above always apply.\
 """
 
 
@@ -747,7 +805,7 @@ class FramePromptOutput(BaseModel):
 def writer_instructions() -> str:
     from .prompts import load_h3_image_examples, load_h3_image_rules
 
-    guide = WRITER_GUIDE.format(rules=CONTENT_RULES, mode=mode_rule(True))
+    guide = WRITER_GUIDE.format(rules=CONTENT_RULES, mode=KEYFRAME_RULE)
     return f"{WRITER_ROLE}\n\n{load_h3_image_rules()}\n\n{load_h3_image_examples()}\n\n{guide}"
 
 
@@ -837,46 +895,120 @@ def take_sub(pkg: ProductionPackage, shot: Shot, take: ShotTake) -> SubShot:
     return take.spec or single_plan(pkg, shot).sub_shots[0]
 
 
-def template_prompt(pkg: ProductionPackage, take: ShotTake) -> str:
-    """A usable prompt built by the program (offline, or when the writer fails)."""
-    shot = shot_of(pkg, take.shot_id)
-    sub = take_sub(pkg, shot, take)
+def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, Any]]:
+    """Per <Picture N>: its role, and the definition and relationship sentences the prompt
+    uses for it (MiniMax's edit form). Written here, not by the model, so every picture is
+    used for what it is: a face picture always transfers that exact face."""
     names = _names(pkg)
-    defs, rels = [], []
+    look_of = {r.entity_id: n for n, r in enumerate(take.references, 1) if r.kind == "look"}
+    out = []
     for n, r in enumerate(take.references, 1):
         who = names.get(r.entity_id or "", "")
         subject = f"<Subject {n}>"
         match r.kind:
             case "previous_frame" | "start_frame":
-                defs.append(f"The film frame in <Picture {n}> is {subject}.")
-                rels.append(f"{subject} is partially preserved: the set, light, people, "
-                            "clothing and props remain; the camera position, framing and "
-                            "poses follow this description.")  # fmt: skip
+                define = f"The film frame in <Picture {n}> is {subject}."
+                rel = (f"{subject} is partially preserved: the set, the light, each person's "
+                       "face, hair and clothing, and the props in their current state remain; "
+                       "the camera position, framing and poses follow this description.")  # fmt: skip
             case "look":
-                defs.append(f"The person in <Picture {n}> is {subject} ({who}).")
-                rels.append(f"{subject} is partially preserved: the face, hair, build and every "
-                            "costume detail remain; pose, position and expression follow this "
-                            "description.")  # fmt: skip
+                define = f"{who or 'The person'} in <Picture {n}> is {subject}."
+                rel = (f"{subject} is partially preserved: the face, hair, build and every "
+                       "garment and accessory remain; the pose, position and expression "
+                       "follow this description.")  # fmt: skip
+            case "face" if r.entity_id in look_of:
+                scope = f"{who}'s face" if who else "The face"
+                define = f"{scope} in <Picture {n}> is {subject}."
+                rel = (f"{subject} supplies the exact facial features transferred to "
+                       f"<Subject {look_of[r.entity_id]}>.")  # fmt: skip
             case "face":
-                defs.append(f"The face in <Picture {n}> is {subject}.")
-                rels.append(f"{subject} supplies the exact facial features of {who}.")
+                define = f"{who or 'The person'} in <Picture {n}> is {subject}."
+                rel = (f"{subject} is partially preserved: the face, hair and build remain; "
+                       "the clothing, pose, position and expression follow this "
+                       "description.")  # fmt: skip
             case "set":
-                defs.append(f"The room in <Picture {n}> is {subject}.")
-                rels.append(f"{subject} is partially preserved: the layout, materials, "
-                            "furniture and palette remain; the camera position and light "
-                            "follow this description.")  # fmt: skip
-            case "prop":
-                defs.append(f"The object in <Picture {n}> is {subject} ({who}).")
-                rels.append(f"{subject} is fully preserved.")
+                define = f"The room in <Picture {n}> is {subject}."
+                rel = (f"{subject} is partially preserved: the layout, materials, furniture "
+                       "and palette remain; the camera position and the light follow this "
+                       "description.")  # fmt: skip
+            case _:
+                define = f"{who or 'The object'} in <Picture {n}> is {subject}."
+                rel = f"{subject} is fully preserved."
+        out.append({"picture": f"<Picture {n}>", "role": r.role, "define": define,
+                    "relationship": rel})  # fmt: skip
+    return out
+
+
+def template_prompt(pkg: ProductionPackage, take: ShotTake) -> str:
+    """A usable prompt built by the program (offline, or when the writer fails)."""
+    shot = shot_of(pkg, take.shot_id)
+    sub = take_sub(pkg, shot, take)
+    pictures = picture_sentences(pkg, take)
     count = len(sub.people)
     people = (f"exactly {count} {'person' if count == 1 else 'people'}" if count
-              else "no people")  # fmt: skip
+              else "the empty set")  # fmt: skip
     camera = f", {sub.camera.rstrip('.')}" if sub.camera else ""
     target = (f"The target image is a still frame from a live-action short drama: "
               f"{sub.framing.rstrip('.')}{camera}, showing {people}, at the moment the "
               f"action begins: {sub.action.rstrip('.')}.")  # fmt: skip
     extra = [take.direction.rstrip(".") + "." if take.direction else ""]
-    return " ".join(p for p in [*defs, target, *rels, *extra, NO_OTHER_TEXT] if p)
+    return " ".join(
+        p for p in [*(x["define"] for x in pictures), target,
+                    *(x["relationship"] for x in pictures), *extra, NO_OTHER_TEXT] if p
+    )  # fmt: skip
+
+
+# What the rule check flags (see prompt_findings).
+_NEGATION = re.compile(
+    r"\b(no|not|never|without|nobody|nothing|none|neither|nor|isn't|aren't|doesn't|don't)\b",
+    re.IGNORECASE,
+)
+# Sentences that instruct the model instead of describing the image.
+_COMMAND = re.compile(
+    r"(?:^|[.!?]\s+)(make|keep|retain|ensure|frame|avoid|do not|don't)\b", re.IGNORECASE
+)
+# Words that state intent or safety instead of something visible.
+_STORY = re.compile(r"\b(non-intimate|non-sexual|fully clothed|platonic)\b", re.IGNORECASE)
+_QUOTED = re.compile(r"[\"“][^\"”]*[\"”]")
+
+
+def worth_repair(findings: list[str]) -> bool:
+    """Whether findings justify a second writer call: anything but story words alone."""
+    return any(not f.startswith("uses story") for f in findings)
+
+
+def is_hard(finding: str) -> bool:
+    """A finding that makes a prompt unusable, not just weaker."""
+    return finding == "empty" or finding.startswith(("longer than", "not allowed", "cites"))
+
+
+def prompt_findings(prompt: str, refs: list[FrameRef]) -> list[str]:
+    """Where a keyframe prompt breaks the H3 image rules, as far as a program can tell:
+    the edit form (every picture defined, the overview, one relationship each, the closing
+    sentence), negations, instructions, story words, and a face picture used as anything
+    but the face."""
+    from .image_prompts import problems
+
+    out = [
+        f"cites {', '.join(over)}, which this sub-shot doesn't send (it sends {len(refs)})"
+        if f.startswith("cites a picture") and (over := cited_beyond(prompt, len(refs)))
+        else f
+        for f in problems(prompt, len(refs))
+    ]
+    body = _QUOTED.sub("", prompt).replace(NO_OTHER_TEXT, "")
+    if words := sorted({m.lower() for m in _NEGATION.findall(body)}):
+        out.append(f"uses negation ({', '.join(words)}): H3 draws what is named; say what is there")
+    if words := sorted({m.lower() for m in _COMMAND.findall(body)}):
+        out.append(f"gives instructions ({', '.join(words)}): narrate the finished image instead")
+    if words := sorted({m.lower() for m in _STORY.findall(body)}):
+        out.append(f"uses story or intent words ({', '.join(words)}): describe what is seen")
+    for n, r in enumerate(refs, 1):
+        token = f"<Subject {n}>"
+        if r.kind == "face" and re.search(rf"{re.escape(token)}[^.]*weak", prompt):
+            out.append(f"weakens {token}, a face picture: it must transfer the exact face")
+        if prompt.count(token) < 2:
+            out.append(f"gives {token} no relationship sentence")
+    return out
 
 
 def fixture_frame_prompt(request: GenerationRequest) -> FramePromptOutput:
@@ -1225,50 +1357,80 @@ class ShotFrameRunner:
     # -- writing ------------------------------------------------------------
 
     async def _write(self, pkg: ProductionPackage, shot: Shot, take: ShotTake) -> None:
+        """Have the writer write the prompt; if it breaks the H3 image rules, once more
+        with the findings. Hard problems (a picture it can't cite, empty, too long, not
+        allowed) fall back to the template; other findings stay on the take as warnings.
+        The prompt becomes the sub-shot's next version."""
         template = template_prompt(pkg, take)
+        context = {
+            "sub_shot": sub_shot_context(pkg, take_sub(pkg, shot, take), self._of(take)),
+            "pictures": picture_sentences(pkg, take),
+            **shot_context(pkg, shot),
+            "aspect": next((k for k, v in SIZES.items() if v == take.size), take.size),
+            "previous_prompt": take.previous_prompt,
+            "fixes": take.fixes,
+            "direction": take.direction,
+            "template_prompt": template,
+        }
         media = self._media(take)
-        request = GenerationRequest(
-            stage=WRITE_STAGE,  # type: ignore[arg-type]
-            instructions=writer_instructions(),
-            context={
-                "sub_shot": sub_shot_context(pkg, take_sub(pkg, shot, take), self._of(take)),
-                "pictures": [
-                    {"picture": f"<Picture {n}>", "role": r.role}
-                    for n, r in enumerate(take.references, 1)
-                ],
-                **shot_context(pkg, shot),
-                "aspect": next((k for k, v in SIZES.items() if v == take.size), take.size),
-                "previous_prompt": take.previous_prompt,
-                "fixes": take.fixes,
-                "direction": take.direction,
-                "template_prompt": template,
-            },
-            media=media,
-        )
-        try:
-            out = await self.text.generate(request, FramePromptOutput)
-            prompt = out.prompt.strip()
-            problem = (
-                "the writer returned an empty prompt" if not prompt
-                else f"the prompt cites {', '.join(over)}, which this shot doesn't send"
-                if (over := cited_beyond(prompt, len(take.references)))
-                else f"the prompt is longer than {MAX_PROMPT_CHARS} characters"
-                if len(prompt) > MAX_PROMPT_CHARS
-                else None
-            )  # fmt: skip
-            if problem:
-                raise ValueError(problem)
-        except Exception as exc:
-            log.warning("shot frame writer failed for %s", take.take_id, exc_info=True)
-            take.prompt, take.prompt_source = template, "template"
-            take.notes = (
-                f"The prompt writer failed ({str(exc)[:120]}); using the built-in template."
+        first = context
+        tries: list[tuple[str, FramePromptOutput, list[str], GenerationRequest]] = []
+        error: Exception | None = None
+        for attempt in range(2):
+            request = GenerationRequest(
+                stage=WRITE_STAGE,  # type: ignore[arg-type]
+                instructions=writer_instructions(),
+                context=context,
+                media=media,
+                attempt=attempt,
             )
+            try:
+                out = await self.text.generate(request, FramePromptOutput)
+            except Exception as exc:
+                log.warning("shot frame writer failed for %s", take.take_id, exc_info=True)
+                error = exc
+                break
+            prompt = out.prompt.strip()
+            findings = prompt_findings(prompt, take.references)
+            tries.append((prompt, out, findings, request))
+            if not worth_repair(findings):
+                break
+            # The repair keeps what this round is for (the check's findings) and adds the
+            # rule check's.
+            context = first | {
+                "previous_prompt": prompt,
+                "fixes": [*take.fixes, *(f"The rule check: {f}" for f in findings)],
+            }
+        usable = [t for t in tries if not any(is_hard(f) for f in t[2])]
+        if not usable:
+            why = str(error) if error else "; ".join(f for f in tries[-1][2] if is_hard(f))
+            take.prompt, take.prompt_source = template, "template"
+            take.warnings = prompt_findings(template, take.references)
+            take.notes = f"The prompt writer failed ({why[:120]}); using the built-in template."
+            self._version(take, "template", None)
             return
+        # The attempt with the fewest findings (the later one on a tie).
+        prompt, out, findings, request = min(reversed(usable), key=lambda t: len(t[2]))
         take.prompt, take.prompt_source = prompt, "model"
         take.prompt_model = request.model or getattr(self.text, "model_id", None)
         take.notes, take.motion = out.notes.strip(), out.motion.strip()
+        take.warnings = findings
+        self._version(take, "model", take.prompt_model)
         self.repo.save_shot_take(take)
+
+    def _version(self, take: ShotTake, source: str, model: str | None) -> None:
+        """Record the take's new prompt as the sub-shot's next version."""
+        if take.spec is None:
+            return
+        ver = self.repo.add_prompt_version(
+            PromptVersion(
+                package_id=take.package_id, revision_id=take.revision_id,
+                shot_id=take.shot_id, sub_shot=take.sub_shot, spec=take.spec,
+                prompt=take.prompt, source=source, model=model, note=take.notes,  # type: ignore[arg-type]
+                take_id=take.take_id, findings=take.warnings,
+            )
+        )  # fmt: skip
+        take.prompt_version = ver.v
 
     def _of(self, take: ShotTake) -> int:
         """How many sub-shots the take's shot has now."""
@@ -1430,9 +1592,10 @@ def shot_board(
     images: list[GeneratedImage],
     takes: list[ShotTake],
     plans: list[ShotPlan],
+    versions: list[PromptVersion] | None = None,
 ) -> list[dict[str, Any]]:
     """Every shot with its sub-shot plan, and per sub-shot what it draws from, what is
-    missing, its takes and its approved keyframe."""
+    missing, its prompt versions, its takes and its approved keyframe."""
     names = _names(pkg)
     stored = {p.shot_id: p for p in plans}
     out = []
@@ -1455,6 +1618,13 @@ def shot_board(
                 "takes": [t.model_dump(mode="json") for t in mine
                           if t.sub_shot == sub.index and current_sub(pkg, shot, plan, t)],
                 "approved": [ap.take_id, ap.approved] if ap is not None else None,
+                # The number the next saved version gets (numbering runs across plans).
+                "next_version": 1 + max((v.v for v in versions or []
+                                         if (v.shot_id, v.sub_shot) == (shot.shot_id, sub.index)),
+                                        default=0),
+                # Prompt versions written for this sub-shot as it is now, oldest first.
+                "versions": [v.model_dump(mode="json") for v in versions or []
+                             if (v.shot_id, v.sub_shot, v.spec) == (shot.shot_id, sub.index, sub)],
             })  # fmt: skip
         out.append({
             "shot_id": shot.shot_id,
