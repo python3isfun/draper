@@ -1,29 +1,39 @@
-"""Shot keyframes: one checked picture per shot, made from the design picks, for video.
+"""Shot keyframes: a checked picture per sub-shot, made from the design picks, for video.
 
 The video model keeps characters consistent and moves them as intended only as well as its
-inputs show it. So before a shot goes to video production (dramer), each shot gets a
-**start frame**: an H3 edit that puts the shot's people, in their picked looks, into the
-picked set with its props, framed and posed as the storyboard says. A shot whose action
-moves (someone enters, turns, hands something over) can also get an **end frame**, an
-edit of the approved start frame, so the clip is pinned at both ends.
+inputs show it. A storyboard shot is one video generation, but a dynamic one holds two or
+three cuts inside it (0-2 s a wide, 2-6 s a close-up), which the video prompt marks as
+`[Shot 2] At 00:02.000, the camera cuts to ...`. So before a shot goes to video production
+(dramer), each shot gets:
 
-Each frame goes through a quality loop:
+1. **A sub-shot plan**: the text model splits the shot into 1-3 sub-shots (H3's rules: cut
+   only for new information; timestamps strictly increasing inside the clip), each with its
+   start time, framing, camera, action and who is on screen. A person can edit it. Without
+   one, the whole shot is one sub-shot.
+2. **A keyframe per sub-shot**: the first frame of that sub-shot, an H3 edit that puts its
+   people, in their picked looks, into the picked set with its props. Sub-shot 1 is drawn
+   from the design picks; each later one also from the approved keyframe of the sub-shot
+   before it (`<Picture 1>`), so light, wardrobe state and set dressing carry across the cut.
 
-1. **Write**: the text model writes the edit prompt from the shot (framing, camera,
-   action, who is where) and the reference pictures (`<Picture N>`).
+Each keyframe goes through a quality loop:
+
+1. **Write**: the text model writes the edit prompt from the sub-shot and the reference
+   pictures (`<Picture N>`).
 2. **Draw**: a few draws with chosen or random seeds.
-3. **Check**: a vision judge compares each draw with the reference pictures and the shot,
-   item by item (each person's face, hair and wardrobe; the set and props; how many people
-   and where; framing; the action; defects; stray text). The score and the verdict are
-   computed here from the items, not taken from the judge.
+3. **Check**: a vision judge compares each draw with the reference pictures and the
+   sub-shot, item by item (each person's face, hair and wardrobe; the set and props; how
+   many people and where; framing; the action; defects; stray text). The score and the
+   verdict are computed here from the items, not taken from the judge.
 4. **Revise**: if no draw passes, the failed items and the judge's fix go back to the
    writer for the next round, with the same seeds so rounds compare like for like; up to
    `MAX_ROUNDS` rounds, then a person decides.
 
-A person approves one draw per frame; only approved frames are exported. Keyframes are
-production assets, so the restrictive content rules always apply (as on the design board),
-and a shot in a scene staged as implied or simulated intimacy is never drawn from a pick
-that shows a real person's likeness (content rule 3).
+A person approves one draw per sub-shot; approving one starts the next sub-shot. Only
+approved keyframes of the current plan are exported, with the plan's timestamps, so the
+video prompt cites each as the first frame of its `[Shot N]`. Keyframes are production
+assets, so the restrictive content rules always apply (as on the design board), and a
+shot in a scene staged as implied or simulated intimacy is never drawn from a pick that
+shows a real person's likeness (content rule 3).
 """
 
 from __future__ import annotations
@@ -33,10 +43,11 @@ import logging
 import random
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .content_guard import RULES as CONTENT_RULES
 from .content_guard import GuardRefused, mode_rule, text_guard, upload_guard
@@ -54,6 +65,9 @@ log = logging.getLogger(__name__)
 
 WRITE_STAGE = "shot_frames"
 CHECK_STAGE = "shot_check"
+PLAN_STAGE = "shot_plan"
+MAX_SUB_SHOTS = 3
+MIN_SUB_SHOT_MS = 1000
 MAX_ROUNDS = 3  # automatic rounds before a person decides
 MAX_DRAWS = 4
 DEFAULT_DRAWS = 2
@@ -63,7 +77,6 @@ MINOR_PENALTY = 8
 JUDGE_PX = 1024  # long edge of the draw the judge sees
 NO_OTHER_TEXT = "No other lettering is added."
 
-Frame = Literal["start", "end"]
 TakeStatus = Literal["pending", "writing", "drawing", "checking", "done", "failed"]
 CheckKind = Literal[
     "identity", "wardrobe", "set", "prop", "count", "placement", "framing", "action",
@@ -86,11 +99,54 @@ SHOT_VIEWS = {
 class FrameRef(BaseModel):
     """One picture a frame is drawn from, as `<Picture N>` in its prompt."""
 
-    ref_id: str  # a design image (img_...) or an approved start frame (frame:<take>:<n>)
-    role: str  # "Lila in her morning look, full body", "the approved start frame"
-    kind: Literal["look", "face", "set", "prop", "start_frame"]
+    ref_id: str  # a design image (img_...) or an approved keyframe (frame:<take>:<n>)
+    role: str  # "Lila in this shot's look, full body", "the approved keyframe of sub-shot 1"
+    # previous_frame: the approved keyframe of the sub-shot before ("start_frame": older
+    # takes' name for it).
+    kind: Literal["look", "face", "set", "prop", "previous_frame", "start_frame"]
     entity_id: str | None = None  # the character, location or prop shown
     likeness: bool = False  # shows a real person's likeness (content rule 3)
+
+
+class SubShot(BaseModel):
+    """One cut inside a shot's video generation: `[Shot N]` of the video prompt."""
+
+    index: int = Field(ge=1)  # 1-based, in time order
+    start_ms: int = Field(ge=0)  # from the start of the shot (the clip)
+    end_ms: int = Field(gt=0)
+    framing: str
+    camera: str = ""
+    action: str
+    people: list[str] = Field(default_factory=list)  # character ids on screen
+
+    @property
+    def timecode(self) -> str:
+        """The video prompt's timestamp for this cut, e.g. "00:02.000"."""
+        s = self.start_ms / 1000
+        return f"{int(s // 60):02d}:{s % 60:06.3f}"
+
+
+class ShotPlan(BaseModel):
+    """How a shot is cut inside its one video generation. Stored once written (by the
+    model or a person); a shot without one is one sub-shot (`single_plan`)."""
+
+    package_id: str
+    revision_id: str
+    shot_id: str
+    status: Literal["writing", "done", "failed"] = "done"
+    source: Literal["single", "model", "user"] = "single"
+    sub_shots: list[SubShot] = Field(default_factory=list)
+    notes: str = ""
+    model: str | None = None
+    error: str | None = None
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    @property
+    def busy(self) -> bool:
+        return self.status == "writing"
+
+    def sub(self, index: int) -> SubShot | None:
+        return next((s for s in self.sub_shots if s.index == index), None)
 
 
 class CheckItem(BaseModel):
@@ -133,13 +189,14 @@ class FrameDraw(BaseModel):
 
 
 class ShotTake(BaseModel):
-    """One round of one frame of one shot: a prompt and its draws, each checked."""
+    """One round of one sub-shot's keyframe: a prompt and its draws, each checked."""
 
     take_id: str
     package_id: str
     revision_id: str
     shot_id: str
-    frame: Frame = "start"
+    sub_shot: int = 1  # 0: an end frame from before sub-shots (not shown or exported)
+    spec: SubShot | None = None  # the sub-shot as planned when this take was made
     round: int = 1
     run_id: str  # the first take of an automatic run; its later rounds share it
     status: TakeStatus = "pending"
@@ -157,16 +214,22 @@ class ShotTake(BaseModel):
     fixes: list[str] = Field(default_factory=list)  # the judge's findings this round fixes
     auto: bool = True  # go on to another round when no draw passes
     max_rounds: int = MAX_ROUNDS
-    # The writer's reading of the shot (start frames): how it moves, and whether an end
-    # frame is worth making.
-    motion: str = ""
-    end_frame: bool | None = None
-    approved: int | None = None  # the approved draw (one approved draw per shot and frame)
+    motion: str = ""  # the writer's note on how the sub-shot moves after this frame
+    approved: int | None = None  # the approved draw (one per shot and sub-shot)
     likeness: bool = False
     refused: bool = False
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_frames(cls, data: Any) -> Any:
+        """Takes from before sub-shots had `frame`: a start frame is sub-shot 1, an end
+        frame sub-shot 0 (kept, but no longer shown or exported)."""
+        if isinstance(data, dict) and "frame" in data and "sub_shot" not in data:
+            data = {**data, "sub_shot": 0 if data["frame"] == "end" else 1}
+        return data
 
     @property
     def busy(self) -> bool:
@@ -196,7 +259,8 @@ def score(items: list[CheckItem]) -> tuple[int, bool]:
 
 
 class NotReady(ValueError):
-    """The shot can't be drawn yet (a design pick is missing, or no start frame)."""
+    """The sub-shot can't be drawn yet (a design pick is missing, or the keyframe of the
+    sub-shot before it isn't approved)."""
 
 
 def _names(pkg: ProductionPackage) -> dict[str, str]:
@@ -232,26 +296,48 @@ def frame_size(pkg: ProductionPackage) -> str:
     return SIZES.get(f"{m.group(1)}:{m.group(2)}" if m else "", SIZES["9:16"])
 
 
-def shot_references(
-    pkg: ProductionPackage, images: list[GeneratedImage], shot: Shot
-) -> tuple[list[FrameRef], list[str]]:
-    """(the pictures a start frame is drawn from, what is missing). In the order the
-    prompt names them, as dramer sends them: each person in their look, the set's wide
-    view, the props, then the faces while the nine-picture limit allows. A person with no
-    look image is sent by their face."""
+@dataclass
+class ShotPicks:
+    """A shot's design picks as reference pictures, before they are chosen per sub-shot."""
+
+    looks: list[FrameRef]  # per person: their look, or their face when they have no look
+    faces: list[FrameRef]  # the faces of people who also have a look
+    sets: list[FrameRef]
+    props: list[FrameRef]
+    missing: list[tuple[str | None, str]]  # (the character it is for, or None; what)
+
+    def refs(self, people: set[str] | None = None,
+             previous: FrameRef | None = None) -> list[FrameRef]:  # fmt: skip
+        """The pictures for `people` (None: everyone), in the order the prompt names them,
+        as dramer sends them: the previous keyframe, each person in their look, the set's
+        wide view, the props, then faces while the nine-picture limit allows."""
+
+        def mine(r: FrameRef) -> bool:
+            return people is None or r.entity_id in people
+
+        refs = [*([previous] if previous else []), *filter(mine, self.looks), *self.sets,
+                *self.props][:MAX_REFERENCES]  # fmt: skip
+        return refs + [f for f in self.faces if mine(f)][: MAX_REFERENCES - len(refs)]
+
+    def missing_for(self, people: set[str] | None = None) -> list[str]:
+        """What is missing for `people` (None: everyone); the set and props always count."""
+        return [m for ch, m in self.missing if ch is None or people is None or ch in people]
+
+
+def shot_picks(pkg: ProductionPackage, images: list[GeneratedImage], shot: Shot) -> ShotPicks:
     names = _names(pkg)
     reqs = {r.requirement_id: r for r in pkg.asset_requirements.items}
     wanted = [reqs[r] for r in shot.asset_requirement_ids if r in reqs]
-    missing: list[str] = []
+    missing: list[tuple[str | None, str]] = []
 
-    def pick(req: Any) -> GeneratedImage | None:
+    def pick(req: Any, ch: str | None = None) -> GeneratedImage | None:
         view = SHOT_VIEWS.get(req.asset_type)
         d = next((d for d in req.deliverables if d.view == view), None)
         if d is None:
             return None
         img = selected_image(images, (req.requirement_id, d.deliverable_id))
         if img is None:
-            missing.append(f"{_req_title(req, names)} ({view})")
+            missing.append((ch, f"{_req_title(req, names)} ({view})"))
         return img
 
     def of(kind: str, entity: str) -> Any:
@@ -266,8 +352,8 @@ def shot_references(
     for ch in shot.character_ids:
         name = names.get(ch, ch)
         look_req, face_req = of("character_look", ch), of("character_identity", ch)
-        look = pick(look_req) if look_req else None
-        face = pick(face_req) if face_req else None
+        look = pick(look_req, ch) if look_req else None
+        face = pick(face_req, ch) if face_req else None
         if look is not None:
             looks.append(FrameRef(ref_id=look.image_id, role=f"{name} in this shot's look, "
                                   "full body", kind="look", entity_id=ch,
@@ -277,7 +363,7 @@ def shot_references(
                            entity_id=ch, likeness=face.likeness)  # fmt: skip
             (faces if look is not None else looks).append(ref)
         if look is None and face is None and not (look_req or face_req):
-            missing.append(f"{name} (no design image is planned)")
+            missing.append((ch, f"{name} (no design image is planned)"))
     sets: list[FrameRef] = []
     loc = next((r for r in wanted if r.asset_type == "location"), None)
     if loc is not None and (img := pick(loc)) is not None:
@@ -289,9 +375,15 @@ def shot_references(
         if req is not None and (img := pick(req)) is not None:
             props.append(FrameRef(ref_id=img.image_id, role=f"{names.get(r.prop_id, r.prop_id)} "
                                   "(prop)", kind="prop", entity_id=r.prop_id))  # fmt: skip
-    refs = (looks + sets + props)[:MAX_REFERENCES]
-    refs += faces[: MAX_REFERENCES - len(refs)]
-    return refs, missing
+    return ShotPicks(looks, faces, sets, props, missing)
+
+
+def shot_references(
+    pkg: ProductionPackage, images: list[GeneratedImage], shot: Shot
+) -> tuple[list[FrameRef], list[str]]:
+    """(the pictures for the whole shot, what is missing); see ShotPicks.refs."""
+    picks = shot_picks(pkg, images, shot)
+    return picks.refs(), picks.missing_for()
 
 
 def _req_title(req: Any, names: dict[str, str]) -> str:
@@ -299,43 +391,162 @@ def _req_title(req: Any, names: dict[str, str]) -> str:
     return names.get(entity, entity)
 
 
-def is_busy(takes: list[ShotTake], shot_id: str, frame: Frame) -> bool:
-    return any(t.busy for t in takes if t.shot_id == shot_id and t.frame == frame)
+def single_plan(pkg: ProductionPackage, shot: Shot) -> ShotPlan:
+    """The plan of a shot nobody has planned: the whole shot is one sub-shot."""
+    return ShotPlan(
+        package_id=pkg.package_id,
+        revision_id=pkg.revision_id,
+        shot_id=shot.shot_id,
+        sub_shots=[
+            SubShot(index=1, start_ms=0, end_ms=shot.duration_ms, framing=shot.framing,
+                    camera=shot.camera, action=shot.visual_action,
+                    people=list(shot.character_ids))
+        ],
+    )  # fmt: skip
 
 
-def approved_take(takes: list[ShotTake], shot_id: str, frame: Frame) -> ShotTake | None:
+def plan_of(pkg: ProductionPackage, shot: Shot, stored: ShotPlan | None) -> ShotPlan:
+    """The plan in force: the stored one when it has sub-shots, else the single one,
+    which is busy while a first plan is being written (so nothing is drawn meanwhile)."""
+    if stored is not None and stored.sub_shots:
+        return stored
+    plan = single_plan(pkg, shot)
+    if stored is not None:
+        plan.status = stored.status
+    return plan
+
+
+def current_sub(
+    pkg: ProductionPackage, shot: Shot, plan: ShotPlan, take: ShotTake
+) -> SubShot | None:
+    """The plan's sub-shot a take was drawn for, if the plan still has it unchanged. A
+    take from before sub-shots was drawn for the whole shot: it matches the single plan."""
+    sub = plan.sub(take.sub_shot) if take.sub_shot >= 1 else None
+    drawn = take.spec or single_plan(pkg, shot).sub_shots[0]
+    return sub if sub is not None and drawn == sub else None
+
+
+def make_sub_shots(shot: Shot, rows: list[dict[str, Any]]) -> list[SubShot]:
+    """Sub-shots from (start_ms, framing, camera, action, people) rows, checked: 1 to
+    MAX_SUB_SHOTS, the first at 0, strictly increasing, each at least MIN_SUB_SHOT_MS,
+    only the shot's people. Each ends where the next starts; the last at the shot's end."""
+    if not 1 <= len(rows) <= MAX_SUB_SHOTS:
+        raise ValueError(f"a shot has 1 to {MAX_SUB_SHOTS} sub-shots")
+    starts = [int(r["start_ms"]) for r in rows]
+    if starts[0] != 0:
+        raise ValueError("the first sub-shot starts at 0 s")
+    ends = [*starts[1:], shot.duration_ms]
+    out = []
+    for k, (row, start, end) in enumerate(zip(rows, starts, ends, strict=True), 1):
+        if end - start < MIN_SUB_SHOT_MS:
+            raise ValueError(
+                f"sub-shot {k} is {max(0, end - start) / 1000:.1f} s; each runs at least "
+                f"{MIN_SUB_SHOT_MS / 1000:.0f} s, in order, inside the shot's "
+                f"{shot.duration_ms / 1000:.1f} s"
+            )
+        framing, action = str(row.get("framing", "")).strip(), str(row.get("action", "")).strip()
+        if not framing or not action:
+            raise ValueError(f"sub-shot {k} needs a framing and an action")
+        people = list(dict.fromkeys(row.get("people") or []))
+        if stray := [p for p in people if p not in shot.character_ids]:
+            raise ValueError(f"sub-shot {k} lists {', '.join(stray)}, who isn't in the shot")
+        out.append(SubShot(index=k, start_ms=start, end_ms=end, framing=framing,
+                           camera=str(row.get("camera", "")).strip(), action=action,
+                           people=people))  # fmt: skip
+    return out
+
+
+def is_busy(takes: list[ShotTake], shot_id: str, sub_shot: int | None = None) -> bool:
+    """Whether a take of the shot (of that sub-shot, if given) is being made."""
+    return any(
+        t.busy for t in takes
+        if t.shot_id == shot_id and (sub_shot is None or t.sub_shot == sub_shot)
+    )  # fmt: skip
+
+
+def approved_take(takes: list[ShotTake], shot_id: str, sub_shot: int) -> ShotTake | None:
     return next(
-        (t for t in takes if t.shot_id == shot_id and t.frame == frame and t.approved is not None),
+        (t for t in takes
+         if t.shot_id == shot_id and t.sub_shot == sub_shot and t.approved is not None),
         None,
-    )
+    )  # fmt: skip
+
+
+def frame_ref(take: ShotTake) -> str:
+    """How a later sub-shot's take cites this take's approved draw."""
+    return f"frame:{take.take_id}:{take.approved}"
 
 
 def approval_changes(take: ShotTake, n: int | None, others: list[ShotTake]) -> list[ShotTake]:
     """The takes whose `approved` changes when draw `n` of `take` is approved (None:
-    withdrawn); `others` are the shot's other takes. One approved draw per shot and frame,
-    and an approved end frame must be drawn from the approved start frame: changing or
-    withdrawing the start frame withdraws an end frame drawn from another one."""
-    changed = []
+    withdrawn); `others` are the shot's other takes. One approved draw per sub-shot, and a
+    later sub-shot's approved keyframe must be drawn from the approved keyframe before it:
+    changing or withdrawing one withdraws those drawn from another, down the chain."""
+    changed: list[ShotTake] = []
+
+    def clear(t: ShotTake) -> None:
+        t.approved = None
+        if all(c is not t for c in changed):
+            changed.append(t)
+
     if take.approved != n:
         take.approved = n
         changed.append(take)
     if n is not None:
         for t in others:
-            if t.frame == take.frame and t.approved is not None:
-                t.approved = None
-                changed.append(t)
-    if take.frame == "start":
-        starts = [t for t in [take, *others] if t.frame == "start" and t.approved is not None]
-        current = {f"frame:{t.take_id}:{t.approved}" for t in starts}
-        for t in others:
+            if t.sub_shot == take.sub_shot and t.approved is not None:
+                clear(t)
+    every = [take, *others]
+    for k in sorted({t.sub_shot for t in every if t.sub_shot > 1}):
+        prev = next((t for t in every if t.sub_shot == k - 1 and t.approved is not None), None)
+        want = frame_ref(prev) if prev is not None else None
+        for t in every:
             if (
-                t.frame == "end"
+                t.sub_shot == k
                 and t.approved is not None
-                and not (t.references and t.references[0].ref_id in current)
+                and (not t.references or t.references[0].ref_id != want)
             ):
-                t.approved = None
-                changed.append(t)
+                clear(t)
     return changed
+
+
+def stale_approvals(
+    pkg: ProductionPackage, shot: Shot, takes: list[ShotTake], plan: ShotPlan
+) -> list[ShotTake]:
+    """The shot's approved takes the plan no longer matches: their sub-shot is gone or
+    was changed since they were drawn. Withdrawing them withdraws the later ones too."""
+    return [
+        t for t in takes
+        if t.shot_id == shot.shot_id and t.approved is not None and t.sub_shot >= 1
+        and current_sub(pkg, shot, plan, t) is None
+    ]  # fmt: skip
+
+
+def sub_shot_references(
+    pkg: ProductionPackage,
+    images: list[GeneratedImage],
+    takes: list[ShotTake],
+    shot: Shot,
+    sub: SubShot,
+    picks: ShotPicks | None = None,
+) -> tuple[list[FrameRef], list[str]]:
+    """(the pictures a sub-shot's keyframe is drawn from, what is missing): the picks of
+    the people in this sub-shot, the set and the props, and from sub-shot 2 on, first the
+    approved keyframe of the sub-shot before it. Chosen per sub-shot, then capped at nine,
+    so a close-up keeps its person's face however crowded the shot is."""
+    picks = picks or shot_picks(pkg, images, shot)
+    people = set(sub.people)
+    missing = picks.missing_for(people)
+    previous = None
+    if sub.index > 1:
+        prev = approved_take(takes, shot.shot_id, sub.index - 1)
+        if prev is None:
+            missing.append(f"an approved keyframe for sub-shot {sub.index - 1}")
+        else:
+            previous = FrameRef(ref_id=frame_ref(prev), kind="previous_frame",
+                                role=f"the approved keyframe of sub-shot {sub.index - 1}, "
+                                "just before this cut", likeness=prev.likeness)  # fmt: skip
+    return picks.refs(people, previous), missing
 
 
 def _seeds(seeds: list[int] | None, n: int) -> list[int]:
@@ -347,9 +558,9 @@ def plan_take(
     pkg: ProductionPackage,
     images: list[GeneratedImage],
     takes: list[ShotTake],
-    shot_id: str,
+    plan: ShotPlan,
     *,
-    frame: Frame = "start",
+    sub_shot: int = 1,
     draws: int = DEFAULT_DRAWS,
     seeds: list[int] | None = None,
     direction: str | None = None,
@@ -357,26 +568,25 @@ def plan_take(
     auto: bool = True,
     max_rounds: int = MAX_ROUNDS,
 ) -> ShotTake:
-    """A new take on a shot's frame: written by the model (steered by `direction`, and
-    building on the newest take's prompt and check), or the user's own `prompt`."""
-    shot = shot_of(pkg, shot_id)
-    if is_busy(takes, shot_id, frame):
-        raise NotReady(f"the {frame} frame of {shot_id} is still being made")
-    refs, missing = shot_references(pkg, images, shot)
+    """A new take on a sub-shot's keyframe: written by the model (steered by `direction`,
+    and building on the newest take's prompt and check), or the user's own `prompt`."""
+    shot = shot_of(pkg, plan.shot_id)
+    shot_id = shot.shot_id
+    if plan.busy:
+        raise NotReady(f"the sub-shots of {shot_id} are still being planned")
+    sub = plan.sub(sub_shot)
+    if sub is None:
+        raise NotReady(f"{shot_id} has no sub-shot {sub_shot}")
+    if is_busy(takes, shot_id, sub_shot):
+        raise NotReady(f"sub-shot {sub_shot} of {shot_id} is still being made")
+    refs, missing = sub_shot_references(pkg, images, takes, shot, sub)
     if missing:
-        raise NotReady("pick design images first: " + "; ".join(missing))
-    if frame == "end":
-        start = approved_take(takes, shot_id, "start")
-        if start is None:
-            raise NotReady("approve a start frame first: the end frame is drawn from it")
-        first = FrameRef(ref_id=f"frame:{start.take_id}:{start.approved}",
-                         role="the approved start frame of this shot", kind="start_frame",
-                         likeness=start.likeness)  # fmt: skip
-        refs = [first, *[r for r in refs if r.kind != "set"]][:MAX_REFERENCES]
-    elif not refs:
+        raise NotReady("first: " + "; ".join(missing))
+    if not refs:
         raise NotReady(f"{shot_id} has no design images to draw from")
     draws = max(1, min(draws, MAX_DRAWS))
-    mine = sorted((t for t in takes if t.shot_id == shot_id and t.frame == frame),
+    mine = sorted((t for t in takes if t.shot_id == shot_id and t.sub_shot == sub_shot
+                   and current_sub(pkg, shot, plan, t) is not None),
                   key=lambda t: t.created_at)  # fmt: skip
     last = mine[-1] if mine else None
     fixes = _fixes(last) if last is not None and direction is None and prompt is None else []
@@ -385,14 +595,17 @@ def plan_take(
         if len(user_prompt) > MAX_PROMPT_CHARS:
             raise ValueError(f"the prompt is longer than {MAX_PROMPT_CHARS} characters")
         if over := cited_beyond(user_prompt, len(refs)):
-            raise ValueError(f"the prompt cites {', '.join(over)}, which this shot doesn't send")
+            raise ValueError(
+                f"the prompt cites {', '.join(over)}, which this sub-shot doesn't send"
+            )
     take_id = f"stk_{uuid.uuid4().hex[:12]}"
     return ShotTake(
         take_id=take_id,
         package_id=pkg.package_id,
         revision_id=pkg.revision_id,
         shot_id=shot_id,
-        frame=frame,
+        sub_shot=sub_shot,
+        spec=sub,
         run_id=take_id,
         prompt=user_prompt,
         prompt_source="user" if user_prompt else "pending",
@@ -455,10 +668,11 @@ def next_round(take: ShotTake) -> ShotTake | None:
 
 
 WRITER_ROLE = """\
-You write MiniMax-H3-Image edit prompts for the keyframes of a short drama: one picture per \
-shot that the video model will start (or end) the shot from. The picture puts the shot's \
-people, exactly as they look in their reference pictures, into the set, framed and posed as \
-the storyboard says. Character consistency matters most: every face, hairstyle and costume \
+You write MiniMax-H3-Image edit prompts for the keyframes of a short drama. A shot is one \
+video generation that may hold a few cuts (sub-shots); each sub-shot gets one keyframe, the \
+picture the video model shows at the moment that sub-shot begins. The picture puts the \
+sub-shot's people, exactly as they look in their reference pictures, into the set, framed \
+and posed as the plan says. Character consistency matters most: every face, hairstyle and costume \
 must match its picture. Our server renders the prompt exactly as written (no prompt \
 expansion), so the prompt is the finished description. Follow the H3 rules and examples \
 below.\
@@ -467,11 +681,14 @@ below.\
 WRITER_GUIDE = """\
 ## Your input
 
-- `frame`: "start" (the first frame of the shot) or "end" (its last frame; <Picture 1> is \
-the approved start frame, and the end frame must be the same shot moments later).
-- `pictures`: one entry per <Picture N>, in order, with its role. They are attached.
-- `shot`: framing, camera, action, continuity and notes from the storyboard; `people` lists \
-who is on screen (exactly these, no one else) and `dialogue` who speaks in the shot.
+- `sub_shot`: the cut this keyframe opens: its number of `of`, its time in the clip, \
+framing, camera, action and `people` (exactly these on screen, `people_count` of them, no \
+one else). The keyframe is its first frame.
+- `pictures`: one entry per <Picture N>, in order, with its role. They are attached. From \
+sub-shot 2 on, <Picture 1> is the approved keyframe of the sub-shot before: the same scene \
+a moment before the cut.
+- `shot`: the whole shot from the storyboard (framing, camera, action, continuity, notes, \
+dialogue), for context.
 - `scene`: where and when; `style`: medium, era, color and light; `aspect`: the canvas.
 - `previous_prompt` and `fixes`: the last round's prompt and what the quality check found \
 wrong with its best draw. Keep what worked and fix every finding.
@@ -490,12 +707,13 @@ hair, build and every costume detail remain; pose, position and expression follo
 description); a face picture supplies the exact facial features of that person; the set \
 is partially preserved (layout, materials, furniture, palette remain; the camera position \
 and the light of the moment follow this description); a prop is fully preserved or \
-partially preserved in the state the shot needs. For an end frame, <Subject 1> (the start \
-frame) is partially preserved: the same camera, set, light, people and clothes; only the \
-poses and positions change, to where the action leaves them.
+partially preserved in the state the shot needs. From sub-shot 2 on, <Subject 1> (the \
+keyframe before the cut) is partially preserved: the set, light, people, clothing, hair and \
+props in their current state remain; the camera position, framing and poses follow this \
+sub-shot.
 4. The frozen moment: each person's pose, which hand holds or touches what, gaze, \
-expression. For the start frame, the moment the action begins; for the end frame, where \
-it ends. A speaking person has their mouth slightly open.
+expression, at the moment this sub-shot begins. A speaking person has their mouth slightly \
+open.
 5. Light (source and direction) and lens feel, then "No other lettering is added."
 
 Never add people the shot doesn't list. Describe visible things, not story. Stay under \
@@ -513,12 +731,9 @@ scene with bodies under covers.
 
 ## Output
 
-Return {{"prompt": "...", "motion": "...", "end_frame": true|false, "notes": "..."}}:
+Return {{"prompt": "...", "motion": "...", "notes": "..."}}:
 - `prompt`: the prompt only, as plain text.
-- `motion`: one sentence on how the shot moves from its first to its last frame.
-- `end_frame`: true when the shot's people or camera end somewhere clearly different from \
-where they start (an entrance, a turn, a hand-off, a move across the room), so an end \
-frame would help the video model; false for a held moment.
+- `motion`: one sentence on how the sub-shot moves from this frame until its end.
 - `notes`: one short sentence to the user on what will be hard to get right, or "".\
 """
 
@@ -526,7 +741,6 @@ frame would help the video model; false for a held moment.
 class FramePromptOutput(BaseModel):
     prompt: str
     motion: str = ""
-    end_frame: bool = False
     notes: str = ""
 
 
@@ -585,6 +799,9 @@ def shot_context(pkg: ProductionPackage, shot: Shot) -> dict[str, Any]:
                 {
                     "speaker": names.get(lines[c.dialogue_id].character_id, ""),
                     "line": lines[c.dialogue_id].text,
+                    # When it is spoken, in seconds from the start of the clip.
+                    "start_s": round(max(0, c.start_ms - shot.start_ms) / 1000, 2),
+                    "end_s": round(min(shot.duration_ms, c.end_ms - shot.start_ms) / 1000, 2),
                 }
                 for c in shot.dialogue_cues
                 if c.dialogue_id in lines
@@ -599,20 +816,42 @@ def shot_context(pkg: ProductionPackage, shot: Shot) -> dict[str, Any]:
     }
 
 
+def sub_shot_context(pkg: ProductionPackage, sub: SubShot, of: int) -> dict[str, Any]:
+    """The sub-shot a keyframe opens, for the writer and the judge."""
+    names = _names(pkg)
+    return {
+        "index": sub.index,
+        "of": of,
+        "start_s": round(sub.start_ms / 1000, 3),
+        "end_s": round(sub.end_ms / 1000, 3),
+        "framing": sub.framing,
+        "camera": sub.camera,
+        "action": sub.action,
+        "people": [{"name": names.get(c, c)} for c in sub.people],
+        "people_count": len(sub.people),
+    }
+
+
+def take_sub(pkg: ProductionPackage, shot: Shot, take: ShotTake) -> SubShot:
+    """The sub-shot a take was made for (takes from before sub-shots: the whole shot)."""
+    return take.spec or single_plan(pkg, shot).sub_shots[0]
+
+
 def template_prompt(pkg: ProductionPackage, take: ShotTake) -> str:
     """A usable prompt built by the program (offline, or when the writer fails)."""
     shot = shot_of(pkg, take.shot_id)
+    sub = take_sub(pkg, shot, take)
     names = _names(pkg)
     defs, rels = [], []
     for n, r in enumerate(take.references, 1):
         who = names.get(r.entity_id or "", "")
         subject = f"<Subject {n}>"
         match r.kind:
-            case "start_frame":
+            case "previous_frame" | "start_frame":
                 defs.append(f"The film frame in <Picture {n}> is {subject}.")
-                rels.append(f"{subject} is partially preserved: the camera, set, light, people "
-                            "and clothing remain; only the poses and positions change, to "
-                            "where the action ends.")  # fmt: skip
+                rels.append(f"{subject} is partially preserved: the set, light, people, "
+                            "clothing and props remain; the camera position, framing and "
+                            "poses follow this description.")  # fmt: skip
             case "look":
                 defs.append(f"The person in <Picture {n}> is {subject} ({who}).")
                 rels.append(f"{subject} is partially preserved: the face, hair, build and every "
@@ -629,13 +868,13 @@ def template_prompt(pkg: ProductionPackage, take: ShotTake) -> str:
             case "prop":
                 defs.append(f"The object in <Picture {n}> is {subject} ({who}).")
                 rels.append(f"{subject} is fully preserved.")
-    count = len(shot.character_ids)
+    count = len(sub.people)
     people = (f"exactly {count} {'person' if count == 1 else 'people'}" if count
               else "no people")  # fmt: skip
-    moment = "where the action ends" if take.frame == "end" else "the moment the action begins"
+    camera = f", {sub.camera.rstrip('.')}" if sub.camera else ""
     target = (f"The target image is a still frame from a live-action short drama: "
-              f"{shot.framing.rstrip('.')}, {shot.camera.rstrip('.')}, showing {people}, at "
-              f"{moment}: {shot.visual_action.rstrip('.')}.")  # fmt: skip
+              f"{sub.framing.rstrip('.')}{camera}, showing {people}, at the moment the "
+              f"action begins: {sub.action.rstrip('.')}.")  # fmt: skip
     extra = [take.direction.rstrip(".") + "." if take.direction else ""]
     return " ".join(p for p in [*defs, target, *rels, *extra, NO_OTHER_TEXT] if p)
 
@@ -644,10 +883,115 @@ def fixture_frame_prompt(request: GenerationRequest) -> FramePromptOutput:
     """Offline stand-in for the writer: the template, passed in the context."""
     return FramePromptOutput(
         prompt=request.context.get("template_prompt", ""),
-        motion="Offline sample: the action as the storyboard describes it.",
-        end_frame=False,
+        motion="Offline sample: the action as the plan describes it.",
         notes="Offline sample: the built-in template.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Sub-shot planner
+
+PLAN_ROLE = """\
+You are the director's assistant on a short drama made with an AI video model (MiniMax H3). \
+Each storyboard shot is rendered as one video clip, and a dynamic clip may hold a few cuts \
+inside it, written in the video prompt as `[Shot 1] ...` then `[Shot 2] At 00:02.000, the \
+camera cuts to ...`. You decide where a shot's cuts go: its sub-shots. Each sub-shot then \
+gets its own keyframe picture, which the video model shows the moment that sub-shot begins.\
+"""
+
+PLAN_GUIDE = """\
+## Your input
+
+`shot`: the storyboard shot (framing, camera, action, continuity, notes, its people and \
+props, `duration_s`) and `dialogue`, each line with when it starts and ends in the clip \
+(`start_s`, `end_s`) and who speaks. `scene`: where and when.
+
+## How to cut
+
+- Cut only for new information: a new subject, space, state, viewpoint or time. A small \
+reframe or a push-in is a camera move inside one sub-shot, not a cut. Most held moments \
+are one sub-shot; a shot whose framing or camera notes describe two setups (a wide, then a \
+close-up on the reveal), a reaction, or a reveal of something new is two or three.
+- At most {max_sub} sub-shots. The first starts at 0; each later one starts strictly after \
+the one before, at least {min_s:.0f} s apart, and before the clip ends. A line of dialogue is \
+best not cut in the middle: cut between lines, or keep the speaker on screen across the cut.
+- Each sub-shot: `start_s` (seconds from the start of the clip, e.g. 2.5), `framing` (shot \
+size, angle, who is where on screen), `camera` (still, pan, push-in, handheld...), \
+`action` (what happens from that moment until the next cut, as visible movement), and \
+`people`: the names of exactly the people on screen in it (from `shot.people`).
+- Together the sub-shots tell the whole shot's action, in order, with nothing added.
+
+Return {{"sub_shots": [{{"start_s": 0, "framing": "...", "camera": "...", "action": "...", \
+"people": ["..."]}}, ...], "notes": "one short sentence to the user on why you cut it so"}}.\
+"""
+
+
+class PlannedSubShot(BaseModel):
+    start_s: float = Field(ge=0)
+    framing: str
+    camera: str = ""
+    action: str
+    people: list[str] = Field(default_factory=list)
+
+
+class PlanOutput(BaseModel):
+    sub_shots: list[PlannedSubShot]
+    notes: str = ""
+
+
+def plan_instructions() -> str:
+    return (
+        PLAN_ROLE + "\n\n" + PLAN_GUIDE.format(max_sub=MAX_SUB_SHOTS, min_s=MIN_SUB_SHOT_MS / 1000)
+    )
+
+
+def plan_context(pkg: ProductionPackage, shot: Shot) -> dict[str, Any]:
+    ctx = shot_context(pkg, shot)
+    names = _names(pkg)
+    ctx["shot"]["people"] = [names.get(c, c) for c in shot.character_ids]
+    return ctx
+
+
+def _who(pkg: ProductionPackage, shot: Shot, name: str) -> str:
+    """The character a planner's name means, among the shot's people: the id, the exact
+    name, else the one person whose name contains it or whose first name it starts with
+    ("Lila", "Lila Chen", "Ms. Lila" for Lila). Raises when it means no one or several."""
+    people = [c for c in pkg.story_bible.characters if c.character_id in shot.character_ids]
+    said = name.strip().casefold()
+    exact = [c for c in people if said in (c.character_id.casefold(), c.name.casefold())]
+    if not exact:
+        words = said.replace(".", " ").split()
+        exact = [
+            c for c in people
+            if c.name.casefold() in said or said in c.name.casefold()
+            or (words and c.name.split() and c.name.split()[0].casefold() in words)
+        ]  # fmt: skip
+    if len(exact) != 1:
+        raise ValueError(f"the plan puts {name} on screen, who isn't one of the shot's people")
+    return exact[0].character_id
+
+
+def planned_sub_shots(pkg: ProductionPackage, shot: Shot, out: PlanOutput) -> list[SubShot]:
+    """The planner's sub-shots, checked (names become character ids). A first cut a
+    moment after 0 s is moved to 0 s; anything else that breaks the rules fails."""
+    planned = sorted(out.sub_shots, key=lambda p: p.start_s)
+    rows = []
+    for k, p in enumerate(planned):
+        start = 0 if k == 0 and p.start_s * 1000 < MIN_SUB_SHOT_MS else round(p.start_s * 1000)
+        people = list(dict.fromkeys(_who(pkg, shot, n) for n in p.people))
+        rows.append({"start_ms": start, "framing": p.framing, "camera": p.camera,
+                     "action": p.action, "people": people})  # fmt: skip
+    return make_sub_shots(shot, rows)
+
+
+def fixture_plan(request: GenerationRequest) -> PlanOutput:
+    """Offline stand-in for the planner: the whole shot is one sub-shot."""
+    shot = request.context["shot"]
+    return PlanOutput(
+        sub_shots=[PlannedSubShot(start_s=0, framing=shot["framing"], camera=shot["camera"],
+                                  action=shot["action"], people=shot["people"])],
+        notes="Offline sample: one sub-shot.",
+    )  # fmt: skip
 
 
 # ---------------------------------------------------------------------------
@@ -667,23 +1011,24 @@ JUDGE_GUIDE = """\
 - `<Frame>`: the keyframe to check (attached last).
 - `pictures`: one entry per <Picture N> with its role, attached first. These are the truth \
 for how each person, the set and each prop look.
-- `shot`: what the frame must show: framing, camera, action, `people` (exactly these, \
-`people_count` of them), props and dialogue.
-- `frame`: "start" (the moment the action begins) or "end" (where it ends; <Picture 1> is \
-then the approved start frame, and the camera, set, light and clothes must match it).
+- `sub_shot`: what the frame must show: the first moment of this cut, with its framing, \
+camera, action and `people` (exactly these, `people_count` of them). From sub-shot 2 on, \
+<Picture 1> is the approved keyframe of the sub-shot before: the set, light, clothes and \
+props must match it, across the cut.
+- `shot`: the whole shot (props, dialogue, continuity), for context.
 - `prompt`: the prompt the frame was drawn from (for context; judge the frame, not the prompt).
 
 ## Check these items
 
-- For each person in `shot.people`: one item each for **identity** (face shape, features, \
+- For each person in `sub_shot.people`: one item each for **identity** (face shape, features, \
 skin, age: the same person as their picture) and **wardrobe** (clothes, hair, accessories \
 as in their look picture). Name them: "Lila: face", "Lila: wardrobe".
-- **count**: exactly `people_count` people with visible faces or bodies, no extras \
+- **count**: exactly `sub_shot.people_count` people with visible faces or bodies, no extras \
 (small background silhouettes are fine if the shot implies them).
 - **placement**: who is where (screen-left/right, foreground/background) and facing which \
 way, as the framing and action say.
 - **framing**: the shot size and camera angle.
-- **action**: the pose and the moment match the action (and the frame: start or end).
+- **action**: the pose and the moment match the sub-shot's action as it begins.
 - **set**: the place matches the set picture (layout, materials, palette).
 - **prop**: one item per listed prop: present and as in its picture.
 - **defects**: hands, fingers, limbs, merged bodies, warped faces, broken perspective.
@@ -714,10 +1059,10 @@ def judge_instructions() -> str:
 
 def fixture_check(request: GenerationRequest) -> JudgeOutput:
     """Offline stand-in for the judge: every item passes."""
-    shot = request.context.get("shot", {})
+    sub = request.context.get("sub_shot", {})
     items = [
         CheckItem(item=f"{p['name']}: {what}", kind=kind, passed=True)
-        for p in shot.get("people", [])
+        for p in sub.get("people", [])
         for what, kind in (("face", "identity"), ("wardrobe", "wardrobe"))
     ]
     items += [CheckItem(item=k, kind=k, passed=True)
@@ -747,17 +1092,80 @@ class ShotFrameRunner:
         self.images = images
         self.text = text_client
         self._gpu = gpu or asyncio.Lock()
+        self._planning = asyncio.Semaphore(4)  # sub-shot plans written at once
         self._tasks: set[asyncio.Task[None]] = set()
 
     def recover(self) -> int:
-        return self.repo.fail_unfinished_shot_takes(
-            "Interrupted by a server restart. Retry to run it again."
+        error = "Interrupted by a server restart. Retry to run it again."
+        return self.repo.fail_unfinished_shot_takes(error) + self.repo.fail_unfinished_shot_plans(
+            error
         )
 
     def start(self, take_id: str) -> None:
         task = asyncio.create_task(self.run(take_id))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def start_plan(self, plan: ShotPlan, then: dict[str, Any] | None = None) -> None:
+        """Write a shot's sub-shot plan in the background (the API has saved it as
+        "writing"); with `then` (plan_take's options), start sub-shot 1 afterwards."""
+        task = asyncio.create_task(self._plan(plan, then))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _plan(self, plan: ShotPlan, then: dict[str, Any] | None) -> None:
+        async with self._planning:
+            try:
+                await self._write_plan(plan)
+            except asyncio.CancelledError:
+                plan.status, plan.error = "failed", "Interrupted. Plan it again."
+                self.repo.save_shot_plan(plan)
+                raise
+        if then is None or plan.status != "done":
+            return
+        pkg = self.repo.get_package(plan.package_id, plan.revision_id)
+        if pkg is None:
+            return
+        try:
+            take = plan_take(
+                pkg,
+                self.repo.list_images(plan.package_id, plan.revision_id),
+                self.repo.list_shot_takes(plan.package_id, plan.revision_id),
+                plan,
+                **then,
+            )
+        except (NotReady, ValueError) as exc:
+            log.info("no keyframe started for %s after planning: %s", plan.shot_id, exc)
+            return
+        self.repo.save_shot_take(take)
+        await self.run(take.take_id)
+
+    async def _write_plan(self, plan: ShotPlan) -> None:
+        pkg = self.repo.get_package(plan.package_id, plan.revision_id)
+        try:
+            if pkg is None:
+                raise RuntimeError("the package revision is gone")
+            shot = shot_of(pkg, plan.shot_id)
+            request = GenerationRequest(
+                stage=PLAN_STAGE,  # type: ignore[arg-type]
+                instructions=plan_instructions(),
+                context=plan_context(pkg, shot),
+            )
+            out = await self.text.generate(request, PlanOutput)
+            plan.sub_shots = planned_sub_shots(pkg, shot, out)
+            plan.notes, plan.source = out.notes.strip(), "model"
+            plan.model = request.model or getattr(self.text, "model_id", None)
+            plan.status, plan.error = "done", None
+        except Exception as exc:  # the previous plan (if any) stays; the user can plan again
+            log.warning("sub-shot plan failed for %s", plan.shot_id, exc_info=True)
+            plan.status, plan.error = "failed", f"The plan couldn't be written: {str(exc)[:300]}"
+        plan.updated_at = utcnow()
+        self.repo.save_shot_plan(plan)
+        if plan.status == "done" and pkg is not None:
+            shot = shot_of(pkg, plan.shot_id)
+            takes = self.repo.list_shot_takes(plan.package_id, plan.revision_id)
+            for t in stale_approvals(pkg, shot, takes, plan):
+                self.repo.approve_shot_draw(t.take_id, None)
 
     async def aclose(self) -> None:
         for t in list(self._tasks):
@@ -823,7 +1231,7 @@ class ShotFrameRunner:
             stage=WRITE_STAGE,  # type: ignore[arg-type]
             instructions=writer_instructions(),
             context={
-                "frame": take.frame,
+                "sub_shot": sub_shot_context(pkg, take_sub(pkg, shot, take), self._of(take)),
                 "pictures": [
                     {"picture": f"<Picture {n}>", "role": r.role}
                     for n, r in enumerate(take.references, 1)
@@ -859,10 +1267,13 @@ class ShotFrameRunner:
             return
         take.prompt, take.prompt_source = prompt, "model"
         take.prompt_model = request.model or getattr(self.text, "model_id", None)
-        take.notes = out.notes.strip()
-        if take.frame == "start":
-            take.motion, take.end_frame = out.motion.strip(), out.end_frame
+        take.notes, take.motion = out.notes.strip(), out.motion.strip()
         self.repo.save_shot_take(take)
+
+    def _of(self, take: ShotTake) -> int:
+        """How many sub-shots the take's shot has now."""
+        plan = self.repo.get_shot_plan(take.package_id, take.revision_id, take.shot_id)
+        return len(plan.sub_shots) if plan is not None and plan.sub_shots else 1
 
     def _guard(self, pkg: ProductionPackage, shot: Shot, take: ShotTake) -> None:
         level = intimate_scene(pkg, shot)
@@ -945,7 +1356,7 @@ class ShotFrameRunner:
         all at once. A check that can't run leaves the draw unchecked, with the reason; it
         never counts as a pass."""
         context = shot_context(pkg, shot) | {
-            "frame": take.frame,
+            "sub_shot": sub_shot_context(pkg, take_sub(pkg, shot, take), self._of(take)),
             "pictures": [
                 {"picture": f"<Picture {n}>", "role": r.role}
                 for n, r in enumerate(take.references, 1)
@@ -1015,16 +1426,36 @@ def judge_view(media: MediaStore, rel: str) -> str | None:
 
 
 def shot_board(
-    pkg: ProductionPackage, images: list[GeneratedImage], takes: list[ShotTake]
+    pkg: ProductionPackage,
+    images: list[GeneratedImage],
+    takes: list[ShotTake],
+    plans: list[ShotPlan],
 ) -> list[dict[str, Any]]:
-    """Every shot with what it draws from, what is missing, and its takes per frame."""
+    """Every shot with its sub-shot plan, and per sub-shot what it draws from, what is
+    missing, its takes and its approved keyframe."""
     names = _names(pkg)
+    stored = {p.shot_id: p for p in plans}
     out = []
     for shot in pkg.shot_list:
-        refs, missing = shot_references(pkg, images, shot)
+        own = stored.get(shot.shot_id)
+        plan = plan_of(pkg, shot, own)
         mine = sorted((t for t in takes if t.shot_id == shot.shot_id), key=lambda t: t.created_at)
-        start = [t for t in mine if t.frame == "start"]
-        suggested = next((t.end_frame for t in reversed(start) if t.end_frame is not None), None)
+        picks = shot_picks(pkg, images, shot)  # once per shot, chosen per sub-shot below
+        subs = []
+        for sub in plan.sub_shots:
+            refs, missing = sub_shot_references(pkg, images, mine, shot, sub, picks)
+            ap = approved_take(mine, shot.shot_id, sub.index)
+            subs.append({
+                **sub.model_dump(),
+                "timecode": sub.timecode,
+                "people_names": [names.get(c, c) for c in sub.people],
+                "references": [r.model_dump() for r in refs],
+                "missing": missing,
+                # Takes drawn for this sub-shot as it is now (not for an older plan's).
+                "takes": [t.model_dump(mode="json") for t in mine
+                          if t.sub_shot == sub.index and current_sub(pkg, shot, plan, t)],
+                "approved": [ap.take_id, ap.approved] if ap is not None else None,
+            })  # fmt: skip
         out.append({
             "shot_id": shot.shot_id,
             "episode_id": shot.episode_id,
@@ -1033,14 +1464,16 @@ def shot_board(
             "camera": shot.camera,
             "action": shot.visual_action,
             "duration_ms": shot.duration_ms,
-            "people": [names.get(c, c) for c in shot.character_ids],
+            "people": [{"id": c, "name": names.get(c, c)} for c in shot.character_ids],
             "place": names.get(shot.location_id, shot.location_id),
             "intimacy": intimate_scene(pkg, shot),
-            "references": [r.model_dump() for r in refs],
-            "missing": missing,
-            "end_suggested": suggested,
-            "takes": [t.model_dump(mode="json") for t in mine],
-            "approved": {f: (a.take_id, a.approved) if (a := approved_take(mine, shot.shot_id, f))
-                         else None for f in ("start", "end")},
+            "plan": {
+                "status": own.status if own else "done",
+                "source": plan.source,
+                "notes": own.notes if own else "",
+                "error": own.error if own else None,
+            },
+            "sub_shots": subs,
+            "busy": (own is not None and own.busy) or any(t.busy for t in mine),
         })  # fmt: skip
     return out

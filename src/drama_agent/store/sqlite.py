@@ -17,13 +17,13 @@ from ..experiment import ExpSession, ExpTurn
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
-from ..shot_frames import ShotTake, approval_changes
+from ..shot_frames import ShotPlan, ShotTake, approval_changes
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
 # v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns.
-# v7: exp_sessions.next_label. v8: shot_takes. Each step is additive, so older files
-# upgrade in place (see _migrate).
-SCHEMA_VERSION = 8
+# v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. Each step is additive, so
+# older files upgrade in place (see _migrate).
+SCHEMA_VERSION = 9
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -124,12 +124,20 @@ CREATE TABLE IF NOT EXISTS shot_takes (
     package_id  TEXT NOT NULL,
     revision_id TEXT NOT NULL,
     shot_id     TEXT NOT NULL,
-    frame       TEXT NOT NULL,              -- start | end
+    frame       TEXT NOT NULL,              -- the sub-shot number (v8: start | end)
     status      TEXT NOT NULL,              -- pending | writing | drawing | checking | done | failed
     created_at  TEXT NOT NULL,
     data        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS shot_takes_pkg ON shot_takes (package_id, revision_id, shot_id);
+CREATE TABLE IF NOT EXISTS shot_plans (
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    shot_id     TEXT NOT NULL,
+    status      TEXT NOT NULL,              -- writing | done | failed
+    data        TEXT NOT NULL,
+    PRIMARY KEY (package_id, revision_id, shot_id)
+);
 """
 
 
@@ -643,7 +651,7 @@ class SqliteRepository:
             "created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (take_id) DO UPDATE "
             "SET status = excluded.status, data = json_set(excluded.data, '$.approved', "
             "json_extract(shot_takes.data, '$.approved'))",
-            (take.take_id, take.package_id, take.revision_id, take.shot_id, take.frame,
+            (take.take_id, take.package_id, take.revision_id, take.shot_id, str(take.sub_shot),
              take.status, take.created_at.isoformat(), take.model_dump_json()),
         )  # fmt: skip
 
@@ -692,6 +700,41 @@ class SqliteRepository:
                 raise
             self._conn.execute("COMMIT")
         return take
+
+    def save_shot_plan(self, plan: ShotPlan) -> None:
+        self._exec(
+            "INSERT INTO shot_plans (package_id, revision_id, shot_id, status, data) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (package_id, revision_id, shot_id) DO UPDATE "
+            "SET status = excluded.status, data = excluded.data",
+            (plan.package_id, plan.revision_id, plan.shot_id, plan.status,
+             plan.model_dump_json()),
+        )  # fmt: skip
+
+    def get_shot_plan(self, package_id: str, revision_id: str, shot_id: str) -> ShotPlan | None:
+        raw = self._one(
+            "SELECT data FROM shot_plans WHERE package_id = ? AND revision_id = ? AND shot_id = ?",
+            (package_id, revision_id, shot_id),
+        )
+        return ShotPlan.model_validate_json(raw) if raw else None
+
+    def list_shot_plans(self, package_id: str, revision_id: str) -> list[ShotPlan]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM shot_plans WHERE package_id = ? AND revision_id = ?",
+                (package_id, revision_id),
+            ).fetchall()
+        return [ShotPlan.model_validate_json(r[0]) for r in rows]
+
+    def fail_unfinished_shot_plans(self, error: str) -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM shot_plans WHERE status = 'writing'"
+            ).fetchall()
+        for (raw,) in rows:
+            p = ShotPlan.model_validate_json(raw)
+            p.status, p.error = "failed", error
+            self.save_shot_plan(p)
+        return len(rows)
 
     def fail_unfinished_shot_takes(self, error: str) -> int:
         with self._lock:

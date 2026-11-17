@@ -13,24 +13,34 @@ from pydantic import BaseModel, Field
 from ..content_guard import GuardRefused, screen
 from ..media import MediaStore
 from ..models import ProductionPackage
+from ..models.package import utcnow
+from ..models.storyboard import Shot
 from ..shot_frames import (
     DEFAULT_DRAWS,
     MAX_DRAWS,
     MAX_ROUNDS,
+    MAX_SUB_SHOTS,
     NotReady,
     ShotFrameRunner,
+    ShotPlan,
     ShotTake,
     approved_take,
+    current_sub,
+    frame_ref,
     is_busy,
+    make_sub_shots,
+    plan_of,
     plan_take,
     shot_board,
     shot_of,
+    shot_picks,
+    stale_approvals,
 )
 
 
 class KeyframeRequest(BaseModel):
     revision_id: str | None = None
-    frame: Literal["start", "end"] = "start"
+    sub_shot: int = Field(1, ge=1, le=MAX_SUB_SHOTS)
     draws: int = Field(DEFAULT_DRAWS, ge=1, le=MAX_DRAWS)
     seeds: list[int] = Field(default_factory=list, max_length=MAX_DRAWS)
     direction: str | None = Field(None, max_length=1000)
@@ -41,13 +51,32 @@ class KeyframeRequest(BaseModel):
 
 class KeyframeBatchRequest(BaseModel):
     revision_id: str | None = None
-    shot_ids: list[str] | None = None  # None: every shot without an approved start frame
+    # None: every shot without an approved first keyframe and with nothing running.
+    shot_ids: list[str] | None = None
     draws: int = Field(DEFAULT_DRAWS, ge=1, le=MAX_DRAWS)
     max_rounds: int = Field(MAX_ROUNDS, ge=1, le=MAX_ROUNDS)
+    # Plan the sub-shots of shots that have no plan first (the text model), then draw.
+    plan: bool = True
+
+
+class SubShotIn(BaseModel):
+    start_ms: int = Field(ge=0)
+    framing: str = Field(max_length=1000)
+    camera: str = Field("", max_length=1000)
+    action: str = Field(max_length=2000)
+    people: list[str] = Field(default_factory=list)  # character ids
+
+
+class PlanRequest(BaseModel):
+    revision_id: str | None = None
+    # Your own sub-shots; None asks the text model to plan them.
+    sub_shots: list[SubShotIn] | None = Field(None, max_length=MAX_SUB_SHOTS)
 
 
 class ApproveRequest(BaseModel):
     n: int = Field(ge=0)
+    # Start the next sub-shot's keyframe (when it has none yet), with the same settings.
+    next: bool = True
 
 
 class KeyframeBoard(BaseModel):
@@ -72,13 +101,15 @@ def register(
 ) -> None:
     def _board(pkg: ProductionPackage) -> KeyframeBoard:
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        plans = repo.list_shot_plans(pkg.package_id, pkg.revision_id)
         images = repo.list_images(pkg.package_id, pkg.revision_id)
+        shots = shot_board(pkg, images, takes, plans)
         return KeyframeBoard(
             package_id=pkg.package_id,
             revision_id=pkg.revision_id,
             image_model=image_model,
-            busy=sum(1 for t in takes if t.busy),
-            shots=shot_board(pkg, images, takes),
+            busy=sum(1 for t in takes if t.busy) + sum(1 for p in plans if p.busy),
+            shots=shots,
         )
 
     def _take_or_404(take_id: str) -> ShotTake:
@@ -92,11 +123,61 @@ def register(
         package_job(pkg.package_id, None, pkg.revision_id)  # refuses archived stories
         return pkg
 
+    def _shot(pkg: ProductionPackage, shot_id: str) -> Shot:
+        try:
+            return shot_of(pkg, shot_id)
+        except KeyError:
+            raise HTTPException(404, f"no shot {shot_id}") from None
+
+    def _plan(pkg: ProductionPackage, shot: Shot) -> tuple[ShotPlan | None, ShotPlan]:
+        """(the stored plan, if any; the plan in force)."""
+        stored = repo.get_shot_plan(pkg.package_id, pkg.revision_id, shot.shot_id)
+        return stored, plan_of(pkg, shot, stored)
+
+    def _start(take: ShotTake) -> ShotTake:
+        repo.save_shot_take(take)
+        runner.start(take.take_id)
+        return take
+
     @app.get("/v1/drama-packages/{package_id}/keyframes", response_model=KeyframeBoard)
     async def keyframe_board(package_id: str, revision_id: str | None = None) -> KeyframeBoard:
-        """Every shot with its reference pictures, what is missing, and its keyframe takes
-        (each draw with its quality check) and approved frames."""
+        """Every shot with its sub-shot plan, and per sub-shot its reference pictures,
+        what is missing, its keyframe takes (each draw with its quality check) and its
+        approved keyframe."""
         return _board(package_or_404(package_id, revision_id))
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/plan",
+        status_code=202,
+        response_model=ShotPlan,
+    )
+    async def plan_sub_shots(package_id: str, shot_id: str, req: PlanRequest) -> ShotPlan:
+        """Set a shot's sub-shots: your own (`sub_shots`, checked), or planned by the text
+        model in the background. Approved keyframes the new plan no longer matches are
+        withdrawn, with the later sub-shots drawn from them."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        stored, _ = _plan(pkg, shot)
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        if (stored is not None and stored.busy) or is_busy(takes, shot_id):
+            raise HTTPException(409, f"{shot_id} is still being planned or drawn")
+        plan = ShotPlan(package_id=pkg.package_id, revision_id=pkg.revision_id, shot_id=shot_id)
+        if req.sub_shots is None:
+            plan.status = "writing"
+            if stored is not None:  # the board keeps showing the old one meanwhile
+                plan.sub_shots, plan.source = stored.sub_shots, stored.source
+            repo.save_shot_plan(plan)
+            runner.start_plan(plan)
+            return plan
+        try:
+            plan.sub_shots = make_sub_shots(shot, [s.model_dump() for s in req.sub_shots])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        plan.source, plan.updated_at = "user", utcnow()
+        repo.save_shot_plan(plan)
+        for t in stale_approvals(pkg, shot, takes, plan):
+            repo.approve_shot_draw(t.take_id, None)
+        return plan
 
     @app.post(
         "/v1/drama-packages/{package_id}/keyframes/{shot_id}",
@@ -104,22 +185,19 @@ def register(
         response_model=ShotTake,
     )
     async def new_keyframe_take(package_id: str, shot_id: str, req: KeyframeRequest) -> ShotTake:
-        """A new take on a shot's start or end frame: written by the model (steered by
+        """A new take on a sub-shot's keyframe: written by the model (steered by
         `direction`, revising the newest take against its check), or the user's own
         `prompt`. Drawn, checked and, with `auto`, revised until a draw passes."""
         pkg = _writable(package_id, req.revision_id)
-        try:
-            shot_of(pkg, shot_id)
-        except KeyError:
-            raise HTTPException(404, f"no shot {shot_id}") from None
-        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        shot = _shot(pkg, shot_id)
+        _, plan = _plan(pkg, shot)
         try:
             take = plan_take(
                 pkg,
                 repo.list_images(pkg.package_id, pkg.revision_id),
-                takes,
-                shot_id,
-                frame=req.frame,
+                repo.list_shot_takes(pkg.package_id, pkg.revision_id),
+                plan,
+                sub_shot=req.sub_shot,
                 draws=req.draws,
                 seeds=req.seeds,
                 direction=req.direction,
@@ -146,17 +224,17 @@ def register(
                 )
             except GuardRefused as exc:
                 raise HTTPException(422, str(exc)) from exc
-        repo.save_shot_take(take)
-        runner.start(take.take_id)
-        return take
+        return _start(take)
 
     @app.post("/v1/drama-packages/{package_id}/keyframes", status_code=202)
     async def keyframe_batch(package_id: str, req: KeyframeBatchRequest) -> dict[str, Any]:
-        """Start frames for many shots at once (default: every shot without an approved
-        start frame and with nothing running). Shots that can't be drawn yet are listed
-        with the reason."""
+        """First keyframes for many shots at once (default: every shot without an approved
+        first keyframe and with nothing running). With `plan`, a shot with no sub-shot
+        plan is planned first and drawn once planned. Later sub-shots start as the one
+        before is approved. Shots that can't start yet are listed with the reason."""
         pkg = _writable(package_id, req.revision_id)
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        plans = {p.shot_id: p for p in repo.list_shot_plans(pkg.package_id, pkg.revision_id)}
         images = repo.list_images(pkg.package_id, pkg.revision_id)
         ids = (
             req.shot_ids
@@ -164,46 +242,97 @@ def register(
             else [
                 s.shot_id
                 for s in pkg.shot_list
-                if approved_take(takes, s.shot_id, "start") is None
-                and not is_busy(takes, s.shot_id, "start")
+                if approved_take(takes, s.shot_id, 1) is None
+                and not is_busy(takes, s.shot_id)
+                and not (s.shot_id in plans and plans[s.shot_id].busy)
             ]
         )
-        started, skipped = [], []
+        options = {"sub_shot": 1, "draws": req.draws, "max_rounds": req.max_rounds}
+        started, planning, skipped = [], [], []
         for shot_id in ids:
             try:
-                take = plan_take(pkg, images, takes, shot_id, draws=req.draws,
-                                 max_rounds=req.max_rounds)  # fmt: skip
-            except (NotReady, KeyError, ValueError) as exc:
-                skipped.append({"shot_id": shot_id, "reason": str(exc).strip("'")})
+                shot = shot_of(pkg, shot_id)
+            except KeyError:
+                skipped.append({"shot_id": shot_id, "reason": f"no shot {shot_id}"})
+                continue
+            stored = plans.get(shot_id)
+            if req.plan and stored is None and not is_busy(takes, shot_id):
+                # A shot that can't be drawn yet isn't planned either (a paid call).
+                if missing := shot_picks(pkg, images, shot).missing_for():
+                    skipped.append({"shot_id": shot_id, "reason": "first: " + "; ".join(missing)})
+                    continue
+                plan = ShotPlan(package_id=pkg.package_id, revision_id=pkg.revision_id,
+                                shot_id=shot_id, status="writing")  # fmt: skip
+                repo.save_shot_plan(plan)
+                runner.start_plan(plan, then=options)
+                planning.append(shot_id)
+                continue
+            try:
+                take = plan_take(pkg, images, takes, plan_of(pkg, shot, stored), **options)
+            except (NotReady, ValueError) as exc:
+                skipped.append({"shot_id": shot_id, "reason": str(exc)})
                 continue
             repo.save_shot_take(take)
             takes.append(take)
             started.append(take.take_id)
         for take_id in started:
             runner.start(take_id)
-        return {"started": started, "skipped": skipped}
+        return {"started": started, "planning": planning, "skipped": skipped}
 
     @app.post("/v1/shot-takes/{take_id}/approve", response_model=ShotTake)
     async def approve_draw(take_id: str, req: ApproveRequest) -> ShotTake:
-        """Approve one draw as the shot's start or end frame (replacing any other approval
-        of that frame). A person may approve a draw the check failed; the export says so."""
+        """Approve one draw as its sub-shot's keyframe (replacing any other approval of
+        that sub-shot). A person may approve a draw the check failed; the export says so.
+        With `next`, the next sub-shot's keyframe starts, drawn from this one."""
         take = _take_or_404(take_id)
-        _writable(take.package_id, take.revision_id)
+        pkg = _writable(take.package_id, take.revision_id)
         d = next((d for d in take.results if d.n == req.n), None)
         if take.busy or d is None or d.status != "done":
             raise HTTPException(409, "only a finished draw of a finished take can be approved")
-        if take.frame == "end":
-            takes = repo.list_shot_takes(take.package_id, take.revision_id)
-            start = approved_take(takes, take.shot_id, "start")
+        shot = _shot(pkg, take.shot_id)
+        _, plan = _plan(pkg, shot)
+        if current_sub(pkg, shot, plan, take) is None:
+            raise HTTPException(409, "the sub-shot plan changed since this take was drawn")
+        takes = repo.list_shot_takes(take.package_id, take.revision_id)
+        if take.sub_shot > 1:
+            prev = approved_take(takes, take.shot_id, take.sub_shot - 1)
             drawn_from = take.references[0].ref_id if take.references else ""
-            if start is None or drawn_from != f"frame:{start.take_id}:{start.approved}":
+            if prev is None or drawn_from != frame_ref(prev):
                 raise HTTPException(
-                    409, "this end frame was drawn from a start frame that isn't approved now"
+                    409,
+                    f"this keyframe was drawn from a keyframe of sub-shot {take.sub_shot - 1} "
+                    "that isn't approved now",
                 )
-        return repo.approve_shot_draw(take_id, req.n)
+        out = repo.approve_shot_draw(take_id, req.n)
+        following = plan.sub(take.sub_shot + 1)
+        if (
+            req.next
+            and following is not None
+            # Takes for an older plan's sub-shot don't count: they can't be approved.
+            and not any(
+                t.shot_id == take.shot_id
+                and t.sub_shot == following.index
+                and current_sub(pkg, shot, plan, t) is not None
+                for t in takes
+            )
+        ):
+            with contextlib.suppress(NotReady, ValueError):
+                _start(
+                    plan_take(
+                        pkg,
+                        repo.list_images(pkg.package_id, pkg.revision_id),
+                        repo.list_shot_takes(pkg.package_id, pkg.revision_id),
+                        plan,
+                        sub_shot=following.index,
+                        draws=take.draws,
+                        max_rounds=take.max_rounds,
+                    )
+                )
+        return out
 
     @app.delete("/v1/shot-takes/{take_id}/approve", response_model=ShotTake)
     async def withdraw_approval(take_id: str) -> ShotTake:
+        """Withdraw an approval, and the approvals of later sub-shots drawn from it."""
         take = _take_or_404(take_id)
         _writable(take.package_id, take.revision_id)
         return repo.approve_shot_draw(take_id, None)
@@ -242,30 +371,30 @@ def register(
                 "or prompt",
             )
         takes = repo.list_shot_takes(take.package_id, take.revision_id)
-        if is_busy(takes, take.shot_id, take.frame):
+        if is_busy(takes, take.shot_id, take.sub_shot):
             raise HTTPException(
-                409, f"the {take.frame} frame of {take.shot_id} is still being made"
+                409, f"sub-shot {take.sub_shot} of {take.shot_id} is still being made"
             )
         take.results = [d for d in take.results if d.status == "done"]  # redrawn, same seeds
         take.status, take.error, take.finished_at = "pending", None, None
-        repo.save_shot_take(take)
-        runner.start(take.take_id)
-        return take
+        return _start(take)
 
     @app.delete("/v1/shot-takes/{take_id}", status_code=204)
     async def delete_take(take_id: str) -> None:
-        """Delete a take and its draws' files. An end frame drawn from one of its draws
-        keeps its own pictures."""
+        """Delete a take and its draws' files. If it held the approved keyframe, that
+        approval and those of later sub-shots drawn from it are withdrawn."""
         take = _take_or_404(take_id)
         _writable(take.package_id, take.revision_id)
         if take.busy:
             raise HTTPException(409, "the take is still being made; delete it when it finishes")
         others = repo.list_shot_takes(take.package_id, take.revision_id)
-        if any(t.busy and any(r.ref_id.startswith(f"frame:{take_id}:") for r in t.references)
-               for t in others):  # fmt: skip
-            raise HTTPException(409, "an end frame is being drawn from this take")
+        if any(
+            t.busy and any(r.ref_id.startswith(f"frame:{take_id}:") for r in t.references)
+            for t in others
+        ):
+            raise HTTPException(409, "a later sub-shot is being drawn from this take")
         if take.approved is not None:
-            repo.approve_shot_draw(take_id, None)  # withdraws an end frame drawn from it too
+            repo.approve_shot_draw(take_id, None)
         repo.delete_shot_take(take_id)
         for d in take.results:
             for rel in (d.file, d.thumb, d.view):

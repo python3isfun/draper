@@ -9,7 +9,7 @@ from ..experiment import ExpSession, ExpTurn
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
-from ..shot_frames import ShotTake, approval_changes
+from ..shot_frames import ShotPlan, ShotTake, approval_changes
 
 
 class Repository(Protocol):
@@ -71,6 +71,10 @@ class Repository(Protocol):
     def delete_shot_take(self, take_id: str) -> None: ...
     def approve_shot_draw(self, take_id: str, n: int | None) -> ShotTake: ...
     def fail_unfinished_shot_takes(self, error: str) -> int: ...
+    def save_shot_plan(self, plan: ShotPlan) -> None: ...
+    def get_shot_plan(self, package_id: str, revision_id: str, shot_id: str) -> ShotPlan | None: ...
+    def list_shot_plans(self, package_id: str, revision_id: str) -> list[ShotPlan]: ...
+    def fail_unfinished_shot_plans(self, error: str) -> int: ...
 
 
 class InMemoryRepository:
@@ -95,6 +99,7 @@ class InMemoryRepository:
         self.exp_turns: dict[str, ExpTurn] = {}
         self.exp_next_label: dict[str, int] = {}
         self.shot_takes: dict[str, ShotTake] = {}
+        self.shot_plans: dict[tuple[str, str, str], ShotPlan] = {}
 
     def save_source_asset(self, asset_id: str, meta: dict[str, Any]) -> None:
         self.source_assets[asset_id] = meta
@@ -352,6 +357,25 @@ class InMemoryRepository:
         for t in approval_changes(take, n, others):
             self.shot_takes[t.take_id] = t
         return take.model_copy(deep=True)
+
+    def save_shot_plan(self, plan: ShotPlan) -> None:
+        key = (plan.package_id, plan.revision_id, plan.shot_id)
+        self.shot_plans[key] = plan.model_copy(deep=True)
+
+    def get_shot_plan(self, package_id: str, revision_id: str, shot_id: str) -> ShotPlan | None:
+        p = self.shot_plans.get((package_id, revision_id, shot_id))
+        return p.model_copy(deep=True) if p else None
+
+    def list_shot_plans(self, package_id: str, revision_id: str) -> list[ShotPlan]:
+        return [p.model_copy(deep=True) for (pid, rid, _), p in self.shot_plans.items()
+                if (pid, rid) == (package_id, revision_id)]  # fmt: skip
+
+    def fail_unfinished_shot_plans(self, error: str) -> int:
+        n = 0
+        for p in self.shot_plans.values():
+            if p.busy:
+                p.status, p.error, n = "failed", error, n + 1
+        return n
 
     def fail_unfinished_shot_takes(self, error: str) -> int:
         n = 0

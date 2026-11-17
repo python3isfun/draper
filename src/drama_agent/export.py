@@ -35,7 +35,7 @@ from .media import MediaError, MediaStore
 from .models import Job, ProductionPackage, SourceAsset
 from .models.images import DesignOption, GeneratedImage
 from .render import sheet_md, timestamp
-from .shot_frames import FrameDraw, ShotTake
+from .shot_frames import FrameDraw, ShotPlan, ShotTake, SubShot, current_sub, plan_of
 
 MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".webm"}
 
@@ -448,6 +448,7 @@ def build_export(
     media: MediaStore | None,
     options: list[DesignOption] | None = None,
     keyframes: list[ShotTake] | None = None,
+    plans: list[ShotPlan] | None = None,
 ) -> str:
     """Write the hand-off zip to `dest`; returns the download file name."""
     takes = {o.option_id: o for o in options or []}
@@ -629,45 +630,74 @@ def build_export(
                 ),
             )
 
-        # Shot keyframes: the approved start (and end) frame of each shot, with its check
-        frame_rows = []
-        for take, draw in approved_keyframes(pkg, keyframes or []):
+        # Shot keyframes: each shot's sub-shot plan, and the approved keyframe of each
+        # sub-shot (the first frame of that cut), with its check
+        exported = {img.image_id: name for img, _, name, _ in added}
+        frame_rows: list[dict[str, Any]] = []
+        files: dict[tuple[str, int], str] = {}
+        by_ref: dict[str, str] = {}  # frame:<take>:<n> -> its file, for later sub-shots
+        for take, draw, sub in approved_keyframes(pkg, keyframes or [], plans or []):
             if (src := safe_path(draw.file)) is None:
                 continue
             ext = "png" if draw.content_type == "image/png" else "jpg"
-            name = f"{take.shot_id}_{take.frame}.{ext}"
+            name = f"{take.shot_id}_s{sub.index}.{ext}"
+            files[(take.shot_id, sub.index)] = name
+            by_ref[f"frame:{take.take_id}:{draw.n}"] = name
             media_file(f"05_assets/shot_keyframes/{name}", src)
             check = draw.check
             frame_rows.append(
                 {
                     "file": name,
                     "shot_id": take.shot_id,
-                    "frame": take.frame,
+                    "sub_shot": sub.index,
+                    "start_ms": sub.start_ms,
+                    "end_ms": sub.end_ms,
+                    "timecode": sub.timecode,
+                    "framing": sub.framing,
+                    "camera": sub.camera,
+                    "action": sub.action,
+                    "people": ", ".join(n.any(c) for c in sub.people),
                     "references": " ".join(
-                        f"<Picture {i}>={r.ref_id}" for i, r in enumerate(take.references, 1)
+                        f"<Picture {i}>={_ref_name(r.ref_id, exported, by_ref)}"
+                        for i, r in enumerate(take.references, 1)
                     ),
                     "size": take.size,
                     "seed": draw.seed,
                     "model": draw.model,
                     "round": take.round,
-                    "check": "passed"
-                    if check and check.passed
-                    else "failed"
-                    if check
-                    else "not checked",
+                    "check": "passed" if check and check.passed
+                    else "failed" if check else "not checked",
                     "score": check.score if check else "",
                     "failed_items": "; ".join(
                         f"{i.item}: {i.finding}" for i in check.items if not i.passed
-                    )
-                    if check
-                    else "",
+                    ) if check else "",
                     "likeness": "yes" if take.likeness else "",
                     "motion": take.motion,
                     "prompt": take.prompt,
                 }
-            )
+            )  # fmt: skip
         if frame_rows:
             text("05_assets/shot_keyframes/index.csv", _csv(frame_rows, KEYFRAME_COLUMNS))
+        stored = {p.shot_id: p for p in plans or []}
+        if keyframes or plans:
+            text(
+                "05_assets/shot_keyframes/sub_shots.json",
+                _json([
+                    {
+                        "shot_id": shot.shot_id,
+                        "duration_ms": shot.duration_ms,
+                        "planned_by": plan.source,
+                        "sub_shots": [
+                            {**sub.model_dump(), "timecode": sub.timecode,
+                             "people": [n.any(c) for c in sub.people],
+                             "keyframe": files.get((shot.shot_id, sub.index))}
+                            for sub in plan.sub_shots
+                        ],
+                    }
+                    for shot in pkg.shot_list
+                    if (plan := plan_of(pkg, shot, stored.get(shot.shot_id)))
+                ]),
+            )  # fmt: skip
 
         # Design takes: the chosen take per deliverable, and every other option
         slot_names = {
@@ -796,23 +826,41 @@ def build_export(
 
 
 def approved_keyframes(
-    pkg: ProductionPackage, takes: list[ShotTake]
-) -> list[tuple[ShotTake, FrameDraw]]:
-    """(take, draw) of every approved keyframe, in shot-list order, start before end; one
-    per shot and frame (the newest approval, should there ever be two)."""
-    order = {s.shot_id: i for i, s in enumerate(pkg.shot_list)}
-    best: dict[tuple[str, str], tuple[ShotTake, FrameDraw]] = {}
-    for t in sorted(takes, key=lambda t: t.created_at):
-        d = next((d for d in t.results if d.n == t.approved and d.status == "done"), None)
-        if d is not None and t.shot_id in order:
-            best[(t.shot_id, t.frame)] = (t, d)
-    return sorted(best.values(),
-                  key=lambda td: (order[td[0].shot_id], td[0].frame != "start"))  # fmt: skip
+    pkg: ProductionPackage, takes: list[ShotTake], plans: list[ShotPlan]
+) -> list[tuple[ShotTake, FrameDraw, SubShot]]:
+    """(take, draw, sub-shot) of every approved keyframe of the current plans, in
+    shot-list and sub-shot order; one per sub-shot (the newest approval, should there ever
+    be two). A keyframe drawn for a sub-shot the plan has since changed is left out."""
+    stored = {p.shot_id: p for p in plans}
+    best: dict[tuple[str, int], tuple[ShotTake, FrameDraw, SubShot]] = {}
+    order: dict[str, int] = {}
+    for i, shot in enumerate(pkg.shot_list):
+        order[shot.shot_id] = i
+        plan = plan_of(pkg, shot, stored.get(shot.shot_id))
+        for t in sorted((t for t in takes if t.shot_id == shot.shot_id),
+                        key=lambda t: t.created_at):  # fmt: skip
+            sub = current_sub(pkg, shot, plan, t)
+            if sub is None:
+                continue
+            d = next((d for d in t.results if d.n == t.approved and d.status == "done"), None)
+            if d is not None:
+                best[(t.shot_id, t.sub_shot)] = (t, d, sub)
+    return sorted(best.values(), key=lambda x: (order[x[0].shot_id], x[2].index))
+
+
+def _ref_name(ref_id: str, exported: dict[str, str], by_ref: dict[str, str]) -> str:
+    """A keyframe's reference as its file in the export, where there is one."""
+    if ref_id in exported:
+        return f"reference_images/{exported[ref_id]}"
+    if ref_id in by_ref:
+        return f"shot_keyframes/{by_ref[ref_id]}"
+    return ref_id
 
 
 KEYFRAME_COLUMNS = [
-    "file", "shot_id", "frame", "references", "size", "seed", "model", "round", "check",
-    "score", "failed_items", "likeness", "motion", "prompt",
+    "file", "shot_id", "sub_shot", "start_ms", "end_ms", "timecode", "framing", "camera",
+    "action", "people", "references", "size", "seed", "model", "round", "check", "score",
+    "failed_items", "likeness", "motion", "prompt",
 ]  # fmt: skip
 
 
@@ -833,7 +881,7 @@ def readme_md(
             (
                 f"- {eps} episodes · {len(rows)} shots · {len(pkg.asset_requirements.items)} asset "
                 f"requirements · {n_images} reference images"
-                + (f" · {n_frames} approved shot keyframes" if n_frames else "")
+                + (f" · {n_frames} approved sub-shot keyframes" if n_frames else "")
             ),
             f"- Hard checks: {'all passed' if passed else 'NOT all passed (see 06_qa)'}",
             "",
@@ -863,7 +911,7 @@ def readme_md(
             (
                 "| `05_assets/` | art department | Asset requirements (design brief, must keep, "
                 "deliverables, which shots use each), the chosen reference images, every "
-                "other design option in `options/`, and the approved start/end keyframe of "
+                "other design option in `options/`, and the approved keyframe of each sub-shot of "
                 "each shot in `shot_keyframes/` (with its quality check) |"
             ),
             "| `06_qa/` | producer | Hard-check results and the creative review |",

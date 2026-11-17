@@ -1,18 +1,20 @@
 "use strict";
 
 /*
- * Keyframes tab: a checked start (and end) frame per shot, drawn from the design picks,
- * for video production. Uses h(), api(), state, renderMain() and stickyDetails() from app.js.
- * Model text is always inserted as text (h() uses text nodes).
+ * Keyframes tab: each shot's sub-shot plan (the cuts inside its one video generation) and a
+ * checked keyframe per sub-shot, drawn from the design picks, for video production. Uses
+ * h(), api(), state, renderMain(), stickyDetails() and numberSelect() from app.js. Model
+ * text is always inserted as text (h() uses text nodes).
  */
 
 const frames = { key: null, view: null, error: "", notes: [], timer: null, loading: false,
-  draws: 2, rounds: 3, directions: {}, prompts: {}, episode: "all" };
+  draws: 2, rounds: 3, directions: {}, prompts: {}, plans: {}, episode: "all" };
 
 const framesKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
 const framesBase = (pkg) => `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/keyframes`;
 const drawUrl = (take, n, v = "thumb") =>
   `/v1/shot-takes/${encodeURIComponent(take.take_id)}/draws/${n}/${v}`;
+const secs = (ms) => `${(ms / 1000).toFixed(1)} s`;
 
 async function loadFrames(pkg) {
   const key = framesKey(pkg);
@@ -62,21 +64,22 @@ function checkBadge(d) {
     `${d.check.passed ? "pass" : "fail"} · ${d.check.score}`);
 }
 
-function renderFrameDraw(pkg, take) {
+function renderFrameDraw(take) {
   return (d) => {
     const approved = take.approved === d.n;
-    const failedItems = d.check ? d.check.items.filter((i) => !i.passed) : [];
     const finished = take.status === "done" || take.status === "failed";
+    const failedItems = d.check ? d.check.items.filter((i) => !i.passed) : [];
+    const label = `Draw ${d.n + 1}`;
     return h("figure", { class: `draw keyframe ${d.status}${approved ? " selected" : ""}` },
-      d.status === "done" && !finished
-        ? h("img", { class: "draw-waiting", src: drawUrl(take, d.n), alt: `Draw ${d.n + 1}`, loading: "lazy", title: "Approve once the round is finished" })
-        : d.status === "done"
-        ? h("button", { type: "button", class: "draw-pick", title: approved ? "Approved" : "Approve this frame for the shot",
-            onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, { n: d.n }) },
-            h("img", { src: drawUrl(take, d.n), alt: `Draw ${d.n + 1}`, loading: "lazy" }))
-        : h("div", { class: "draw-placeholder", title: d.error || "" }, "failed"),
+      d.status !== "done"
+        ? h("div", { class: "draw-placeholder", title: d.error || "" }, "failed")
+        : !finished
+          ? h("img", { class: "draw-waiting", src: drawUrl(take, d.n), alt: label, loading: "lazy", title: "Approve once the round is finished" })
+          : h("button", { type: "button", class: "draw-pick", title: approved ? "Approved" : "Approve this keyframe",
+              onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, { n: d.n }) },
+              h("img", { src: drawUrl(take, d.n), alt: label, loading: "lazy" })),
       h("figcaption", {},
-        h("div", { class: "keyframe-cap" }, `Draw ${d.n + 1}${approved ? " ✓ approved" : ""}`, checkBadge(d)),
+        h("div", { class: "keyframe-cap" }, `${label}${approved ? " ✓ approved" : ""}`, checkBadge(d)),
         d.status === "done" && h("a", { href: drawUrl(take, d.n, "content"), target: "_blank", rel: "noopener", class: "muted small" }, "open"),
         approved && h("button", { type: "button", class: "btn ghost small",
           onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, null, "DELETE") }, "Withdraw"),
@@ -84,14 +87,14 @@ function renderFrameDraw(pkg, take) {
           h("summary", {}, failedItems.length ? `${failedItems.length} issue${failedItems.length > 1 ? "s" : ""}` : "Check"),
           d.check.summary && h("p", { class: "muted" }, d.check.summary),
           h("ul", { class: "plain check-items" }, failedItems.map((i) =>
-            h("li", {}, h("strong", {}, `${i.item}`), h("span", { class: "muted" }, ` (${i.severity})`), `: ${i.finding}`))),
+            h("li", {}, h("strong", {}, i.item), h("span", { class: "muted" }, ` (${i.severity})`), `: ${i.finding}`))),
           d.check.fix && h("p", {}, h("strong", {}, "Fix: "), d.check.fix)),
       ),
     );
   };
 }
 
-function renderFrameTake(pkg, take) {
+function renderFrameTake(take) {
   const busy = !["done", "failed"].includes(take.status);
   const tid = encodeURIComponent(take.take_id);
   const uncheckable = take.status === "done" && take.results.some((d) => d.status === "done" && !d.check);
@@ -115,7 +118,7 @@ function renderFrameTake(pkg, take) {
           onclick: (e) => frameAction(`/v1/shot-takes/${tid}`, e.currentTarget, null, "DELETE") }, "Delete")),
     ),
     take.error && h("p", { class: `small ${take.refused ? "warn-text" : "muted"}` }, take.error),
-    take.results.length > 0 && h("div", { class: "draws" }, take.results.map(renderFrameDraw(pkg, take))),
+    take.results.length > 0 && h("div", { class: "draws" }, take.results.map(renderFrameDraw(take))),
     take.prompt && stickyDetails(`kf:${take.take_id}`, `Prompt${take.prompt_model ? ` (by ${take.prompt_model})` : ""}`,
       take.fixes.length > 0 && h("div", { class: "small" }, h("strong", {}, "This round fixes:"),
         h("ul", { class: "plain" }, take.fixes.map((f) => h("li", {}, f)))),
@@ -125,23 +128,23 @@ function renderFrameTake(pkg, take) {
   );
 }
 
-function renderNewFrameTake(pkg, shot, frame) {
-  const key = `${shot.shot_id}|${frame}`;
-  const input = h("input", { type: "text", placeholder: frame === "end" ? "Direction for the end frame (optional), e.g. she has reached the door" : "Direction (optional), e.g. tighter on the speaker, rain on the window",
+function renderNewFrameTake(pkg, shot, sub) {
+  const key = `${shot.shot_id}|${sub.index}`;
+  const input = h("input", { type: "text", placeholder: "Direction (optional), e.g. tighter on the speaker, rain on the window",
     oninput: (e) => { frames.directions[key] = e.target.value; } });
   input.value = frames.directions[key] || "";
   const box = h("textarea", { class: "prompt-edit", rows: 6, spellcheck: "false", placeholder: "Your own prompt: <Picture N> are the reference pictures above, in order.",
     oninput: (e) => { frames.prompts[key] = e.target.value; } });
   box.value = frames.prompts[key] || "";
   const url = `${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}`;
-  const body = (extra) => ({ revision_id: pkg.revision_id, frame, draws: frames.draws, max_rounds: frames.rounds, ...extra });
+  const body = (extra) => ({ revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws, max_rounds: frames.rounds, ...extra });
   return h("div", {},
     h("div", { class: "new-take" }, input,
       h("button", { type: "button", class: "btn small", onclick: async (e) => {
         const direction = (frames.directions[key] || "").trim();
         await frameAction(url, e.currentTarget, body({ direction: direction || null }));
         if (!frames.error) { frames.directions[key] = ""; renderMain(); }
-      } }, frame === "end" ? "Make end frame" : "New take")),
+      } }, "New take")),
     stickyDetails(`kfp:${key}`, "Write the prompt yourself",
       box,
       h("div", { class: "prompt-edit-actions" },
@@ -155,47 +158,115 @@ function renderNewFrameTake(pkg, shot, frame) {
   );
 }
 
-function renderRefStrip(shot) {
-  return h("div", { class: "ref-strip" }, shot.references.map((r, i) => {
-    let src;
-    if (r.ref_id.startsWith("frame:")) {
-      const [, takeId, n] = r.ref_id.split(":");
-      src = `/v1/shot-takes/${encodeURIComponent(takeId)}/draws/${n}/thumb`;
-    } else {
-      src = `/v1/generated-images/${encodeURIComponent(r.ref_id)}/thumb`;
-    }
-    return h("figure", { class: "ref", title: r.role },
-      h("img", { src, alt: r.role, loading: "lazy" }),
-      h("figcaption", {}, `<Picture ${i + 1}>`, r.likeness && h("span", { class: "warn-text" }, " · likeness")));
-  }));
+function refSrc(r) {
+  if (r.ref_id.startsWith("frame:")) {
+    const [, takeId, n] = r.ref_id.split(":");
+    return `/v1/shot-takes/${encodeURIComponent(takeId)}/draws/${n}/thumb`;
+  }
+  return `/v1/generated-images/${encodeURIComponent(r.ref_id)}/thumb`;
+}
+
+function renderRefStrip(sub) {
+  return h("div", { class: "ref-strip" }, sub.references.map((r, i) =>
+    h("figure", { class: "ref", title: r.role },
+      h("img", { src: refSrc(r), alt: r.role, loading: "lazy" }),
+      h("figcaption", {}, `<Picture ${i + 1}>`, r.likeness && h("span", { class: "warn-text" }, " · likeness")))));
+}
+
+// Plan editor: one row per sub-shot (start, framing, camera, action, people).
+function renderPlanEditor(pkg, shot) {
+  const key = shot.shot_id;
+  const rows = frames.plans[key];
+  const field = (row, name, placeholder, tag = "input") => {
+    const el = h(tag, { placeholder, ...(tag === "input" ? { type: "text" } : { rows: 2 }),
+      oninput: (e) => { row[name] = e.target.value; } });
+    el.value = row[name] || "";
+    return el;
+  };
+  const start = (row, i) => {
+    const el = h("input", { type: "number", min: 0, step: 0.1, class: "plan-start", disabled: i === 0,
+      oninput: (e) => { row.start_s = e.target.value; } });
+    el.value = i === 0 ? 0 : row.start_s;
+    return el;
+  };
+  return h("div", { class: "plan-editor" },
+    rows.map((row, i) => h("div", { class: "plan-row" },
+      h("div", { class: "plan-row-head" },
+        h("strong", {}, `Sub-shot ${i + 1}`),
+        h("label", { class: "small" }, " starts at ", start(row, i), " s"),
+        i > 0 && h("button", { type: "button", class: "btn ghost small", onclick: () => { rows.splice(i, 1); renderMain(); } }, "Remove")),
+      field(row, "framing", "Framing: shot size, angle, who is where"),
+      field(row, "camera", "Camera: still, pan, push-in…"),
+      field(row, "action", "Action from this cut to the next", "textarea"),
+      h("div", { class: "plan-people small" }, shot.people.map((p) =>
+        h("label", {}, h("input", { type: "checkbox", checked: row.people.includes(p.id),
+          onchange: (e) => { row.people = e.target.checked ? [...row.people, p.id] : row.people.filter((x) => x !== p.id); } }), ` ${p.name}`))))),
+    h("div", { class: "prompt-edit-actions" },
+      rows.length < 3 && h("button", { type: "button", class: "btn ghost small", onclick: () => {
+        rows.push({ start_s: "", framing: "", camera: "", action: "", people: [...rows[rows.length - 1].people] });
+        renderMain();
+      } }, "+ Sub-shot"),
+      h("button", { type: "button", class: "btn small", onclick: async (e) => {
+        const sub_shots = rows.map((r, i) => ({ start_ms: i === 0 ? 0 : Math.round(Number(r.start_s) * 1000), framing: r.framing, camera: r.camera, action: r.action, people: r.people }));
+        await frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id, sub_shots });
+        if (!frames.error) { delete frames.plans[key]; renderMain(); }
+      } }, "Save plan"),
+      h("button", { type: "button", class: "btn ghost small", onclick: () => { delete frames.plans[key]; renderMain(); } }, "Cancel"),
+      h("span", { class: "muted small" }, `The shot runs ${secs(shot.duration_ms)}. Each sub-shot ends where the next starts; changed sub-shots lose their approved keyframes.`)));
+}
+
+function renderPlan(pkg, shot) {
+  const p = shot.plan;
+  const editing = frames.plans[shot.shot_id];
+  const source = { single: "the whole shot as one sub-shot", model: "planned by the text model", user: "your plan" }[p.source];
+  return h("div", { class: "plan" },
+    h("div", { class: "take-head" },
+      h("h4", { style: "margin:0" }, `Sub-shots (${shot.sub_shots.length})`),
+      p.status === "writing" ? h("span", { class: "chip info" }, "planning…") : h("span", { class: "muted small" }, source),
+      p.status === "failed" && h("span", { class: "chip bad", title: p.error || "" }, "plan failed"),
+      !editing && h("span", { class: "take-actions" },
+        h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, title: "Ask the text model where the cuts go",
+          onclick: (e) => frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id }) }, "Plan cuts"),
+        h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, onclick: () => {
+          frames.plans[shot.shot_id] = shot.sub_shots.map((s) => ({ start_s: s.start_ms / 1000, framing: s.framing, camera: s.camera, action: s.action, people: [...s.people] }));
+          renderMain();
+        } }, "Edit"))),
+    p.error && h("p", { class: "small warn-text" }, p.error),
+    p.notes && h("p", { class: "small muted" }, p.notes),
+    editing && renderPlanEditor(pkg, shot),
+  );
+}
+
+function renderSubShot(pkg, shot, sub, total) {
+  const blocked = sub.missing.length > 0;
+  return h("div", { class: "frame-block" },
+    h("div", { class: "take-head" },
+      h("h4", { style: "margin:0" }, total > 1 ? `[Shot ${sub.index}] at ${sub.timecode}` : "Keyframe"),
+      h("span", { class: "muted small" }, `${secs(sub.start_ms)}–${secs(sub.end_ms)}`),
+      h("span", { class: `chip ${sub.approved ? "ok" : "warn"}` }, sub.approved ? "approved ✓" : "approve one")),
+    total > 1 && h("p", { class: "small" }, h("strong", {}, sub.framing), sub.camera ? ` ${sub.camera}` : "", " — ", sub.action),
+    total > 1 && h("p", { class: "small muted" }, sub.people_names.length ? `On screen: ${sub.people_names.join(", ")}` : "No one on screen"),
+    blocked
+      ? h("p", { class: "small warn-text" }, `First: ${sub.missing.join("; ")}.`)
+      : renderRefStrip(sub),
+    sub.takes.map((t) => renderFrameTake(t)),
+    !blocked && renderNewFrameTake(pkg, shot, sub));
 }
 
 function renderShotCard(pkg, shot) {
-  const takes = (frame) => shot.takes.filter((t) => t.frame === frame);
-  const start = takes("start"), end = takes("end");
-  const ap = shot.approved;
+  const subs = shot.sub_shots;
+  const done = subs.filter((s) => s.approved).length;
   return h("section", { class: "card design-card shot-card", id: `kf-${shot.shot_id}` },
     h("div", { class: "design-card-head" },
-      h("h3", {}, shot.shot_id, h("span", { class: "muted small" }, ` · ${shot.place} · ${(shot.duration_ms / 1000).toFixed(1)} s`)),
+      h("h3", {}, shot.shot_id, h("span", { class: "muted small" }, ` · ${shot.place} · ${secs(shot.duration_ms)}`)),
       h("span", { class: "chips" },
         shot.intimacy && h("span", { class: "chip warn", title: "Scene staged with intimacy: clothed staging only, and never from a likeness" }, `intimacy: ${shot.intimacy}`),
-        h("span", { class: `chip ${ap.start ? "ok" : "warn"}` }, ap.start ? "start ✓" : "start: approve one"),
-        ap.end ? h("span", { class: "chip ok" }, "end ✓")
-          : shot.end_suggested ? h("span", { class: "chip info", title: "The prompt writer thinks this shot moves enough to pin its last frame too" }, "end frame suggested") : null)),
+        h("span", { class: `chip ${done === subs.length ? "ok" : "warn"}` }, `${done}/${subs.length} keyframes approved`))),
     h("p", { class: "small" }, h("strong", {}, shot.framing), " ", shot.camera),
     h("p", { class: "small" }, shot.action),
-    h("p", { class: "small muted" }, shot.people.length ? `On screen: ${shot.people.join(", ")}` : "No one on screen"),
-    shot.missing.length > 0
-      ? h("p", { class: "small warn-text" }, `Pick design images first (Assets tab): ${shot.missing.join("; ")}.`)
-      : renderRefStrip(shot),
-    h("div", { class: "frame-block" },
-      h("h4", {}, "Start frame"),
-      start.length ? start.map((t) => renderFrameTake(pkg, t)) : h("p", { class: "muted small" }, "No takes yet."),
-      shot.missing.length === 0 && renderNewFrameTake(pkg, shot, "start")),
-    ap.start && h("div", { class: "frame-block" },
-      h("h4", {}, "End frame", h("span", { class: "muted small" }, " · optional, drawn from the approved start frame")),
-      end.map((t) => renderFrameTake(pkg, t)),
-      renderNewFrameTake(pkg, shot, "end")),
+    h("p", { class: "small muted" }, shot.people.length ? `On screen: ${shot.people.map((p) => p.name).join(", ")}` : "No one on screen"),
+    renderPlan(pkg, shot),
+    subs.map((s) => renderSubShot(pkg, shot, s, subs.length)),
   );
 }
 
@@ -205,28 +276,29 @@ function renderKeyframes(pkg) {
   if (v && v.busy && !frames.timer && !frames.loading) loadFrames(pkg);  // resume polling
   if (!v) return h("div", { class: "loading" }, frames.error || "Loading…");
   const shots = v.shots;
-  const approved = shots.filter((s) => s.approved.start).length;
-  const passed = shots.filter((s) => s.takes.some((t) => t.frame === "start" && t.results.some((d) => d.check && d.check.passed))).length;
-  const blocked = shots.filter((s) => s.missing.length).length;
+  const complete = shots.filter((s) => s.sub_shots.every((x) => x.approved)).length;
+  const subTotal = shots.reduce((n, s) => n + s.sub_shots.length, 0);
+  const subApproved = shots.reduce((n, s) => n + s.sub_shots.filter((x) => x.approved).length, 0);
+  const blocked = shots.filter((s) => s.sub_shots[0].missing.length).length;
   const episodes = [...new Set(shots.map((s) => s.episode_id))];
   const shown = frames.episode === "all" ? shots : shots.filter((s) => s.episode_id === frames.episode);
   const controls = h("section", { class: "card" },
     h("h3", {}, "Shot keyframes"),
     h("p", { class: "small muted" },
-      "Each shot gets a start frame drawn from the picked looks, set and props, checked against them (faces, wardrobe, who is where, framing, action, defects) and revised automatically until a draw passes or the rounds run out. Approve one draw per shot; only approved frames go into the export for video production. Shots that move can also get an end frame."),
+      "A shot is one video generation; a dynamic one holds a few cuts (sub-shots). Each shot's cuts are planned (by the text model, or by you), then each sub-shot gets a keyframe, the frame the video shows as that cut begins: drawn from the picked looks, set and props (and from the approved keyframe before it), checked against them, and revised automatically until a draw passes or the rounds run out. Approve one draw per sub-shot; the next sub-shot then starts. Only approved keyframes go into the export, with the plan's timestamps."),
     h("div", { class: "chips", style: "margin:8px 0" },
-      h("span", { class: `chip ${approved === shots.length ? "ok" : "info"}` }, `${approved}/${shots.length} approved`),
-      h("span", { class: "chip" }, `${passed} passed the check`),
+      h("span", { class: `chip ${complete === shots.length ? "ok" : "info"}` }, `${complete}/${shots.length} shots complete`),
+      h("span", { class: "chip" }, `${subApproved}/${subTotal} sub-shot keyframes approved`),
       blocked > 0 && h("span", { class: "chip warn" }, `${blocked} waiting for design picks`),
       v.busy > 0 && h("span", { class: "chip info" }, `${v.busy} running`)),
     h("div", { class: "design-row" },
       h("label", {}, "Draws ", numberSelect(frames.draws, 4, (n) => { frames.draws = n; }, "Draws per round")),
       h("label", {}, " Rounds ", numberSelect(frames.rounds, 3, (n) => { frames.rounds = n; }, "Automatic rounds")),
       h("button", { type: "button", class: "btn", onclick: async (e) => {
-        const out = await frameAction(framesBase(pkg), e.currentTarget, { revision_id: pkg.revision_id, draws: frames.draws, max_rounds: frames.rounds });
+        const out = await frameAction(framesBase(pkg), e.currentTarget, { revision_id: pkg.revision_id, draws: frames.draws, max_rounds: frames.rounds, plan: true });
         if (out) frames.notes = out.skipped.map((s) => `${s.shot_id}: ${s.reason}`);
         renderMain();
-      } }, "Make start frames for every shot without one"),
+      } }, "Plan cuts and draw first keyframes for every shot"),
       episodes.length > 1 && h("select", { "aria-label": "Episode", onchange: (e) => { frames.episode = e.target.value; renderMain(); } },
         h("option", { value: "all", selected: frames.episode === "all" }, "All episodes"),
         episodes.map((ep) => h("option", { value: ep, selected: frames.episode === ep }, ep)))),

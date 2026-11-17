@@ -434,6 +434,14 @@ td.mono { white-space: nowrap; }
 .draw-waiting { display: block; width: 100%; object-fit: cover; border-radius: 6px; opacity: 0.7; border: 2px solid transparent; }
 .keyframe-cap { display: flex; justify-content: space-between; align-items: center; gap: 4px; flex-wrap: wrap; }
 .check-items li { margin: 2px 0; }
+.plan { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.plan-editor { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.plan-row { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
+.plan-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.plan-start { width: 80px; }
+.plan-people { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.plan-people label { display: inline-flex; align-items: center; gap: 4px; }
+.plan-people input { width: auto; margin: 0; }
 .prompt-view { white-space: pre-wrap; font: 12px/1.45 var(--mono, ui-monospace, monospace); background: var(--surface-2); padding: 8px; border-radius: 6px; margin: 6px 0; }
 
 /* Mode tabs (Drama / Experiment) ------------------------------------------ */
