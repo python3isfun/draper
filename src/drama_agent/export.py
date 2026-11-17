@@ -35,7 +35,18 @@ from .media import MediaError, MediaStore
 from .models import Job, ProductionPackage, SourceAsset
 from .models.images import DesignOption, GeneratedImage
 from .render import sheet_md, timestamp
-from .shot_frames import FrameDraw, ShotPlan, ShotTake, SubShot, current_sub, plan_of
+from .shot_frames import (
+    SPEC_VERSION,
+    FrameDraw,
+    ShotPlan,
+    ShotTake,
+    SubShot,
+    current_sub,
+    plan_of,
+    plan_problems,
+    shot_lines,
+    sub_shot_lines,
+)
 
 MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".webm"}
 
@@ -682,22 +693,8 @@ def build_export(
         if keyframes or plans:
             text(
                 "05_assets/shot_keyframes/sub_shots.json",
-                _json([
-                    {
-                        "shot_id": shot.shot_id,
-                        "duration_ms": shot.duration_ms,
-                        "planned_by": plan.source,
-                        "sub_shots": [
-                            {**sub.model_dump(), "timecode": sub.timecode,
-                             "people": [n.any(c) for c in sub.people],
-                             "keyframe": files.get((shot.shot_id, sub.index))}
-                            for sub in plan.sub_shots
-                        ],
-                    }
-                    for shot in pkg.shot_list
-                    if (plan := plan_of(pkg, shot, stored.get(shot.shot_id)))
-                ]),
-            )  # fmt: skip
+                _json(sub_shot_spec(pkg, stored, files, n)),
+            )
 
         # Design takes: the chosen take per deliverable, and every other option
         slot_names = {
@@ -846,6 +843,55 @@ def approved_keyframes(
             if d is not None:
                 best[(t.shot_id, t.sub_shot)] = (t, d, sub)
     return sorted(best.values(), key=lambda x: (order[x[0].shot_id], x[2].index))
+
+
+def sub_shot_spec(
+    pkg: ProductionPackage,
+    stored: dict[str, ShotPlan],
+    files: dict[tuple[str, int], str],
+    n: Any,
+) -> dict[str, Any]:
+    """The sub-shot spec of every shot: the contract video production writes its prompt
+    from. Per shot, the clip's length (render exactly this), and per sub-shot (`[Shot N]`
+    of the prompt, at its `timecode`): framing, camera, action, who is on screen and on
+    which side of the frame, who is off screen and on which side, the lines spoken in it
+    with their timing, and its approved keyframe (the cut's first frame), if any. `clean`
+    says whether the plan passes every rule of check_plan; `problems` lists what doesn't."""
+    shots = []
+    for shot in pkg.shot_list:
+        plan = plan_of(pkg, shot, stored.get(shot.shot_id))
+        lines = shot_lines(pkg, shot)
+        problems = plan_problems(pkg, shot, plan)
+        shots.append({
+            "shot_id": shot.shot_id,
+            "clip_ms": plan.sub_shots[-1].end_ms,
+            "storyboard_ms": shot.duration_ms,
+            "planned_by": plan.source,
+            "clean": not problems,
+            "problems": problems,
+            "sub_shots": [
+                {
+                    "index": sub.index,
+                    "start_ms": sub.start_ms,
+                    "end_ms": sub.end_ms,
+                    "timecode": sub.timecode,
+                    "framing": sub.framing,
+                    "camera": sub.camera,
+                    "action": sub.action,
+                    "people": [n.any(c) for c in sub.people],
+                    "placement": {n.any(c): side for c, side in sub.placement.items()},
+                    "off_screen": {n.any(c): side for c, side in sub.off_screen.items()},
+                    "lines": [
+                        {"speaker": x["speaker"], "line": x["text"], "start_ms": x["start_ms"],
+                         "end_ms": x["end_ms"], "where": x["where"]}
+                        for x in sub_shot_lines(lines, sub)
+                    ],
+                    "keyframe": files.get((shot.shot_id, sub.index)),
+                }
+                for sub in plan.sub_shots
+            ],
+        })  # fmt: skip
+    return {"spec_version": SPEC_VERSION, "shots": shots}
 
 
 def _ref_name(ref_id: str, exported: dict[str, str], by_ref: dict[str, str]) -> str:

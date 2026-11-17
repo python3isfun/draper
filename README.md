@@ -280,11 +280,14 @@ A storyboard shot is one video generation, but a dynamic one holds a few cuts in
 the camera cuts to ...`. The **Keyframes** tab gives video production (dramer) one checked
 picture per cut, so characters stay consistent and each cut starts as planned:
 
-1. **Plan the cuts**: the text model splits each shot into 1-3 sub-shots (H3's rules: cut
-   only for new information, the first at 0 s, each at least 1 s, timestamps strictly
-   increasing), each with its start, framing, camera, action and who is on screen. **Edit**
-   changes them; a shot with no plan is one sub-shot. Changing a sub-shot withdraws its
-   approved keyframe and those after it.
+1. **Plan the cuts**: the text model splits each shot's clip into 1-3 sub-shots, each with
+   its start, framing, camera, action, who is on screen and on which side of the frame,
+   and who is off frame on which side. **Edit** changes them (and the clip's length); a
+   shot with no plan is one sub-shot. Changing a sub-shot withdraws its approved keyframe
+   and those after it. A plan should be a clean spec (see below): the planner gets one more
+   try with the problems, and a model plan that still isn't clean is kept but flagged on the
+   board and in the export (`clean: false`) for you to fix in **Edit**, where a save that
+   isn't clean is refused with the reasons.
 2. **References**: the design picks of the sub-shot's people, in the order dramer sends
    them: each person in this shot's look, the set's wide view, the props, then faces while
    nine pictures allow. From sub-shot 2 on, `<Picture 1>` is the approved keyframe of the
@@ -326,6 +329,30 @@ framing, camera, action, people, references as exported files, seed, check resul
 failed items, likeness, motion, prompt) and `sub_shots.json` (every shot's plan, with each
 sub-shot's keyframe file or null). Even a draw a person approved after it failed the check
 is exported, marked failed.
+
+**The sub-shot spec is the contract for video production.** Draper runs first: its plan
+says how each shot is cut, and video production (dramer) writes its prompt from it rather
+than re-timing the shot. `05_assets/shot_keyframes/sub_shots.json` (`spec_version` 1) gives,
+per shot, `clip_ms` (render exactly this long: H3 takes whole seconds from 4 to 15; the
+default is the storyboard's duration rounded up), `clean` and `problems`, and per sub-shot
+`index`, `start_ms`/`end_ms`, `timecode`, `framing`, `camera`, `action`, `people`,
+`placement` (name: left, center or right), `off_screen` (name: left or right), `lines`
+(speaker, line, start and end in the clip, and `where`: on screen, off screen left/right,
+or voice) and `keyframe` (the approved first frame, or null). The video prompt then has one
+`[Shot N]` per sub-shot at its timecode, with that sub-shot's framing, positions, action and
+lines, and cites its keyframe as the first frame of `[Shot N]`. A clean spec:
+
+- the clip is whole seconds from 4 to 15, and every line lies wholly inside it (a
+  storyboard shot longer than 15 s is flagged: split it in the storyboard);
+- no cut falls in the middle of a line;
+- each line's speaker is on screen, or placed off frame, or a voice from outside the shot;
+- every on-screen person has a side of the frame, and only they do;
+- every cut changes the view (no two sub-shots in a row share a framing);
+- screen sides hold across cuts (the 180-degree rule): nobody jumps from frame left to
+  frame right, on screen or off.
+
+The planner covers dialogue speaker by speaker (a cut to the speaker shortly before their
+line) unless the storyboard asks to hold a two-shot.
 
 Keyframes are production assets: the restrictive content rules always apply, and a shot in
 a scene staged as implied or simulated intimacy is never drawn from a pick that shows a real

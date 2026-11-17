@@ -24,23 +24,28 @@ from drama_agent.shot_frames import (
     NotReady,
     PlannedSubShot,
     PlanOutput,
+    PlanProblems,
     PromptVersion,
     ShotFrameRunner,
     ShotPicks,
     ShotPlan,
     ShotTake,
+    clip_ms,
     current_sub,
     make_sub_shots,
     next_round,
     picture_sentences,
     plan_of,
+    plan_problems,
     plan_take,
     planned_sub_shots,
     prompt_findings,
     score,
+    shot_lines,
     shot_of,
     shot_references,
     single_plan,
+    spread,
     stale_approvals,
     template_prompt,
 )
@@ -84,12 +89,16 @@ def busiest(pkg):
 
 
 def two_cuts(pkg, shot) -> ShotPlan:
-    """The shot as a wide on everyone, then a close-up on its first person."""
+    """The shot as a wide on everyone, then (after its lines) a close-up on its first
+    person, who keeps their side of the frame."""
     half = shot.duration_ms // 2
-    subs = make_sub_shots(shot, [
-        {"start_ms": 0, "framing": "wide", "action": "they talk", "people": shot.character_ids},
+    sides = spread(shot.character_ids)
+    first = shot.character_ids[0]
+    subs = make_sub_shots(pkg, shot, [
+        {"start_ms": 0, "framing": "wide", "action": "they talk", "people": shot.character_ids,
+         "placement": sides},
         {"start_ms": half, "framing": "close-up", "camera": "still", "action": "a reaction",
-         "people": shot.character_ids[:1]},
+         "people": [first], "placement": {first: sides[first]}},
     ])  # fmt: skip
     return ShotPlan(package_id=pkg.package_id, revision_id=pkg.revision_id,
                     shot_id=shot.shot_id, source="user", sub_shots=subs)  # fmt: skip
@@ -129,35 +138,62 @@ def test_a_shot_without_a_plan_is_one_sub_shot(package):
 
 
 def test_sub_shots_are_checked(package):
-    shot = busiest(package)
-    row = {"framing": "wide", "action": "x", "people": []}
-    two = make_sub_shots(shot, [{**row, "start_ms": 0}, {**row, "start_ms": 2500}])
-    assert two[1].timecode == "00:02.500" and two[0].end_ms == 2500
-    assert two[1].end_ms == shot.duration_ms
+    shot = busiest(package)  # 15 s; one line at 1.0-6.2 s
+    ids = shot.character_ids
+    sides = spread(ids)
+    wide = {"framing": "wide", "action": "x", "people": ids, "placement": sides}
+    close = {"framing": "close-up", "action": "y", "people": ids[:1],
+             "placement": {ids[0]: sides[ids[0]]}}  # fmt: skip
+    two = make_sub_shots(package, shot, [{**wide, "start_ms": 0}, {**close, "start_ms": 7000}])
+    assert two[1].timecode == "00:07.000" and two[0].end_ms == 7000
+    assert two[1].end_ms == 15000
     bad = [
-        ([{**row, "start_ms": 500}], "starts at 0"),
-        ([{**row, "start_ms": 0}, {**row, "start_ms": 300}], "at least 1 s"),
-        ([{**row, "start_ms": 0}, {**row, "start_ms": shot.duration_ms}], "at least 1 s"),
-        ([{**row, "start_ms": 0}] * 4, "1 to 3"),
-        ([{**row, "start_ms": 0, "people": ["ch_nobody"]}], "isn't in the shot"),
-        ([{**row, "start_ms": 0, "framing": " "}], "needs a framing"),
+        ([{**wide, "start_ms": 500}], "starts at 0"),
+        ([{**wide, "start_ms": 0}, {**close, "start_ms": 300}], "at least 1 s"),
+        ([{**wide, "start_ms": 0}] * 4, "1 to 3"),
+        ([{**wide, "start_ms": 0, "people": ["ch_nobody"]}], "isn't in the shot"),
+        ([{**wide, "start_ms": 0, "framing": " "}], "needs a framing"),
+        ([{**wide, "start_ms": 0}, {**close, "start_ms": 3000}], "middle of"),
+        ([{**wide, "start_ms": 0}, {**wide, "start_ms": 7000}], "same framing"),
+        ([{**wide, "start_ms": 0, "placement": {}}], "where is"),
+        ([{**wide, "start_ms": 0, "people": [], "placement": {}}], "neither on screen"),
     ]
+    flipped = "right" if sides[ids[0]] == "left" else "left"
+    bad.append(([{**wide, "start_ms": 0},
+                 {**close, "start_ms": 7000, "placement": {ids[0]: flipped}}], "180-degree"))  # fmt: skip
     for rows, message in bad:
         with pytest.raises(ValueError, match=message):
-            make_sub_shots(shot, rows)
+            make_sub_shots(package, shot, rows)
+    with pytest.raises(ValueError, match="whole seconds"):
+        make_sub_shots(package, shot, [{**wide, "start_ms": 0}], clip=16000)
+    # The off-screen speaker of a line is fine; so is a voice from outside the shot.
+    off = {**close, "start_ms": 0, "off_screen": {i: "right" for i in ids[1:]}}
+    speaker = shot_lines(package, shot)[0]["speaker_id"]
+    if speaker != ids[0]:
+        assert make_sub_shots(package, shot, [off, {**wide, "start_ms": 7000}])
+
+
+def test_the_clip_is_whole_seconds_and_holds_every_line(package):
+    shot = package.shot_list[0].model_copy(update={"duration_ms": 8300})
+    assert clip_ms(shot) == 9000  # rounded up, so a line timed at 8.2 s is in the clip
+    assert clip_ms(shot.model_copy(update={"duration_ms": 2500})) == 4000
+    assert clip_ms(shot.model_copy(update={"duration_ms": 20000})) == 15000
 
 
 def test_the_planner_names_become_character_ids(package):
     shot = busiest(package)
     names = {c.character_id: c.name for c in package.story_bible.characters}
     first = names[shot.character_ids[0]]
+    others = {names[c]: "right" for c in shot.character_ids[1:]}
     out = PlanOutput(sub_shots=[
-        PlannedSubShot(start_s=0, framing="wide", action="a", people=[first.upper()]),
-        PlannedSubShot(start_s=1.5, framing="close", action="b", people=[first]),
+        PlannedSubShot(start_s=0, framing="wide", action="a", people=[first.upper()],
+                       placement={first: "left"}, off_screen=others),
+        PlannedSubShot(start_s=7.0, framing="close", action="b", people=[first],
+                       placement={first.lower(): "Left"}, off_screen=others),
     ])  # fmt: skip
     subs = planned_sub_shots(package, shot, out)
     assert [s.people for s in subs] == [[shot.character_ids[0]]] * 2
-    assert subs[1].start_ms == 1500
+    assert subs[1].start_ms == 7000 and subs[1].placement == {shot.character_ids[0]: "left"}
     out.sub_shots[1].people = ["Nobody Here"]
     with pytest.raises(ValueError, match="isn't one of the shot's people"):
         planned_sub_shots(package, shot, out)
@@ -423,9 +459,12 @@ class Board:
     def two_cuts(self, shot: dict) -> dict:
         half = shot["duration_ms"] // 2
         ids = [p["id"] for p in shot["people"]]
+        sides = spread(ids)
         return {"sub_shots": [
-            {"start_ms": 0, "framing": "wide", "action": "they talk", "people": ids},
-            {"start_ms": half, "framing": "close-up", "action": "a reaction", "people": ids[:1]},
+            {"start_ms": 0, "framing": "wide", "action": "they talk", "people": ids,
+             "placement": sides},
+            {"start_ms": half, "framing": "close-up", "action": "a reaction", "people": ids[:1],
+             "placement": {ids[0]: sides[ids[0]]}},
         ]}  # fmt: skip
 
     def zip(self) -> zipfile.ZipFile:
@@ -503,9 +542,14 @@ def test_a_shot_cut_in_two_gets_a_keyframe_per_cut(tmp_path):
         assert [(r["shot_id"], r["sub_shot"]) for r in rows] == [(sid, "1"), (sid, "2")]
         assert rows[1]["timecode"] == subs[1]["timecode"]
         assert rows[1]["references"].startswith(f"<Picture 1>=shot_keyframes/{sid}_s1.")
-        plans = json.loads(member(z, "shot_keyframes/sub_shots.json"))
-        mine = next(p for p in plans if p["shot_id"] == sid)
+        spec = json.loads(member(z, "shot_keyframes/sub_shots.json"))
+        assert spec["spec_version"] == 1
+        mine = next(p for p in spec["shots"] if p["shot_id"] == sid)
+        assert mine["clean"] and mine["problems"] == [] and mine["clip_ms"] == shot["clip_ms"]
         assert [s["keyframe"] for s in mine["sub_shots"]] == [rows[0]["file"], rows[1]["file"]]
+        first, second = mine["sub_shots"]
+        assert set(first["placement"]) == set(first["people"]) and second["placement"]
+        assert all(x["where"] == "on screen" for x in first["lines"])
         # Changing the second cut withdraws only its keyframe; the first stays.
         changed = b.two_cuts(shot)
         changed["sub_shots"][1]["action"] = "a different reaction"
@@ -525,11 +569,14 @@ class TwoCuts(FixtureModelClient):
         if request.stage == "shot_plan":
             self.calls.append(request)
             shot = request.context["shot"]
-            half = round(shot["duration_s"] / 2, 1)
+            half = round(request.context["clip_s"] / 2, 1)
+            sides = spread(shot["people"])
+            first = shot["people"][0]
             return PlanOutput(sub_shots=[
-                PlannedSubShot(start_s=0, framing="wide", action="a", people=shot["people"]),
-                PlannedSubShot(start_s=half, framing="close", action="b",
-                               people=shot["people"][:1]),
+                PlannedSubShot(start_s=0, framing="wide", action="a", people=shot["people"],
+                               placement=sides),
+                PlannedSubShot(start_s=half, framing="close", action="b", people=[first],
+                               placement={first: sides[first]}),
             ], notes="two setups")  # fmt: skip
         return await super().generate(request, output_model)
 
@@ -1059,3 +1106,129 @@ def test_a_definition_never_loses_its_subject(package):
                        else r for r in take.references]  # fmt: skip
     for x in picture_sentences(package, take):
         assert not x["define"].startswith(" ") and x["define"][0].isupper()
+
+
+class CutsMidLine(FixtureModelClient):
+    """The planner first cuts in the middle of the shot's line; told so, it cuts after it."""
+
+    async def generate(self, request, output_model):
+        if request.stage != "shot_plan":
+            return await super().generate(request, output_model)
+        self.calls.append(request)
+        ctx = request.context
+        people = ctx["shot"]["people"]
+        line = ctx["lines"][0]
+        cut = (
+            (line["start_s"] + line["end_s"]) / 2 if "problems" not in ctx else line["end_s"] + 0.5
+        )
+        sides = spread(people)
+        return PlanOutput(sub_shots=[
+            PlannedSubShot(start_s=0, framing="wide", action="a", people=people, placement=sides),
+            PlannedSubShot(start_s=cut, framing="close", action="b", people=people[:1],
+                           placement={people[0]: sides[people[0]]}),
+        ])  # fmt: skip
+
+
+def test_a_plan_that_cuts_mid_line_is_repaired(tmp_path):
+    with Board(tmp_path, text=CutsMidLine()) as b:
+        b.design()
+        shot = b.busiest()
+        sid = shot["shot_id"]
+        b.http.post(f"{b.base}/{sid}/plan", json={})
+        s = b.wait() and b.shot(sid)
+        first, second = b.calls("shot_plan")
+        assert first.context["clip_s"] == shot["clip_ms"] // 1000 and first.context["lines"]
+        assert any("middle of" in p for p in second.context["problems"])
+        assert s["plan"]["status"] == "done" and s["plan"]["problems"] == []
+        line = first.context["lines"][0]
+        assert s["sub_shots"][1]["start_ms"] >= line["end_s"] * 1000
+
+
+def test_an_unclean_stored_plan_is_flagged_on_the_board_and_in_the_spec(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        shot = b.busiest()
+        sid = shot["shot_id"]
+        pkg = b.repo.get_package(b.pid)
+        sub = single_plan(pkg, shot_of(pkg, sid)).sub_shots[0]  # no frame positions
+        b.repo.save_shot_plan(ShotPlan(package_id=pkg.package_id, revision_id=pkg.revision_id,
+                                       shot_id=sid, source="user", sub_shots=[sub]))  # fmt: skip
+        problems = b.shot(sid)["plan"]["problems"]
+        assert problems and all("where is" in p for p in problems)
+        spec = json.loads(member(b.zip(), "shot_keyframes/sub_shots.json"))
+        mine = next(p for p in spec["shots"] if p["shot_id"] == sid)
+        assert mine["clean"] is False and mine["problems"] == problems
+
+
+class AlwaysCutsMidLine(CutsMidLine):
+    """Cuts in the middle of the line every time, even when told."""
+
+    async def generate(self, request, output_model):
+        if request.stage == "shot_plan":
+            request.context.pop("problems", None)
+        return await super().generate(request, output_model)
+
+
+def test_a_model_plan_still_not_clean_is_kept_and_flagged(tmp_path):
+    with Board(tmp_path, text=AlwaysCutsMidLine()) as b:
+        b.design()
+        sid = b.busiest()["shot_id"]
+        b.http.post(f"{b.base}/{sid}/plan", json={})
+        s = b.wait() and b.shot(sid)
+        assert len(b.calls("shot_plan")) == 2
+        assert s["plan"]["source"] == "model" and s["plan"]["status"] == "done"
+        assert len(s["sub_shots"]) == 2 and any("middle of" in p for p in s["plan"]["problems"])
+        spec = json.loads(member(b.zip(), "shot_keyframes/sub_shots.json"))
+        assert next(p for p in spec["shots"] if p["shot_id"] == sid)["clean"] is False
+
+
+def test_the_clip_length_asked_for_is_planned(tmp_path):
+    with Board(tmp_path, text=TwoCuts()) as b:
+        b.design()
+        sid = b.busiest()["shot_id"]
+        b.http.post(f"{b.base}/{sid}/plan", json={"clip_s": 10})
+        s = b.wait() and b.shot(sid)
+        assert b.calls("shot_plan")[-1].context["clip_s"] == 10
+        assert s["clip_ms"] == 10000 and s["sub_shots"][-1]["end_ms"] == 10000
+
+
+def test_more_rules_of_a_clean_spec(package):
+    shot = busiest(package)  # 15 s; one line at 1.0-6.2 s
+    ids = shot.character_ids
+    sides = spread(ids)
+    wide = {"start_ms": 0, "framing": "wide", "action": "x", "people": ids, "placement": sides}
+    # A line running past the clip's end.
+    with pytest.raises(PlanProblems) as err:
+        make_sub_shots(package, shot, [wide], clip=5000)
+    assert any("past the clip's end" in p for p in err.value.problems)
+    # A frame position for someone who isn't on screen.
+    close = {**wide, "people": ids[:1]}
+    with pytest.raises(PlanProblems, match="isn't on screen in it"):
+        make_sub_shots(package, shot, [close])
+    # Not strict: the problems are left for the caller to flag.
+    assert make_sub_shots(package, shot, [wide], clip=5000, strict=False)
+
+
+def test_a_shot_too_long_for_h3_is_flagged_but_still_planned(package):
+    shot = busiest(package).model_copy(update={"duration_ms": 20000})
+    plan = single_plan(package, shot)
+    assert plan.sub_shots[0].end_ms == 15000
+    [problem] = plan_problems(package, shot, plan)
+    assert "longer than H3's 15 s clips: split it" in problem
+    ids = shot.character_ids
+    assert make_sub_shots(package, shot, [{"start_ms": 0, "framing": "wide", "action": "x",
+                                           "people": ids, "placement": spread(ids)}])  # fmt: skip
+
+
+def test_a_keyframe_from_before_whole_second_clips_still_counts(package):
+    shot = package.shot_list[0].model_copy(update={"duration_ms": 7500})
+    plan = single_plan(package, shot)  # now 8 s
+    take = finished(
+        plan_take(package, done_images(package), [], single_plan(package, package.shot_list[0]))
+    )
+    take.shot_id = shot.shot_id
+    take.spec = plan.sub_shots[0].model_copy(update={"end_ms": 7500})  # drawn for 7.5 s
+    assert current_sub(package, shot, plan, take) == plan.sub_shots[0]
+    other = plan.sub_shots[0].model_copy(update={"end_ms": 7500, "framing": "else"})
+    take.spec = other
+    assert current_sub(package, shot, plan, take) is None

@@ -256,9 +256,20 @@ function renderRefStrip(sub) {
 }
 
 // Plan editor: one row per sub-shot (start, framing, camera, action, people).
+// Where a person is in a sub-shot: "" (not in it), "on:left|center|right", "off:left|right".
+const POSITIONS = [["", "—"], ["on:left", "on screen, left"], ["on:center", "on screen, center"], ["on:right", "on screen, right"], ["off:left", "off frame left"], ["off:right", "off frame right"]];
+
+function positionsOf(sub) {
+  const pos = {};
+  for (const id of sub.people) pos[id] = `on:${sub.placement?.[id] || "center"}`;
+  for (const [id, side] of Object.entries(sub.off_screen || {})) pos[id] = `off:${side}`;
+  return pos;
+}
+
 function renderPlanEditor(pkg, shot) {
   const key = shot.shot_id;
-  const rows = frames.plans[key];
+  const draft = frames.plans[key];
+  const rows = draft.rows;
   const field = (row, name, placeholder, tag = "input") => {
     const el = h(tag, { placeholder, ...(tag === "input" ? { type: "text" } : { rows: 2 }),
       oninput: (e) => { row[name] = e.target.value; } });
@@ -271,7 +282,11 @@ function renderPlanEditor(pkg, shot) {
     el.value = i === 0 ? 0 : row.start_s;
     return el;
   };
+  const clip = h("input", { type: "number", min: 4, max: 15, step: 1, class: "plan-start",
+    oninput: (e) => { draft.clip_s = e.target.value; } });
+  clip.value = draft.clip_s;
   return h("div", { class: "plan-editor" },
+    h("label", { class: "small" }, "Clip length ", clip, ` s (whole seconds, 4–15; the storyboard says ${secs(shot.duration_ms)})`),
     rows.map((row, i) => h("div", { class: "plan-row" },
       h("div", { class: "plan-row-head" },
         h("strong", {}, `Sub-shot ${i + 1}`),
@@ -279,22 +294,31 @@ function renderPlanEditor(pkg, shot) {
         i > 0 && h("button", { type: "button", class: "btn ghost small", onclick: () => { rows.splice(i, 1); renderMain(); } }, "Remove")),
       field(row, "framing", "Framing: shot size, angle, who is where"),
       field(row, "camera", "Camera: still, pan, push-in…"),
-      field(row, "action", "Action from this cut to the next", "textarea"),
+      field(row, "action", "Action from this cut to the next, with the lines spoken in it", "textarea"),
       h("div", { class: "plan-people small" }, shot.people.map((p) =>
-        h("label", {}, h("input", { type: "checkbox", checked: row.people.includes(p.id),
-          onchange: (e) => { row.people = e.target.checked ? [...row.people, p.id] : row.people.filter((x) => x !== p.id); } }), ` ${p.name}`))))),
+        h("label", {}, `${p.name} `,
+          h("select", { "aria-label": `Where ${p.name} is`, onchange: (e) => { row.pos[p.id] = e.target.value; } },
+            POSITIONS.map(([v, label]) => h("option", { value: v, selected: (row.pos[p.id] || "") === v }, label)))))))),
     h("div", { class: "prompt-edit-actions" },
       rows.length < 3 && h("button", { type: "button", class: "btn ghost small", onclick: () => {
-        rows.push({ start_s: "", framing: "", camera: "", action: "", people: [...rows[rows.length - 1].people] });
+        rows.push({ start_s: "", framing: "", camera: "", action: "", pos: { ...rows[rows.length - 1].pos } });
         renderMain();
       } }, "+ Sub-shot"),
       h("button", { type: "button", class: "btn small", onclick: async (e) => {
-        const sub_shots = rows.map((r, i) => ({ start_ms: i === 0 ? 0 : Math.round(Number(r.start_s) * 1000), framing: r.framing, camera: r.camera, action: r.action, people: r.people }));
-        await frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id, sub_shots });
+        const sub_shots = rows.map((r, i) => {
+          const people = [], placement = {}, off_screen = {};
+          for (const [id, v] of Object.entries(r.pos)) {
+            const [where, side] = v.split(":");
+            if (where === "on") { people.push(id); placement[id] = side; }
+            else if (where === "off") off_screen[id] = side;
+          }
+          return { start_ms: i === 0 ? 0 : Math.round(Number(r.start_s) * 1000), framing: r.framing, camera: r.camera, action: r.action, people, placement, off_screen };
+        });
+        await frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id, sub_shots, clip_s: Number(draft.clip_s) || null });
         if (!frames.error) { delete frames.plans[key]; renderMain(); }
       } }, "Save plan"),
       h("button", { type: "button", class: "btn ghost small", onclick: () => { delete frames.plans[key]; renderMain(); } }, "Cancel"),
-      h("span", { class: "muted small" }, `The shot runs ${secs(shot.duration_ms)}. Each sub-shot ends where the next starts; changed sub-shots lose their approved keyframes.`)));
+      h("span", { class: "muted small" }, "Each sub-shot ends where the next starts. A clean spec: every line inside one sub-shot, each speaker on screen or placed off frame, every cut a new view, screen sides held across cuts. Changed sub-shots lose their approved keyframes.")));
 }
 
 function renderPlan(pkg, shot) {
@@ -310,10 +334,13 @@ function renderPlan(pkg, shot) {
         h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, title: "Ask the text model where the cuts go",
           onclick: (e) => frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id }) }, "Plan cuts"),
         h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, onclick: () => {
-          frames.plans[shot.shot_id] = shot.sub_shots.map((s) => ({ start_s: s.start_ms / 1000, framing: s.framing, camera: s.camera, action: s.action, people: [...s.people] }));
+          frames.plans[shot.shot_id] = { clip_s: Math.min(15, Math.max(4, Math.ceil(shot.clip_ms / 1000))), rows: shot.sub_shots.map((s) => ({ start_s: s.start_ms / 1000, framing: s.framing, camera: s.camera, action: s.action, pos: positionsOf(s) })) };
           renderMain();
         } }, "Edit"))),
     p.error && h("p", { class: "small warn-text" }, p.error),
+    p.problems && p.problems.length > 0 && h("div", { class: "small warn-text" },
+      h("strong", {}, "Not a clean spec for video yet:"),
+      h("ul", { class: "plain" }, p.problems.map((x) => h("li", {}, x)))),
     p.notes && h("p", { class: "small muted" }, p.notes),
     editing && renderPlanEditor(pkg, shot),
   );
@@ -327,7 +354,12 @@ function renderSubShot(pkg, shot, sub, total) {
       h("span", { class: "muted small" }, `${secs(sub.start_ms)}–${secs(sub.end_ms)}`),
       h("span", { class: `chip ${sub.approved ? "ok" : "warn"}` }, sub.approved ? "approved ✓" : "approve one")),
     total > 1 && h("p", { class: "small" }, h("strong", {}, sub.framing), sub.camera ? ` ${sub.camera}` : "", " — ", sub.action),
-    total > 1 && h("p", { class: "small muted" }, sub.people_names.length ? `On screen: ${sub.people_names.join(", ")}` : "No one on screen"),
+    total > 1 && h("p", { class: "small muted" }, sub.people_names.length
+      ? `On screen: ${sub.people.map((id, i) => `${sub.people_names[i]}${sub.placement[id] ? ` (${sub.placement[id]})` : ""}`).join(", ")}`
+      : "No one on screen",
+      Object.keys(sub.off_screen || {}).length > 0 && ` · off frame: ${Object.entries(sub.off_screen).map(([id, side]) => `${(shot.people.find((p) => p.id === id) || { name: id }).name} (${side})`).join(", ")}`),
+    sub.lines.length > 0 && h("ul", { class: "plain small sub-lines" }, sub.lines.map((x) =>
+      h("li", {}, h("span", { class: "muted" }, `${(x.start_ms / 1000).toFixed(1)}–${(x.end_ms / 1000).toFixed(1)} s `), h("strong", {}, x.speaker), x.where !== "on screen" ? h("span", { class: "muted" }, ` (${x.where})`) : "", `: “${x.text}”`))),
     blocked
       ? h("p", { class: "small warn-text" }, `First: ${sub.missing.join("; ")}.`)
       : renderRefStrip(sub),
@@ -340,7 +372,7 @@ function renderShotCard(pkg, shot) {
   const done = subs.filter((s) => s.approved).length;
   return h("section", { class: "card design-card shot-card", id: `kf-${shot.shot_id}` },
     h("div", { class: "design-card-head" },
-      h("h3", {}, shot.shot_id, h("span", { class: "muted small" }, ` · ${shot.place} · ${secs(shot.duration_ms)}`)),
+      h("h3", {}, shot.shot_id, h("span", { class: "muted small" }, ` · ${shot.place} · ${secs(shot.clip_ms)} clip`)),
       h("span", { class: "chips" },
         shot.intimacy && h("span", { class: "chip warn", title: "Scene staged with intimacy: clothed staging only, and never from a likeness" }, `intimacy: ${shot.intimacy}`),
         h("span", { class: `chip ${done === subs.length ? "ok" : "warn"}` }, `${done}/${subs.length} keyframes approved`))),

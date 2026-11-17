@@ -39,6 +39,7 @@ shows a real person's likeness (content rule 3).
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import random
 import re
@@ -68,6 +69,12 @@ CHECK_STAGE = "shot_check"
 PLAN_STAGE = "shot_plan"
 MAX_SUB_SHOTS = 3
 MIN_SUB_SHOT_MS = 1000
+MIN_CLIP_S, MAX_CLIP_S = 4, 15  # H3 renders 4 to 15 s clips, in whole seconds
+# The sub-shot spec's version in the export (05_assets/shot_keyframes/sub_shots.json): the
+# contract video production writes its prompt from.
+SPEC_VERSION = 1
+Side = Literal["left", "center", "right"]
+OffSide = Literal["left", "right"]
 MAX_ROUNDS = 3  # automatic rounds before a person decides
 MAX_DRAWS = 4
 DEFAULT_DRAWS = 2
@@ -118,6 +125,10 @@ class SubShot(BaseModel):
     camera: str = ""
     action: str
     people: list[str] = Field(default_factory=list)  # character ids on screen
+    # Where each on-screen person is in the frame, and where each of the shot's other
+    # people is off frame (for eyelines across the cut). Character id -> side.
+    placement: dict[str, Side] = Field(default_factory=dict)
+    off_screen: dict[str, OffSide] = Field(default_factory=dict)
 
     @property
     def timecode(self) -> str:
@@ -135,6 +146,8 @@ class ShotPlan(BaseModel):
     shot_id: str
     status: Literal["writing", "done", "failed"] = "done"
     source: Literal["single", "model", "user"] = "single"
+    # The clip length asked for when planning (None: the storyboard's, see clip_ms).
+    clip_ms: int | None = None
     sub_shots: list[SubShot] = Field(default_factory=list)
     notes: str = ""
     model: str | None = None
@@ -286,11 +299,36 @@ class NotReady(ValueError):
     sub-shot before it isn't approved)."""
 
 
+# Per package revision (revisions never change): names and lines of dialogue, which the
+# board, the export and every writer and judge call look up shot by shot.
+_REVISION_CACHE: dict[tuple[str, str, str], Any] = {}
+
+
+def _cached(pkg: ProductionPackage, what: str, build: Any) -> Any:
+    key = (pkg.package_id, pkg.revision_id, what)
+    if key not in _REVISION_CACHE:
+        if len(_REVISION_CACHE) > 256:
+            _REVISION_CACHE.clear()
+        _REVISION_CACHE[key] = build()
+    return _REVISION_CACHE[key]
+
+
 def _names(pkg: ProductionPackage) -> dict[str, str]:
-    names = {c.character_id: c.name for c in pkg.story_bible.characters}
-    names |= {loc.location_id: loc.name for loc in pkg.story_bible.locations}
-    names |= {p.prop_id: p.name for p in pkg.story_bible.props}
-    return names
+    def build() -> dict[str, str]:
+        names = {c.character_id: c.name for c in pkg.story_bible.characters}
+        names |= {loc.location_id: loc.name for loc in pkg.story_bible.locations}
+        names |= {p.prop_id: p.name for p in pkg.story_bible.props}
+        return names
+
+    return _cached(pkg, "names", build)
+
+
+def _dialogue(pkg: ProductionPackage) -> dict[str, Any]:
+    """Every line of dialogue of the package, by its id."""
+    return _cached(pkg, "dialogue", lambda: {
+        bt.dialogue.dialogue_id: bt.dialogue
+        for ep in pkg.episodes for sc in ep.scenes for bt in sc.beats if bt.dialogue is not None
+    })  # fmt: skip
 
 
 def shot_of(pkg: ProductionPackage, shot_id: str) -> Shot:
@@ -414,18 +452,137 @@ def _req_title(req: Any, names: dict[str, str]) -> str:
     return names.get(entity, entity)
 
 
+def clip_ms(shot: Shot) -> int:
+    """The shot's clip length as H3 renders it: whole seconds from 4 to 15, rounded up so
+    every line the storyboard times inside the shot is inside the clip."""
+    return max(MIN_CLIP_S, min(MAX_CLIP_S, -(-shot.duration_ms // 1000))) * 1000
+
+
 def single_plan(pkg: ProductionPackage, shot: Shot) -> ShotPlan:
-    """The plan of a shot nobody has planned: the whole shot is one sub-shot."""
+    """The plan of a shot nobody has planned: the whole clip is one sub-shot."""
     return ShotPlan(
         package_id=pkg.package_id,
         revision_id=pkg.revision_id,
         shot_id=shot.shot_id,
         sub_shots=[
-            SubShot(index=1, start_ms=0, end_ms=shot.duration_ms, framing=shot.framing,
+            SubShot(index=1, start_ms=0, end_ms=clip_ms(shot), framing=shot.framing,
                     camera=shot.camera, action=shot.visual_action,
                     people=list(shot.character_ids))
         ],
     )  # fmt: skip
+
+
+def shot_lines(pkg: ProductionPackage, shot: Shot) -> list[dict[str, Any]]:
+    """The shot's lines of dialogue, timed from the start of its clip (the one source of
+    line timing for the planner, the writer, the judge, the checks and the export)."""
+    names = _names(pkg)
+    lines = _dialogue(pkg)
+    out = []
+    for c in shot.dialogue_cues:
+        line = lines.get(c.dialogue_id)
+        if line is None:
+            continue
+        out.append({
+            "dialogue_id": c.dialogue_id,
+            "speaker_id": line.character_id,
+            "speaker": names.get(line.character_id, line.character_id),
+            "text": line.text,
+            "start_ms": max(0, c.start_ms - shot.start_ms),
+            "end_ms": max(0, c.end_ms - shot.start_ms),
+        })  # fmt: skip
+    return sorted(out, key=lambda x: x["start_ms"])
+
+
+def sub_shot_lines(lines: list[dict[str, Any]], sub: SubShot) -> list[dict[str, Any]]:
+    """The lines spoken in a sub-shot (by their start), each saying whether its speaker is
+    on screen, off screen (and on which side) or a voice from outside the shot."""
+    out = []
+    for x in lines:
+        if not sub.start_ms <= x["start_ms"] < sub.end_ms:
+            continue
+        who = x["speaker_id"]
+        where = ("on screen" if who in sub.people
+                 else f"off screen {sub.off_screen[who]}" if who in sub.off_screen
+                 else "voice")  # fmt: skip
+        out.append({**x, "where": where})
+    return out
+
+
+class PlanProblems(ValueError):
+    """A plan that isn't a clean spec; `problems` lists why, one sentence each."""
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__(" | ".join(problems))
+        self.problems = problems
+
+
+TOO_LONG = "the storyboard shot runs"  # the start of the problem a plan can't fix
+
+
+def check_plan(pkg: ProductionPackage, shot: Shot, subs: list[SubShot]) -> list[str]:
+    """Where a sub-shot plan isn't a clean spec for video production (empty if it is):
+    the clip's length, every line wholly inside the clip and inside one sub-shot (no cut in
+    the middle of a line), each speaker on screen or placed off screen, every on-screen
+    person (and only they) placed in the frame, each cut changing the framing, and screen
+    sides that hold across cuts (the 180-degree rule)."""
+    names = _names(pkg)
+    out: list[str] = []
+    clip = subs[-1].end_ms
+    if shot.duration_ms > MAX_CLIP_S * 1000:
+        out.append(f"{TOO_LONG} {shot.duration_ms / 1000:g} s, longer than H3's "
+                   f"{MAX_CLIP_S} s clips: split it in the storyboard")  # fmt: skip
+    if clip % 1000 or not MIN_CLIP_S * 1000 <= clip <= MAX_CLIP_S * 1000:
+        out.append(f"the clip runs {clip / 1000:g} s, but H3 renders whole seconds from "
+                   f"{MIN_CLIP_S} to {MAX_CLIP_S}")  # fmt: skip
+    cuts = [s.start_ms for s in subs[1:]]
+    in_shot = set(shot.character_ids)
+    for x in shot_lines(pkg, shot):
+        said = f'{x["speaker"]}\'s line "{x["text"][:40]}"'
+        if x["start_ms"] >= clip:
+            out.append(f"{said} starts at {x['start_ms'] / 1000:g} s, after the clip ends")
+            continue
+        if x["end_ms"] > clip:
+            out.append(f"{said} runs to {x['end_ms'] / 1000:g} s, past the clip's end at "
+                       f"{clip / 1000:g} s")  # fmt: skip
+        if mid := [c for c in cuts if x["start_ms"] < c < x["end_ms"]]:
+            out.append(f"the cut at {mid[0] / 1000:g} s falls in the middle of {said} "
+                       f"({x['start_ms'] / 1000:g}-{x['end_ms'] / 1000:g} s)")  # fmt: skip
+        sub = next(s for s in subs if s.start_ms <= x["start_ms"] < s.end_ms)
+        who = x["speaker_id"]
+        if who in in_shot and who not in sub.people and who not in sub.off_screen:
+            out.append(f"{x['speaker']} speaks in sub-shot {sub.index} but is neither on "
+                       "screen nor placed off screen")  # fmt: skip
+    for sub in subs:
+        for who in sub.people:
+            if who not in sub.placement:
+                out.append(f"sub-shot {sub.index}: where is {names.get(who, who)} in the frame "
+                           "(left, center or right)?")  # fmt: skip
+        if extra := [w for w in sub.placement if w in in_shot and w not in sub.people]:
+            out.append(f"sub-shot {sub.index} gives a frame position to "
+                       f"{', '.join(names.get(w, w) for w in extra)}, who isn't on screen in it")  # fmt: skip
+        if stray := [w for w in [*sub.placement, *sub.off_screen] if w not in in_shot]:
+            out.append(f"sub-shot {sub.index} places {', '.join(stray)}, who isn't in the shot")
+        if both := [w for w in sub.off_screen if w in sub.people]:
+            out.append(f"sub-shot {sub.index} has {', '.join(names.get(w, w) for w in both)} "
+                       "both on and off screen")  # fmt: skip
+    for a, b in itertools.pairwise(subs):
+        if " ".join(a.framing.lower().split()) == " ".join(b.framing.lower().split()):
+            out.append(f"sub-shots {a.index} and {b.index} have the same framing; a cut must "
+                       "change the view")  # fmt: skip
+        for who in shot.character_ids:
+            was = a.placement.get(who) if who in a.people else a.off_screen.get(who)
+            now = b.placement.get(who) if who in b.people else b.off_screen.get(who)
+            if {was, now} == {"left", "right"}:
+                out.append(f"{names.get(who, who)} moves from frame {was} to frame {now} across "
+                           f"the cut at {b.start_ms / 1000:g} s (the 180-degree rule)")  # fmt: skip
+    return out
+
+
+def plan_problems(pkg: ProductionPackage, shot: Shot, plan: ShotPlan) -> list[str]:
+    """Where a shot's plan in force isn't a clean spec. An unplanned shot (the single
+    plan) is only flagged when no plan could fix it: a shot too long for H3."""
+    problems = check_plan(pkg, shot, plan.sub_shots)
+    return problems if plan.source != "single" else [p for p in problems if p.startswith(TOO_LONG)]
 
 
 def plan_of(pkg: ProductionPackage, shot: Shot, stored: ShotPlan | None) -> ShotPlan:
@@ -446,26 +603,44 @@ def current_sub(
     take from before sub-shots was drawn for the whole shot: it matches the single plan."""
     sub = plan.sub(take.sub_shot) if take.sub_shot >= 1 else None
     drawn = take.spec or single_plan(pkg, shot).sub_shots[0]
-    return sub if sub is not None and drawn == sub else None
+    if sub is None:
+        return None
+    if drawn == sub:
+        return sub
+    # The single plan's clip once ended at the storyboard's length, not whole seconds: a
+    # keyframe drawn for it then is still the same view.
+    same_view = drawn.model_copy(update={"end_ms": sub.end_ms}) == sub
+    return sub if plan.source == "single" and same_view else None
 
 
-def make_sub_shots(shot: Shot, rows: list[dict[str, Any]]) -> list[SubShot]:
-    """Sub-shots from (start_ms, framing, camera, action, people) rows, checked: 1 to
-    MAX_SUB_SHOTS, the first at 0, strictly increasing, each at least MIN_SUB_SHOT_MS,
-    only the shot's people. Each ends where the next starts; the last at the shot's end."""
+def make_sub_shots(
+    pkg: ProductionPackage,
+    shot: Shot,
+    rows: list[dict[str, Any]],
+    clip: int | None = None,
+    *,
+    strict: bool = True,
+) -> list[SubShot]:
+    """Sub-shots from (start_ms, framing, camera, action, people, placement, off_screen)
+    rows over a clip of `clip` ms (default: the shot's, see clip_ms). Each ends where the
+    next starts; the last at the clip's end. Raises ValueError when they can't be a plan
+    at all (1 to MAX_SUB_SHOTS, the first at 0, each at least MIN_SUB_SHOT_MS, a framing
+    and an action each, only the shot's people). With `strict`, also raises PlanProblems
+    for every rule of check_plan it breaks (a shot too long for H3 aside: no plan fixes
+    that); without, those are left for the caller to flag."""
     if not 1 <= len(rows) <= MAX_SUB_SHOTS:
         raise ValueError(f"a shot has 1 to {MAX_SUB_SHOTS} sub-shots")
+    clip = clip or clip_ms(shot)
     starts = [int(r["start_ms"]) for r in rows]
     if starts[0] != 0:
         raise ValueError("the first sub-shot starts at 0 s")
-    ends = [*starts[1:], shot.duration_ms]
+    ends = [*starts[1:], clip]
     out = []
     for k, (row, start, end) in enumerate(zip(rows, starts, ends, strict=True), 1):
         if end - start < MIN_SUB_SHOT_MS:
             raise ValueError(
                 f"sub-shot {k} is {max(0, end - start) / 1000:.1f} s; each runs at least "
-                f"{MIN_SUB_SHOT_MS / 1000:.0f} s, in order, inside the shot's "
-                f"{shot.duration_ms / 1000:.1f} s"
+                f"{MIN_SUB_SHOT_MS / 1000:.0f} s, in order, inside the clip's {clip / 1000:g} s"
             )
         framing, action = str(row.get("framing", "")).strip(), str(row.get("action", "")).strip()
         if not framing or not action:
@@ -475,7 +650,12 @@ def make_sub_shots(shot: Shot, rows: list[dict[str, Any]]) -> list[SubShot]:
             raise ValueError(f"sub-shot {k} lists {', '.join(stray)}, who isn't in the shot")
         out.append(SubShot(index=k, start_ms=start, end_ms=end, framing=framing,
                            camera=str(row.get("camera", "")).strip(), action=action,
-                           people=people))  # fmt: skip
+                           people=people, placement=dict(row.get("placement") or {}),
+                           off_screen=dict(row.get("off_screen") or {})))  # fmt: skip
+    if strict and (
+        problems := [p for p in check_plan(pkg, shot, out) if not p.startswith(TOO_LONG)]
+    ):
+        raise PlanProblems(problems)
     return out
 
 
@@ -722,8 +902,10 @@ WRITER_GUIDE = """\
 ## Your input
 
 - `sub_shot`: the cut this keyframe opens: its number of `of`, its time in the clip, \
-framing, camera, action and `people` (exactly these on screen, `people_count` of them, no \
-one else). The keyframe is its first frame.
+framing, camera, action, `people` (exactly these on screen, `people_count` of them, no one \
+else, each with their `frame` side), `off_screen` (the shot's other people and the side \
+they are off, for eyelines) and the `lines` spoken in it. The keyframe is its first frame: \
+put each person on their side, looking toward where the others are.
 - `pictures`: one entry per <Picture N>, in order (they are attached), each with its \
 `role`, its `define` sentence and its `relationship` sentence. From sub-shot 2 on, \
 <Picture 1> is the approved keyframe of the sub-shot before: the same scene a moment \
@@ -812,13 +994,6 @@ def writer_instructions() -> str:
 def shot_context(pkg: ProductionPackage, shot: Shot) -> dict[str, Any]:
     """What the writer and the judge are told about a shot."""
     names = _names(pkg)
-    lines = {
-        bt.dialogue.dialogue_id: bt.dialogue
-        for ep in pkg.episodes
-        for sc in ep.scenes
-        for bt in sc.beats
-        if bt.dialogue is not None
-    }
     looks = {lk.look_id: lk for lk in (pkg.cast_sheet.looks if pkg.cast_sheet else [])}
     people = []
     for ch in shot.character_ids:
@@ -853,16 +1028,15 @@ def shot_context(pkg: ProductionPackage, shot: Shot) -> dict[str, Any]:
             "people": people,
             "people_count": len(shot.character_ids),
             "props": [names.get(p.prop_id, p.prop_id) for p in shot.prop_state_refs],
+            # When each line is spoken, in seconds from the start of the clip.
             "dialogue": [
                 {
-                    "speaker": names.get(lines[c.dialogue_id].character_id, ""),
-                    "line": lines[c.dialogue_id].text,
-                    # When it is spoken, in seconds from the start of the clip.
-                    "start_s": round(max(0, c.start_ms - shot.start_ms) / 1000, 2),
-                    "end_s": round(min(shot.duration_ms, c.end_ms - shot.start_ms) / 1000, 2),
+                    "speaker": x["speaker"],
+                    "line": x["text"],
+                    "start_s": x["start_ms"] / 1000,
+                    "end_s": x["end_ms"] / 1000,
                 }
-                for c in shot.dialogue_cues
-                if c.dialogue_id in lines
+                for x in shot_lines(pkg, shot)
             ],
         },
         "scene": scene,
@@ -874,8 +1048,9 @@ def shot_context(pkg: ProductionPackage, shot: Shot) -> dict[str, Any]:
     }
 
 
-def sub_shot_context(pkg: ProductionPackage, sub: SubShot, of: int) -> dict[str, Any]:
-    """The sub-shot a keyframe opens, for the writer and the judge."""
+def sub_shot_context(pkg: ProductionPackage, shot: Shot, sub: SubShot, of: int) -> dict[str, Any]:
+    """The sub-shot a keyframe opens, for the writer and the judge: its view, who is where
+    in the frame and off it, and the lines spoken in it."""
     names = _names(pkg)
     return {
         "index": sub.index,
@@ -885,8 +1060,17 @@ def sub_shot_context(pkg: ProductionPackage, sub: SubShot, of: int) -> dict[str,
         "framing": sub.framing,
         "camera": sub.camera,
         "action": sub.action,
-        "people": [{"name": names.get(c, c)} for c in sub.people],
+        "people": [
+            {"name": names.get(c, c), "frame": sub.placement.get(c, "")} for c in sub.people
+        ],
         "people_count": len(sub.people),
+        "off_screen": [
+            {"name": names.get(c, c), "side": side} for c, side in sub.off_screen.items()
+        ],
+        "lines": [
+            {"speaker": x["speaker"], "line": x["text"], "where": x["where"]}
+            for x in sub_shot_lines(shot_lines(pkg, shot), sub)
+        ],
     }
 
 
@@ -948,9 +1132,12 @@ def template_prompt(pkg: ProductionPackage, take: ShotTake) -> str:
     people = (f"exactly {count} {'person' if count == 1 else 'people'}" if count
               else "the empty set")  # fmt: skip
     camera = f", {sub.camera.rstrip('.')}" if sub.camera else ""
+    names = _names(pkg)
+    where = "; ".join(f"{names.get(c, c)} frame {side}" for c, side in sub.placement.items())
     target = (f"The target image is a still frame from a live-action short drama: "
-              f"{sub.framing.rstrip('.')}{camera}, showing {people}, at the moment the "
-              f"action begins: {sub.action.rstrip('.')}.")  # fmt: skip
+              f"{sub.framing.rstrip('.')}{camera}, showing {people}"
+              f"{f' ({where})' if where else ''}, at the moment the action begins: "
+              f"{sub.action.rstrip('.')}.")  # fmt: skip
     extra = [take.direction.rstrip(".") + "." if take.direction else ""]
     return " ".join(
         p for p in [*(x["define"] for x in pictures), target,
@@ -1034,27 +1221,53 @@ gets its own keyframe picture, which the video model shows the moment that sub-s
 PLAN_GUIDE = """\
 ## Your input
 
-`shot`: the storyboard shot (framing, camera, action, continuity, notes, its people and \
-props, `duration_s`) and `dialogue`, each line with when it starts and ends in the clip \
-(`start_s`, `end_s`) and who speaks. `scene`: where and when.
+`shot`: the storyboard shot (framing, camera, action, continuity, notes, its `people` and \
+props) and `clip_s`, the clip's length in seconds. `lines`: each line of dialogue with its \
+speaker and when it starts and ends in the clip (`start_s`, `end_s`); a speaker who isn't \
+one of `shot.people` is a voice from outside the shot. `scene`: where and when. `problems`: \
+what was wrong with your last plan, if any; fix every one.
+
+Your plan is the spec video production renders from: its prompt follows your cuts, \
+timestamps, framing and screen positions exactly, and each cut gets a keyframe drawn from \
+your description. Make it clean and complete.
 
 ## How to cut
 
-- Cut only for new information: a new subject, space, state, viewpoint or time. A small \
-reframe or a push-in is a camera move inside one sub-shot, not a cut. Most held moments \
-are one sub-shot; a shot whose framing or camera notes describe two setups (a wide, then a \
-close-up on the reveal), a reaction, or a reveal of something new is two or three.
-- At most {max_sub} sub-shots. The first starts at 0; each later one starts strictly after \
-the one before, at least {min_s:.0f} s apart, and before the clip ends. A line of dialogue is \
-best not cut in the middle: cut between lines, or keep the speaker on screen across the cut.
-- Each sub-shot: `start_s` (seconds from the start of the clip, e.g. 2.5), `framing` (shot \
-size, angle, who is where on screen), `camera` (still, pan, push-in, handheld...), \
-`action` (what happens from that moment until the next cut, as visible movement), and \
-`people`: the names of exactly the people on screen in it (from `shot.people`).
-- Together the sub-shots tell the whole shot's action, in order, with nothing added.
+- **Cut for new information**: a new subject, space, state, viewpoint or time. A small \
+reframe or a push-in is a camera move inside one sub-shot, not a cut.
+- **Dialogue between people is covered speaker by speaker**: cut to the speaker (a single \
+or an over-the-shoulder) shortly before their line starts, and stay on them until it ends; \
+a reaction can follow in the gap between lines. Keep a two-shot for a line only when the \
+storyboard's framing or notes ask to hold both people.
+- **Never cut in the middle of a line.** Every cut falls between lines (or before the first \
+or after the last).
+- **Each cut changes the view**: a different shot size, angle or subject. Two sub-shots \
+in a row never share a framing.
+- At most {max_sub} sub-shots. The first starts at 0; each later one at least {min_s:.0f} s \
+after the one before and before the clip ends. A held moment with one view is one \
+sub-shot.
+
+## Each sub-shot
+
+- `start_s`: seconds from the start of the clip, e.g. 1.2.
+- `framing`: shot size, angle and who is where, e.g. "Close-up of Lila, frame left, \
+looking off frame right".
+- `camera`: still, pan, push-in, handheld...
+- `action`: what happens from this cut to the next, as visible movement, with the lines \
+spoken in it.
+- `people`: the names of exactly the people on screen in it.
+- `placement`: for each person on screen, where they are in the frame: "left", "center" or \
+"right".
+- `off_screen`: for each of the shot's other people, the side of the frame they are off: \
+"left" or "right" (where the on-screen people look to see them).
+
+Screen sides hold across cuts (the 180-degree rule): a person who is on the right in the \
+two-shot stays on the right in their single and is off frame right in the other person's \
+single. Together the sub-shots tell the whole shot's action, in order, with nothing added.
 
 Return {{"sub_shots": [{{"start_s": 0, "framing": "...", "camera": "...", "action": "...", \
-"people": ["..."]}}, ...], "notes": "one short sentence to the user on why you cut it so"}}.\
+"people": ["..."], "placement": {{"<name>": "left"}}, "off_screen": {{"<name>": "right"}}}}, \
+...], "notes": "one short sentence to the user on why you cut it so"}}.\
 """
 
 
@@ -1064,6 +1277,8 @@ class PlannedSubShot(BaseModel):
     camera: str = ""
     action: str
     people: list[str] = Field(default_factory=list)
+    placement: dict[str, str] = Field(default_factory=dict)  # name -> left | center | right
+    off_screen: dict[str, str] = Field(default_factory=dict)  # name -> left | right
 
 
 class PlanOutput(BaseModel):
@@ -1077,10 +1292,17 @@ def plan_instructions() -> str:
     )
 
 
-def plan_context(pkg: ProductionPackage, shot: Shot) -> dict[str, Any]:
+def plan_context(pkg: ProductionPackage, shot: Shot, clip: int | None = None) -> dict[str, Any]:
     ctx = shot_context(pkg, shot)
     names = _names(pkg)
     ctx["shot"]["people"] = [names.get(c, c) for c in shot.character_ids]
+    ctx["shot"].pop("dialogue", None)  # as `lines`, timed in the clip
+    ctx["clip_s"] = (clip or clip_ms(shot)) // 1000
+    ctx["lines"] = [
+        {"speaker": x["speaker"], "line": x["text"], "start_s": x["start_ms"] / 1000,
+         "end_s": x["end_ms"] / 1000}
+        for x in shot_lines(pkg, shot)
+    ]  # fmt: skip
     return ctx
 
 
@@ -1103,17 +1325,54 @@ def _who(pkg: ProductionPackage, shot: Shot, name: str) -> str:
     return exact[0].character_id
 
 
-def planned_sub_shots(pkg: ProductionPackage, shot: Shot, out: PlanOutput) -> list[SubShot]:
-    """The planner's sub-shots, checked (names become character ids). A first cut a
-    moment after 0 s is moved to 0 s; anything else that breaks the rules fails."""
+def _sides(
+    pkg: ProductionPackage,
+    shot: Shot,
+    given: dict[str, str],
+    allowed: tuple[str, ...],
+    what: str,
+) -> dict[str, str]:
+    """A planner's {name: side} as {character id: side}, sides checked."""
+    out = {}
+    for name, side in given.items():
+        side = side.strip().lower().replace("centre", "center")
+        if side not in allowed:
+            raise ValueError(f"{what} for {name} is {side!r}, not one of {allowed}")
+        out[_who(pkg, shot, name)] = side
+    return out
+
+
+def planned_sub_shots(
+    pkg: ProductionPackage,
+    shot: Shot,
+    out: PlanOutput,
+    clip: int | None = None,
+    *,
+    strict: bool = True,
+) -> list[SubShot]:
+    """The planner's sub-shots (names become character ids), checked as make_sub_shots
+    checks them. A first cut a moment after 0 s is moved to 0 s."""
     planned = sorted(out.sub_shots, key=lambda p: p.start_s)
     rows = []
     for k, p in enumerate(planned):
         start = 0 if k == 0 and p.start_s * 1000 < MIN_SUB_SHOT_MS else round(p.start_s * 1000)
-        people = list(dict.fromkeys(_who(pkg, shot, n) for n in p.people))
-        rows.append({"start_ms": start, "framing": p.framing, "camera": p.camera,
-                     "action": p.action, "people": people})  # fmt: skip
-    return make_sub_shots(shot, rows)
+        rows.append({
+            "start_ms": start, "framing": p.framing, "camera": p.camera, "action": p.action,
+            "people": list(dict.fromkeys(_who(pkg, shot, n) for n in p.people)),
+            "placement": _sides(pkg, shot, p.placement, ("left", "center", "right"),
+                                "the frame position"),
+            "off_screen": _sides(pkg, shot, p.off_screen, ("left", "right"), "the off-screen side"),
+        })  # fmt: skip
+    return make_sub_shots(pkg, shot, rows, clip, strict=strict)
+
+
+def spread(people: list[str]) -> dict[str, str]:
+    """Default frame positions for people in one view: left to right."""
+    sides = {1: ["center"], 2: ["left", "right"], 3: ["left", "center", "right"]}
+    order = sides.get(len(people)) or [
+        ("left", "center", "right")[i % 3] for i in range(len(people))
+    ]
+    return dict(zip(people, order, strict=True))
 
 
 def fixture_plan(request: GenerationRequest) -> PlanOutput:
@@ -1121,7 +1380,8 @@ def fixture_plan(request: GenerationRequest) -> PlanOutput:
     shot = request.context["shot"]
     return PlanOutput(
         sub_shots=[PlannedSubShot(start_s=0, framing=shot["framing"], camera=shot["camera"],
-                                  action=shot["action"], people=shot["people"])],
+                                  action=shot["action"], people=shot["people"],
+                                  placement=spread(shot["people"]))],
         notes="Offline sample: one sub-shot.",
     )  # fmt: skip
 
@@ -1157,8 +1417,9 @@ skin, age: the same person as their picture) and **wardrobe** (clothes, hair, ac
 as in their look picture). Name them: "Lila: face", "Lila: wardrobe".
 - **count**: exactly `sub_shot.people_count` people with visible faces or bodies, no extras \
 (small background silhouettes are fine if the shot implies them).
-- **placement**: who is where (screen-left/right, foreground/background) and facing which \
-way, as the framing and action say.
+- **placement**: who is where (each person's `frame` side in `sub_shot.people`, \
+foreground/background) and looking toward the off-screen people's side, as the framing \
+and action say.
 - **framing**: the shot size and camera angle.
 - **action**: the pose and the moment match the sub-shot's action as it begins.
 - **set**: the place matches the set picture (layout, materials, palette).
@@ -1278,13 +1539,28 @@ class ShotFrameRunner:
             if pkg is None:
                 raise RuntimeError("the package revision is gone")
             shot = shot_of(pkg, plan.shot_id)
-            request = GenerationRequest(
-                stage=PLAN_STAGE,  # type: ignore[arg-type]
-                instructions=plan_instructions(),
-                context=plan_context(pkg, shot),
-            )
-            out = await self.text.generate(request, PlanOutput)
-            plan.sub_shots = planned_sub_shots(pkg, shot, out)
+            context = plan_context(pkg, shot, plan.clip_ms)
+            for attempt in range(2):  # once more with the problems of a plan that isn't clean
+                request = GenerationRequest(
+                    stage=PLAN_STAGE,  # type: ignore[arg-type]
+                    instructions=plan_instructions(),
+                    context=context,
+                    attempt=attempt,
+                )
+                out = await self.text.generate(request, PlanOutput)
+                try:
+                    subs = planned_sub_shots(pkg, shot, out, plan.clip_ms, strict=False)
+                    problems = check_plan(pkg, shot, subs)
+                except ValueError as exc:  # not a plan at all: retry, then give up
+                    if attempt:
+                        raise
+                    subs, problems = None, [str(exc)]
+                fixable = [p for p in problems if not p.startswith(TOO_LONG)]
+                if subs is not None and (not fixable or attempt):
+                    # Clean, or still not after the retry: kept, and flagged until fixed.
+                    plan.sub_shots = subs
+                    break
+                context = context | {"previous_plan": out.model_dump(), "problems": fixable}
             plan.notes, plan.source = out.notes.strip(), "model"
             plan.model = request.model or getattr(self.text, "model_id", None)
             plan.status, plan.error = "done", None
@@ -1363,7 +1639,7 @@ class ShotFrameRunner:
         The prompt becomes the sub-shot's next version."""
         template = template_prompt(pkg, take)
         context = {
-            "sub_shot": sub_shot_context(pkg, take_sub(pkg, shot, take), self._of(take)),
+            "sub_shot": sub_shot_context(pkg, shot, take_sub(pkg, shot, take), self._of(take)),
             "pictures": picture_sentences(pkg, take),
             **shot_context(pkg, shot),
             "aspect": next((k for k, v in SIZES.items() if v == take.size), take.size),
@@ -1518,7 +1794,7 @@ class ShotFrameRunner:
         all at once. A check that can't run leaves the draw unchecked, with the reason; it
         never counts as a pass."""
         context = shot_context(pkg, shot) | {
-            "sub_shot": sub_shot_context(pkg, take_sub(pkg, shot, take), self._of(take)),
+            "sub_shot": sub_shot_context(pkg, shot, take_sub(pkg, shot, take), self._of(take)),
             "pictures": [
                 {"picture": f"<Picture {n}>", "role": r.role}
                 for n, r in enumerate(take.references, 1)
@@ -1604,6 +1880,7 @@ def shot_board(
         plan = plan_of(pkg, shot, own)
         mine = sorted((t for t in takes if t.shot_id == shot.shot_id), key=lambda t: t.created_at)
         picks = shot_picks(pkg, images, shot)  # once per shot, chosen per sub-shot below
+        lines = shot_lines(pkg, shot)
         subs = []
         for sub in plan.sub_shots:
             refs, missing = sub_shot_references(pkg, images, mine, shot, sub, picks)
@@ -1612,6 +1889,7 @@ def shot_board(
                 **sub.model_dump(),
                 "timecode": sub.timecode,
                 "people_names": [names.get(c, c) for c in sub.people],
+                "lines": sub_shot_lines(lines, sub),
                 "references": [r.model_dump() for r in refs],
                 "missing": missing,
                 # Takes drawn for this sub-shot as it is now (not for an older plan's).
@@ -1637,9 +1915,12 @@ def shot_board(
             "people": [{"id": c, "name": names.get(c, c)} for c in shot.character_ids],
             "place": names.get(shot.location_id, shot.location_id),
             "intimacy": intimate_scene(pkg, shot),
+            "clip_ms": plan.sub_shots[-1].end_ms,
             "plan": {
                 "status": own.status if own else "done",
                 "source": plan.source,
+                # Where the plan isn't a clean spec for video production yet.
+                "problems": plan_problems(pkg, shot, plan),
                 "notes": own.notes if own else "",
                 "error": own.error if own else None,
             },

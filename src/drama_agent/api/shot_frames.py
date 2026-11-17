@@ -17,10 +17,13 @@ from ..models.package import utcnow
 from ..models.storyboard import Shot
 from ..shot_frames import (
     DEFAULT_DRAWS,
+    MAX_CLIP_S,
     MAX_DRAWS,
     MAX_ROUNDS,
     MAX_SUB_SHOTS,
+    MIN_CLIP_S,
     NotReady,
+    PlanProblems,
     PromptVersion,
     ShotFrameRunner,
     ShotPlan,
@@ -80,13 +83,18 @@ class SubShotIn(BaseModel):
     framing: str = Field(max_length=1000)
     camera: str = Field("", max_length=1000)
     action: str = Field(max_length=2000)
-    people: list[str] = Field(default_factory=list)  # character ids
+    people: list[str] = Field(default_factory=list)  # character ids on screen
+    # Character id -> where they are in the frame / which side they are off it.
+    placement: dict[str, Literal["left", "center", "right"]] = Field(default_factory=dict)
+    off_screen: dict[str, Literal["left", "right"]] = Field(default_factory=dict)
 
 
 class PlanRequest(BaseModel):
     revision_id: str | None = None
     # Your own sub-shots; None asks the text model to plan them.
     sub_shots: list[SubShotIn] | None = Field(None, max_length=MAX_SUB_SHOTS)
+    # The clip's length in whole seconds (default: the storyboard's, rounded up).
+    clip_s: int | None = Field(None, ge=MIN_CLIP_S, le=MAX_CLIP_S)
 
 
 class ApproveRequest(BaseModel):
@@ -179,6 +187,7 @@ def register(
         if (stored is not None and stored.busy) or is_busy(takes, shot_id):
             raise HTTPException(409, f"{shot_id} is still being planned or drawn")
         plan = ShotPlan(package_id=pkg.package_id, revision_id=pkg.revision_id, shot_id=shot_id)
+        plan.clip_ms = req.clip_s * 1000 if req.clip_s else None
         if req.sub_shots is None:
             plan.status = "writing"
             if stored is not None:  # the board keeps showing the old one meanwhile
@@ -187,7 +196,16 @@ def register(
             runner.start_plan(plan)
             return plan
         try:
-            plan.sub_shots = make_sub_shots(shot, [s.model_dump() for s in req.sub_shots])
+            plan.sub_shots = make_sub_shots(
+                pkg,
+                shot,
+                [s.model_dump() for s in req.sub_shots],
+                plan.clip_ms,
+            )
+        except PlanProblems as exc:
+            raise HTTPException(
+                422, "Not a clean spec for video: " + "; ".join(exc.problems) + "."
+            ) from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         plan.source, plan.updated_at = "user", utcnow()
