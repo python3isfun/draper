@@ -1183,22 +1183,25 @@ def package_has_uploads(repo: Any, package_id: str) -> bool:
     )
 
 
-def make_thumb(media: MediaStore, rel: str) -> str | None:
-    """A 512 px JPEG next to a stored image, for the UI (full-size images are ~16 MP).
-    Blocking (runs ffmpeg); None without ffmpeg or when the image can't be read."""
+def make_thumb(
+    media: MediaStore, rel: str, *, px: int = 512, suffix: str = "_thumb", quality: int = 4
+) -> str | None:
+    """A JPEG with a `px` long edge next to a stored image (default: the UI's 512 px
+    thumbnail; full-size images are ~16 MP). Blocking (runs ffmpeg); None without ffmpeg or
+    when the image can't be read."""
     if not ffmpeg_available():
         return None
     src = media.path(rel)
-    out = src.with_name(f"{src.stem}_thumb.jpg")
+    out = src.with_name(f"{src.stem}{suffix}.jpg")
     try:
         subprocess.run(
             ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(src),
-             "-vf", "scale='if(gt(iw,ih),512,-2)':'if(gt(iw,ih),-2,512)'", "-q:v", "4",
-             str(out)],
+             "-vf", f"scale='if(gt(iw,ih),{px},-2)':'if(gt(iw,ih),-2,{px})'",
+             "-q:v", str(quality), str(out)],
             capture_output=True, timeout=60, check=True,
         )  # fmt: skip
     except (subprocess.SubprocessError, OSError):
-        log.warning("no thumbnail for %s", rel)
+        log.warning("no %s px copy of %s", px, rel)
         return None
     return str(out.relative_to(media.root))
 

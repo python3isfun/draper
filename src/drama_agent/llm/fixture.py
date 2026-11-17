@@ -88,6 +88,14 @@ class FixtureModelClient:
                 from ..experiment import fixture_prompt
 
                 output = fixture_prompt(request)
+            case "shot_frames":
+                from ..shot_frames import fixture_frame_prompt
+
+                output = fixture_frame_prompt(request)
+            case "shot_check":
+                from ..shot_frames import fixture_check
+
+                output = fixture_check(request)
             case _:
                 raise ValueError(f"unknown stage {request.stage}")
 

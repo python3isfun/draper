@@ -9,6 +9,7 @@ from ..experiment import ExpSession, ExpTurn
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
+from ..shot_frames import ShotTake, approval_changes
 
 
 class Repository(Protocol):
@@ -64,6 +65,12 @@ class Repository(Protocol):
     def allocate_exp_labels(self, session_id: str, n: int) -> list[int]: ...
     def asset_in_use(self, asset_id: str) -> bool: ...
     def delete_source_asset(self, asset_id: str) -> None: ...
+    def save_shot_take(self, take: ShotTake) -> None: ...
+    def get_shot_take(self, take_id: str) -> ShotTake | None: ...
+    def list_shot_takes(self, package_id: str, revision_id: str) -> list[ShotTake]: ...
+    def delete_shot_take(self, take_id: str) -> None: ...
+    def approve_shot_draw(self, take_id: str, n: int | None) -> ShotTake: ...
+    def fail_unfinished_shot_takes(self, error: str) -> int: ...
 
 
 class InMemoryRepository:
@@ -87,6 +94,7 @@ class InMemoryRepository:
         self.exp_sessions: dict[str, ExpSession] = {}
         self.exp_turns: dict[str, ExpTurn] = {}
         self.exp_next_label: dict[str, int] = {}
+        self.shot_takes: dict[str, ShotTake] = {}
 
     def save_source_asset(self, asset_id: str, meta: dict[str, Any]) -> None:
         self.source_assets[asset_id] = meta
@@ -317,6 +325,40 @@ class InMemoryRepository:
 
     def delete_source_asset(self, asset_id: str) -> None:
         self.source_assets.pop(asset_id, None)
+
+    def save_shot_take(self, take: ShotTake) -> None:
+        """An update never changes `approved` (see SqliteRepository.save_shot_take)."""
+        old = self.shot_takes.get(take.take_id)
+        update = {"approved": old.approved} if old is not None else {}
+        self.shot_takes[take.take_id] = take.model_copy(update=update, deep=True)
+
+    def get_shot_take(self, take_id: str) -> ShotTake | None:
+        t = self.shot_takes.get(take_id)
+        return t.model_copy(deep=True) if t else None
+
+    def list_shot_takes(self, package_id: str, revision_id: str) -> list[ShotTake]:
+        mine = [t for t in self.shot_takes.values()
+                if t.package_id == package_id and t.revision_id == revision_id]  # fmt: skip
+        return [t.model_copy(deep=True) for t in sorted(mine, key=lambda t: t.created_at)]
+
+    def delete_shot_take(self, take_id: str) -> None:
+        self.shot_takes.pop(take_id, None)
+
+    def approve_shot_draw(self, take_id: str, n: int | None) -> ShotTake:
+        take = self.shot_takes[take_id].model_copy(deep=True)
+        others = [t.model_copy(deep=True) for t in self.shot_takes.values()
+                  if t.take_id != take_id and (t.package_id, t.revision_id, t.shot_id)
+                  == (take.package_id, take.revision_id, take.shot_id)]  # fmt: skip
+        for t in approval_changes(take, n, others):
+            self.shot_takes[t.take_id] = t
+        return take.model_copy(deep=True)
+
+    def fail_unfinished_shot_takes(self, error: str) -> int:
+        n = 0
+        for t in self.shot_takes.values():
+            if t.busy:
+                t.status, t.error, t.finished_at, n = "failed", error, utcnow(), n + 1
+        return n
 
 
 def __getattr__(name: str) -> Any:

@@ -688,6 +688,7 @@ const TABS = [
   ["sets", "Sets"],
   ["props", "Props"],
   ["assets", "Assets"],
+  ["keyframes", "Keyframes"],
   ["qa", "QA"],
   ["revise", "Revise"],
   ["activity", "Activity"],
@@ -712,6 +713,7 @@ function renderPackage(pkg) {
     sets: pkg.set_sheet?.locations.length,
     props: pkg.prop_sheet?.props.length,
     assets: pkg.asset_requirements.items.length,
+    keyframes: pkg.shot_list.length,
     qa: pkg.qa_report.hard_issues.length + pkg.qa_report.creative_issues.length,
   };
   const tabs = h("div", { class: "tabs", role: "tablist" },
@@ -725,7 +727,7 @@ function renderPackage(pkg) {
   const body = {
     overview: renderOverview, script: renderScript, storyboard: renderStoryboard,
     cast: renderCast, sets: renderSets, props: renderProps,
-    assets: renderAssets, qa: renderQA, revise: renderRevise,
+    assets: renderAssets, keyframes: renderKeyframes, qa: renderQA, revise: renderRevise,
     activity: () => activityPanel(state.job.job_id),
   }[state.tab] || renderOverview;
   return h("div", {}, tabs, h("div", { role: "tabpanel" }, body(pkg, L)));

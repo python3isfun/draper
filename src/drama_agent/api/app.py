@@ -92,8 +92,10 @@ from ..models.package import utcnow
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
+from ..shot_frames import ShotFrameRunner
 from ..store import InMemoryRepository, Repository
 from ..worker import JobWorker, pause_job, recover, resume_job, retry_job
+from . import shot_frames as keyframe_api
 
 log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -316,6 +318,8 @@ def create_app(
     wakeup = asyncio.Event()
     image_wakeup = asyncio.Event()
     experiments = ExperimentRunner(repo, media, images, orchestrator.client)
+    # Keyframes share the Experiment tab's GPU lock: one render at a time from this process.
+    keyframes = ShotFrameRunner(repo, media, images, orchestrator.client, gpu=experiments._gpu)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -323,6 +327,8 @@ def create_app(
         archive_non_english(repo)
         if n := experiments.recover():
             log.info("marked %d interrupted experiment turns failed", n)
+        if n := keyframes.recover():
+            log.info("marked %d interrupted keyframe takes failed", n)
         n = recover(repo, queue)
         if n:
             log.info("enqueued %d unfinished jobs without a queue entry", n)
@@ -359,6 +365,7 @@ def create_app(
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await experiments.aclose()
+            await keyframes.aclose()
             if close := getattr(images, "aclose", None):
                 await close()
 
@@ -1176,6 +1183,18 @@ def create_app(
             return PlainTextResponse(render_markdown(pkg), media_type="text/plain")
         return pkg
 
+    keyframe_api.register(
+        app,
+        repo=repo,
+        media=media,
+        runner=keyframes,
+        text_client=orchestrator.client,
+        image_model=images.model_id,
+        package_or_404=_package_or_404,
+        package_job=_package_job,
+        file_response=_file,
+    )
+
     @app.get("/v1/drama-packages/{package_id}/export", response_class=FileResponse)
     async def export_package(
         package_id: str, revision_id: str | None = None, job_id: str | None = None
@@ -1199,6 +1218,7 @@ def create_app(
                 assets=assets,
                 media=media,
                 options=repo.list_options(pkg.package_id, pkg.revision_id),
+                keyframes=repo.list_shot_takes(pkg.package_id, pkg.revision_id),
             )
         except BaseException:
             tmp.unlink(missing_ok=True)

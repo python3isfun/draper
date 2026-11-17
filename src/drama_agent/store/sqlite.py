@@ -17,12 +17,13 @@ from ..experiment import ExpSession, ExpTurn
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
+from ..shot_frames import ShotTake, approval_changes
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
 # v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns.
-# v7: exp_sessions.next_label. Each step is additive, so older files upgrade in
-# place (see _migrate).
-SCHEMA_VERSION = 7
+# v7: exp_sessions.next_label. v8: shot_takes. Each step is additive, so older files
+# upgrade in place (see _migrate).
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -118,6 +119,17 @@ CREATE TABLE IF NOT EXISTS exp_turns (
     data        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS exp_turns_session ON exp_turns (session_id, idx);
+CREATE TABLE IF NOT EXISTS shot_takes (
+    take_id     TEXT PRIMARY KEY,
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    shot_id     TEXT NOT NULL,
+    frame       TEXT NOT NULL,              -- start | end
+    status      TEXT NOT NULL,              -- pending | writing | drawing | checking | done | failed
+    created_at  TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS shot_takes_pkg ON shot_takes (package_id, revision_id, shot_id);
 """
 
 
@@ -620,6 +632,77 @@ class SqliteRepository:
             raise KeyError(session_id)
         end = row[0]
         return list(range(end - n, end))
+
+    # Shot keyframes ------------------------------------------------------------
+
+    def save_shot_take(self, take: ShotTake) -> None:
+        """Insert or update a take. An update never changes `approved`: only
+        approve_shot_draw does, so a runner saving its copy can't undo an approval."""
+        self._exec(
+            "INSERT INTO shot_takes (take_id, package_id, revision_id, shot_id, frame, status, "
+            "created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (take_id) DO UPDATE "
+            "SET status = excluded.status, data = json_set(excluded.data, '$.approved', "
+            "json_extract(shot_takes.data, '$.approved'))",
+            (take.take_id, take.package_id, take.revision_id, take.shot_id, take.frame,
+             take.status, take.created_at.isoformat(), take.model_dump_json()),
+        )  # fmt: skip
+
+    def get_shot_take(self, take_id: str) -> ShotTake | None:
+        raw = self._one("SELECT data FROM shot_takes WHERE take_id = ?", (take_id,))
+        return ShotTake.model_validate_json(raw) if raw else None
+
+    def list_shot_takes(self, package_id: str, revision_id: str) -> list[ShotTake]:
+        """Oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM shot_takes WHERE package_id = ? AND revision_id = ? "
+                "ORDER BY created_at, rowid",
+                (package_id, revision_id),
+            ).fetchall()
+        return [ShotTake.model_validate_json(r[0]) for r in rows]
+
+    def delete_shot_take(self, take_id: str) -> None:
+        self._exec("DELETE FROM shot_takes WHERE take_id = ?", (take_id,))
+
+    def approve_shot_draw(self, take_id: str, n: int | None) -> ShotTake:
+        """Approve draw `n` of a take (None: withdraw the approval), in one transaction:
+        see shot_frames.approval_changes."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                raw = self._conn.execute(
+                    "SELECT data FROM shot_takes WHERE take_id = ?", (take_id,)
+                ).fetchone()
+                if raw is None:
+                    raise KeyError(take_id)
+                take = ShotTake.model_validate_json(raw[0])
+                rows = self._conn.execute(
+                    "SELECT data FROM shot_takes WHERE package_id = ? AND revision_id = ? "
+                    "AND shot_id = ? AND take_id != ?",
+                    (take.package_id, take.revision_id, take.shot_id, take_id),
+                ).fetchall()
+                others = [ShotTake.model_validate_json(r[0]) for r in rows]
+                for t in approval_changes(take, n, others):
+                    self._conn.execute(
+                        "UPDATE shot_takes SET data = ? WHERE take_id = ?",
+                        (t.model_dump_json(), t.take_id),
+                    )
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            self._conn.execute("COMMIT")
+        return take
+
+    def fail_unfinished_shot_takes(self, error: str) -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM shot_takes WHERE status NOT IN ('done', 'failed')"
+            ).fetchall()
+        for (raw,) in rows:
+            t = ShotTake.model_validate_json(raw)
+            t.status, t.error, t.finished_at = "failed", error, utcnow()
+            self.save_shot_take(t)
+        return len(rows)
 
     def asset_in_use(self, asset_id: str) -> bool:
         """Whether a job, a reference image or a chat message uses this upload. Asset ids

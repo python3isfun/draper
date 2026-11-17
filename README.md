@@ -273,6 +273,38 @@ chosen takes to `04_design/selected_designs.md`, and puts every other option in
 `05_assets/options/` with `options.csv` (label, profile, edited_from, draw, seed,
 prompt). A picked take with a hand-edited prompt has that prompt in `selected_designs.md`.
 
+### Shot keyframes: a checked frame per shot, for video
+
+The **Keyframes** tab makes one picture per shot that video production (dramer) starts the
+clip from, so characters stay consistent and move as the storyboard says:
+
+1. **References**: the shot's design picks, in the order dramer sends them: each person in
+   this shot's look, the set's wide view, the props, then the faces while nine pictures
+   allow. A shot waits until its picks exist (the Assets tab).
+2. **Write**: the text model writes an H3 edit prompt from the shot (framing, camera,
+   action, who is where, who speaks) and the pictures it sees.
+3. **Draw**: 1 to 4 draws, at the video's aspect ratio (~16 MP).
+4. **Check**: a vision judge compares each draw with the reference pictures and the shot,
+   item by item: each person's face and wardrobe, people count, placement, framing, action,
+   set, props, defects, stray text, style. Each failed item costs points (major 25, minor
+   8); a draw passes with no failed major item and a score of 80 or more. A check that
+   can't run never counts as a pass (**Check again**).
+5. **Revise**: when no draw passes, the failed items and the judge's fix go back to the
+   writer for the next round, drawn with the same seeds; up to 3 rounds, then a person
+   decides. A direction or your own prompt starts a new take at any time (your own prompt
+   is checked but never rewritten).
+6. **Approve** one draw per shot. An **end frame** (optional; the writer suggests one for
+   shots that move) is an edit of the approved start frame, so the clip is pinned at both
+   ends. Only approved frames go into the export (`05_assets/shot_keyframes/`), with their
+   check result, even when a person approved a draw that failed it.
+
+Keyframes are production assets: the restrictive content rules always apply, and a shot in
+a scene staged as implied or simulated intimacy is never drawn from a pick that shows a real
+person's likeness (content rule 3). Endpoints: `GET/POST /v1/drama-packages/{id}/keyframes`
+(board; start frames for every shot without one), `POST .../keyframes/{shot_id}` (one take),
+`POST|DELETE /v1/shot-takes/{take_id}/approve`, `.../check`, `.../retry`,
+`DELETE /v1/shot-takes/{take_id}`, `GET /v1/shot-takes/{take_id}/draws/{n}/{content|thumb}`.
+
 ### Production hand-off zip
 
 **Download zip** on a job page (or `GET /v1/drama-packages/{id}/export?job_id=…`) gives the
@@ -285,7 +317,7 @@ team one file to produce and shoot from. Inside a folder named after the title a
 | `02_script/` | One screenplay-style script per episode (scene headings, action, CHARACTER cues, V.O.) + JSON |
 | `03_storyboard/` | `shot_list.csv` (one row per shot: timing, framing, camera, who and what is on screen, dialogue with times, sound, continuity, asset IDs), `storyboard.md`, `dialogue_schedule.csv`, JSON |
 | `04_design/` | Cast, set and prop sheets (Markdown + JSON) |
-| `05_assets/` | Asset requirements (CSV + JSON) and the newest finished reference image per deliverable, with `index.csv` (prompt, seed, size, model) |
+| `05_assets/` | Asset requirements (CSV + JSON) and the newest finished reference image per deliverable, with `index.csv` (prompt, seed, size, model, `likeness`, and `source`: generated or imported); `shot_keyframes/`: the approved start and end frame of each shot, with `index.csv` (references, seed, check result, score, failed items, likeness, motion, prompt) |
 | `06_qa/` | Hard checks and creative review |
 | `07_sources/` | The idea text and uploaded photos/videos with their prompts |
 | `08_intimacy/` | Only when the story has intimacy: `intimacy_plan.md`, every such scene with its level, what is shown and implied, nudity, closed set and consent beats, for the director and intimacy coordinator |
