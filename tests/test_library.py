@@ -152,3 +152,130 @@ def test_a_redraw_can_be_limited_to_one_asset(tmp_path):
         # The other set's pictures are still out of date, untouched.
         theirs = {i["image_id"] for i in v["images"] if second in i["requirement_id"]}
         assert theirs & set(v["outdated"])
+
+
+def test_names_match_across_scripts_and_spellings():
+    from drama_agent.library.matching import score
+
+    # The same CJK name with full-width and with ASCII brackets (escaped: the repo is English).
+    full, ascii_ = "\u5468\u53d4\uff08\u6797\u5efa\u56fd\uff09", "\u5468\u53d4(\u6797\u5efa\u56fd)"
+    assert score(full, ascii_)[1] == "same name"
+    assert score("Lila Montgomery", "lila montgomery")[0] == 1.0
+    assert score("Lila Montgomery", "Lila Grant")[1] == "same first name"
+    assert (
+        score("Derek's apartment", "Derek's apartment, morning")[1] == "one name contains the other"
+    )
+    assert score("Lila", "Derek") is None and score("", "Lila") is None
+
+
+def second_story(b: Board) -> str:
+    from .conftest import wait_job
+    from .test_shot_frames import BODY
+
+    job = wait_job(b.http, b.http.post("/v1/drama-jobs", json=BODY).json()["job_id"])
+    return job["package_id"]
+
+
+def test_a_story_can_cast_another_storys_character_and_undo_it(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        other = second_story(b)
+        pkg = b.repo.get_package(b.pid)
+        who = pkg.story_bible.characters[0]
+        found = b.http.get(f"/v1/drama-packages/{other}/casting/matches").json()
+        mine = next(m for m in found if m["story_id"] == who.character_id)
+        assert mine["linked"] is None
+        best = mine["candidates"][0]
+        assert best["reason"] == "same name" and best["package_id"] == b.pid
+        # Link: the second story uses the first story's character.
+        r = b.http.post(f"/v1/drama-packages/{other}/casting",
+                        json={"story_id": who.character_id, "asset_id": best["asset_id"]})  # fmt: skip
+        assert r.status_code == 200, r.text
+        names = [c["name"] for c in b.http.get("/v1/library/characters").json()]
+        assert names.count(who.name) == 1  # its own copy is hidden
+        shared = b.http.get(f"/v1/library/characters/{best['asset_id']}").json()
+        assert {u["package_id"] for u in shared["used_in"]} == {b.pid, other}
+        stories = {lk["origin_package_id"] for lk in shared["looks"]}
+        assert stories == {b.pid, other}  # its looks joined the shared character
+        assert [x["package_id"] for x in shared["also"]] == [other]
+        again = b.http.get(f"/v1/drama-packages/{other}/casting/matches").json()
+        assert (
+            next(m for m in again if m["story_id"] == who.character_id)["linked"]["asset_id"]
+            == best["asset_id"]
+        )
+        # A sync keeps the link.
+        b.http.post("/v1/library/sync", params={"force": True})
+        names = [c["name"] for c in b.http.get("/v1/library/characters").json()]
+        assert names.count(who.name) == 1
+        # Unlink: the second story's character is its own again.
+        assert (
+            b.http.delete(f"/v1/drama-packages/{other}/casting/{who.character_id}").status_code
+            == 200
+        )
+        names = [c["name"] for c in b.http.get("/v1/library/characters").json()]
+        assert names.count(who.name) == 2
+        shared = b.http.get(f"/v1/library/characters/{best['asset_id']}").json()
+        assert {lk["origin_package_id"] for lk in shared["looks"]} == {b.pid} and shared[
+            "also"
+        ] == []
+
+
+def test_links_are_checked(tmp_path):
+    with Board(tmp_path) as b:
+        other = second_story(b)
+        pkg = b.repo.get_package(b.pid)
+        who = pkg.story_bible.characters[0].character_id
+        place = pkg.story_bible.locations[0].location_id
+        sets = {s["origin_package_id"]: s for s in b.http.get("/v1/library/sets").json()
+                if s["origin_entity_id"] == place}  # fmt: skip
+        chars = {c["origin_package_id"]: c for c in b.http.get("/v1/library/characters").json()
+                 if c["origin_entity_id"] == who}  # fmt: skip
+        url = f"/v1/drama-packages/{other}/casting"
+        # A character can't be cast as a set, nor as its own story's asset.
+        assert (
+            b.http.post(
+                url, json={"story_id": who, "asset_id": sets[b.pid]["asset_id"]}
+            ).status_code
+            == 404
+        )
+        assert (
+            b.http.post(
+                url, json={"story_id": who, "asset_id": chars[other]["asset_id"]}
+            ).status_code
+            == 409
+        )
+        # Nor as one that is itself linked elsewhere.
+        assert (
+            b.http.post(
+                url, json={"story_id": who, "asset_id": chars[b.pid]["asset_id"]}
+            ).status_code
+            == 200
+        )
+        back = f"/v1/drama-packages/{b.pid}/casting"
+        assert (
+            b.http.post(
+                back, json={"story_id": who, "asset_id": chars[other]["asset_id"]}
+            ).status_code
+            == 409
+        )
+        assert b.http.delete(f"{url}/{place}").status_code == 404  # not linked
+
+
+def test_an_archived_storys_assets_are_kept_but_not_shown(tmp_path):
+    with Board(tmp_path) as b:
+        other = second_story(b)
+        names = [c["name"] for c in b.http.get("/v1/library/characters").json()]
+        first = b.repo.get_package(b.pid).story_bible.characters[0].name
+        assert names.count(first) == 2
+        for job in b.repo.jobs_for_package(other):
+            job.archived = True
+            b.repo.save_job(job)
+        names = [c["name"] for c in b.http.get("/v1/library/characters").json()]
+        assert names.count(first) == 1
+        found = b.http.get(f"/v1/drama-packages/{b.pid}/casting/matches").json()
+        assert all(not m["candidates"] for m in found)  # the archived story's are not offered
+        for job in b.repo.jobs_for_package(other):
+            job.archived = False
+            b.repo.save_job(job)
+        names = [c["name"] for c in b.http.get("/v1/library/characters").json()]
+        assert names.count(first) == 2  # back when it is un-archived

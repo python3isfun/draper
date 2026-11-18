@@ -647,3 +647,6 @@ td.mono { white-space: nowrap; }
 .lib-sheet .chip { white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
 .lib-asset .take-head .chip { white-space: normal; overflow-wrap: anywhere; }
 .lib-asset details.frames { margin-top: 6px; }
+.lib-card-link { display: flex; flex-direction: column; gap: 4px; color: var(--text); text-decoration: none; }
+.lib-match { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.lib-card .chip { white-space: normal; max-width: 100%; }

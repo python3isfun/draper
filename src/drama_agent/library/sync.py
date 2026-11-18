@@ -135,6 +135,21 @@ def build(pkg: ProductionPackage, images: list[GeneratedImage]) -> Built:
     return out
 
 
+def apply_links(made: Built, linked: dict[str, Casting]) -> None:
+    """A linked character or set: its own copy is marked merged into the shared asset, and
+    its looks or states (and items) hang off the shared asset instead, as more of it."""
+    into = {}
+    for a in made.assets:
+        if a.kind in ("character", "set") and a.origin_entity_id in linked:
+            into[a.asset_id] = linked[a.origin_entity_id].asset_id
+            a.merged_into = into[a.asset_id]
+    for a in made.assets:
+        if a.parent_id in into:
+            a.parent_id = into[a.parent_id]
+        if a.asset_id in into or a.parent_id in into.values():
+            a.source_print = _print(a.source_print, a.parent_id, a.merged_into)
+
+
 @dataclass
 class SyncReport:
     stories: int = 0
@@ -157,24 +172,32 @@ def sync_library(repo: Any, *, force: bool = False) -> SyncReport:
         if pkg is None:
             continue
         report.stories += 1
+        jobs = repo.jobs_for_package(pid)
+        archived = bool(jobs) and all(j.archived for j in jobs)
         images = repo.list_images(pkg.package_id, pkg.revision_id)
+        # Links a person made (phase 3): this story's character or set cast as another's.
+        linked = {c.story_id: c for c in repo.list_casting(package_id=pid) if c.source == "user"}
         # Its text changes with a new revision or a hand edit (each logged); its links with
-        # the set of pictures.
-        state = _print(pkg.revision_id, len(pkg.change_log), sorted(i.image_id for i in images))
+        # the set of pictures and of linked entities.
+        state = _print(pkg.revision_id, len(pkg.change_log), sorted(i.image_id for i in images),
+                       sorted((k, c.asset_id) for k, c in linked.items()), archived)  # fmt: skip
         if not force and _SYNCED.get((id(repo), pid)) == state:
             continue
         made = build(pkg, images)
+        apply_links(made, linked)
         for a in made.assets:
+            a.archived = archived
             old = repo.get_library_asset(a.asset_id)
             if old is None:
                 repo.save_library_asset(a)
                 report.added += 1
-            elif old.source_print != a.source_print:
+            elif (old.source_print, old.archived) != (a.source_print, a.archived):
                 repo.save_library_asset(a.model_copy(update={"created_at": old.created_at,
                                                              "updated_at": utcnow()}))  # fmt: skip
                 report.updated += 1
         for c in made.casting:
-            repo.save_casting(c)
+            if c.story_id not in linked:  # a person's link is kept
+                repo.save_casting(c)
         for link in made.images:
             repo.link_asset_image(link)
         report.pictures += len(made.images)

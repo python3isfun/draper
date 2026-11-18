@@ -48,6 +48,11 @@ class LibraryAsset(BaseModel):
     origin_entity_id: str
     # A fingerprint of the story text it mirrors: a sync rewrites it only when that changed.
     source_print: str = ""
+    # A story's own copy of a character or set the user linked to another story's (phase 3):
+    # hidden from the lists; its looks or states join that asset.
+    merged_into: str | None = None
+    # From a story whose jobs are all archived: kept, not shown (like the story itself).
+    archived: bool = False
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -59,6 +64,9 @@ class Casting(BaseModel):
     story_id: str
     asset_id: str
     kind: AssetKind
+    # "story": the story's own copy (synced); "user": linked by a person to another story's
+    # asset (kept by every sync until unlinked).
+    source: Literal["story", "user"] = "story"
 
 
 class AssetImage(BaseModel):

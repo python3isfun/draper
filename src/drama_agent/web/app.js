@@ -1024,7 +1024,9 @@ async function imageAction(url, button, body) {
   } catch (e) {
     failed = e.message;
   }
-  await loadImages(state.images.pkg || state.pkg);
+  // A library page keeps its own design data (designRefresh reloads it); the story's tab reloads here.
+  const reload = state.images.pkg || state.pkg;
+  if (reload) await loadImages(reload);
   // The action's own error wins: reloading the images succeeds and would clear it.
   if (failed) state.images.error = failed;
   designRefresh();
@@ -1200,20 +1202,54 @@ async function loadCasting(pkg) {
   if (castingCache.loading && castingCache.key === key) return;
   Object.assign(castingCache, { key, loading: true, error: "" });
   try {
-    const [rows, chars, sets] = await Promise.all([
+    const [rows, chars, sets, found] = await Promise.all([
       api(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/casting`),
       api("/v1/library/characters"),
       api("/v1/library/sets"),
+      api(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/casting/matches`),
     ]);
     if (castingCache.key !== key) return;
     const assets = Object.fromEntries([...chars, ...sets].map((a) => [a.asset_id, a]));
-    castingCache.data = { rows, assets };
+    const matches = Object.fromEntries(found.map((m) => [m.story_id, m]));
+    castingCache.data = { rows, assets, matches };
   } catch (e) {
     castingCache.error = e.message;
   } finally {
     castingCache.loading = false;
   }
   if (state.tab === "casting") renderWhenNotSelecting();
+}
+
+// On a Casting card: the same character or set in another story (link it, so this story
+// uses that asset and its looks or states join it), or the link it has (unlink it).
+function castingLink(pkg, storyId, kindLabel) {
+  const m = castingCache.data && castingCache.data.matches[storyId];
+  if (!m) return null;
+  const base = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/casting`;
+  const act = async (e, method, body, path = "") => {
+    e.currentTarget.disabled = true;
+    castingCache.error = "";
+    try {
+      await api(`${base}${path}`, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
+    } catch (err) {
+      castingCache.error = err.message;
+    }
+    castingCache.data = null;
+    await loadCasting(pkg);
+  };
+  if (m.linked) {
+    return h("div", { class: "small" },
+      h("span", { class: "chip ok", title: `This story uses ${m.linked.name} from ${m.linked.story}` }, `Shared with ${m.linked.story}`), " ",
+      h("button", { type: "button", class: "btn ghost small", title: `Make ${m.name} this story's own again`,
+        onclick: (e) => act(e, "DELETE", null, `/${encodeURIComponent(storyId)}`) }, "Unlink"));
+  }
+  const best = m.candidates[0];
+  if (!best) return null;
+  return h("div", { class: "small lib-match" },
+    h("span", { class: "muted", title: best.reason }, `Same as ${best.name} in ${best.story}?`), " ",
+    h("button", { type: "button", class: "btn small", title: `This story uses ${best.name} from ${best.story}; ${m.name}'s ${kindLabel === "character" ? "looks" : "states"} join it`,
+      onclick: (e) => act(e, "POST", { story_id: storyId, asset_id: best.asset_id }) }, "Link"),
+    m.candidates.length > 1 && h("span", { class: "muted" }, ` (+${m.candidates.length - 1} more)`));
 }
 
 function renderCasting(pkg) {
@@ -1229,9 +1265,11 @@ function renderCasting(pkg) {
     const a = row && c.assets[row.asset_id];
     if (!a) return h("div", { class: "card lib-card" }, h("div", { class: "lib-noimg big" }, "not in the library yet"), h("strong", {}, label));
     const sub = kindLabel === "character" ? `${a.children} look${a.children === 1 ? "" : "s"}` : `${a.children} state${a.children === 1 ? "" : "s"}`;
-    return h("a", { href: `#lib=${a.asset_id}`, class: "card lib-card", title: `Open ${a.name}: sheet, pictures, takes` },
-      a.cover ? h("img", { src: a.cover.thumb, alt: a.name, loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
-      h("strong", {}, a.name), h("span", { class: "muted small" }, `${sub} · ${a.items} item${a.items === 1 ? "" : "s"}`));
+    return h("div", { class: "card lib-card" },
+      h("a", { href: `#lib=${a.asset_id}`, class: "lib-card-link", title: `Open ${a.name}: sheet, pictures, takes` },
+        a.cover ? h("img", { src: a.cover.thumb, alt: a.name, loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
+        h("strong", {}, a.name), h("span", { class: "muted small" }, `${sub} · ${a.items} item${a.items === 1 ? "" : "s"}`)),
+      castingLink(pkg, storyId, kindLabel));
   };
   const bible = pkg.story_bible;
   return h("div", {},

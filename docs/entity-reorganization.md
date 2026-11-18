@@ -232,6 +232,36 @@ Each phase is shippable on its own, with draper and dramer working throughout.
   - **Removed:** the old tabs' code (the sheet tabs and their editor, `renderAssets`,
     `renderDesignBoard`, `editTextLinks`), about 300 lines.
 
+## Phase 3, step 1 as built (18 Nov 2026): matching and linking
+
+- **Matching** (`library/matching.py`): for each of a story's characters and sets, assets of
+  other stories with the same name (width-folded, so full-width brackets match), one name
+  containing the other, or the same first name, best first. This step matches by name only:
+  it is free and predictable. A person confirms.
+- **Linking** (`POST …/casting {story_id, asset_id}`; `DELETE …/casting/{story_id}` undoes it):
+  - **The story points at the shared asset:** the story's casting points at the other
+    story's asset, marked `source: "user"`, and every sync keeps it.
+  - **Its own copy is hidden:** it's marked `merged_into` and left out of the lists.
+  - **Its looks or states join the shared asset:** its looks or states (and items) hang off
+    the shared asset, so the library grows. They're still used by their own story's shots.
+  - **Its pictures stay visible:** they show on the shared page under "Also drawn in".
+- **Checks:** a link must be to the same kind of asset, from another story, not itself
+  linked elsewhere, and not from an archived story.
+- **Archived stories:** stories whose jobs are all archived (the pre-English-only Chinese
+  stories) are kept in the library but not shown or offered, like the stories themselves.
+- **UI:**
+  - **Casting tab cards:** each offers "Same as <name> in <story>? Link", or shows "Shared with
+    <story>" with Unlink.
+  - **Library pages:** they load each part's own story's design board, so a linked story's look
+    keeps its takes ("in its own story"), and each part's edits go to its own story.
+- **Next:**
+  - **Reuse:** use the shared asset's picked face (or set view) in the linked story, so its
+    looks are redrawn from it with the out-of-date tools.
+  - **Matching looks:** match looks and states that duplicate each other (the same "Apron" look
+    in both stories).
+  - **Suggestions:** propose matches when a new story is made, matched by the model, not only
+    by name.
+
 ## Risks and open questions
 
 1. **Same name is not the same character.** Casting across stories must be confirmed by a

@@ -9,7 +9,8 @@
  * out-of-date" redraws this asset's out-of-date pictures (and what is drawn from them).
  */
 
-const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "", timer: null, redrawing: "" };
+const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "", timer: null, redrawing: "",
+  designs: {}, designTimer: null };  // design board data per story revision on the page
 // Open editors by asset id; typed text is kept in `drafts` until saved or cancelled.
 const libEdit = { open: new Set(), drafts: {}, errors: {}, notes: {}, saving: new Set() };
 
@@ -36,8 +37,12 @@ async function libRoute(param) {
   setMode(meta.mode);
   const id = kindOfId(param || "") ? param : null;
   if (lib.kind !== kind) Object.assign(lib, { kind, list: null, filter: "" });
-  if (lib.id !== id) Object.assign(libEdit, { open: new Set(), drafts: {}, errors: {}, notes: {} });
+  if (lib.id !== id) {
+    Object.assign(libEdit, { open: new Set(), drafts: {}, errors: {}, notes: {} });
+    lib.designs = {};
+  }
   clearTimeout(lib.timer);
+  clearTimeout(lib.designTimer);
   lib.id = id;
   lib.view = null;
   lib.error = "";
@@ -176,6 +181,11 @@ function renderLibAsset(a) {
       libEdit.open.has(a.asset_id) ? libEditor(a) : [libSheet(a.sheet), libEditButton(a)],
       libEdit.notes[a.asset_id] && h("p", { class: "small muted" }, libEdit.notes[a.asset_id]),
       h("div", { class: "small" }, h("strong", {}, "Used in"), libUsedIn(a.used_in, "storyboard"))),
+    (a.also || []).length > 0 && h("section", { class: "card" },
+      h("h3", {}, "Also drawn in"),
+      h("p", { class: "muted small" }, `Other stories linked their ${a.kind === "character" ? "character" : "set"} to this one; these are their own pictures.`),
+      a.also.map((x) => h("div", {}, h("strong", { class: "small" }, storyLink(x.package_id, "casting", x.title || x.package_id)),
+        libPictures(x.pictures, `${a.name} (${x.title})`)))),
     h("h3", {}, `${meta.childLabel} (${a[meta.child].length})`),
     a[meta.child].length ? a[meta.child].map((x) => libPart(x, a.kind === "character" ? "look" : "state", a.origin_entity_id)) : h("p", { class: "muted" }, "None yet."),
     h("h3", {}, a.kind === "character" ? `Carried items (${a.items.length})` : `Dressing (${a.items.length})`),
@@ -247,7 +257,7 @@ async function libSave(part) {
   try {
     const r = await api(`/v1/drama-packages/${encodeURIComponent(part.origin_package_id)}/entries/${encodeURIComponent(part.origin_entity_id)}`, {
       method: "PATCH",
-      body: JSON.stringify({ revision_id: lib.view.origin_revision_id, sheet, bible: line == null ? {} : { description: line } }),
+      body: JSON.stringify({ revision_id: part.origin_revision_id || lib.view.origin_revision_id, sheet, bible: line == null ? {} : { description: line } }),
     });
     libEdit.open.delete(id);
     delete libEdit.drafts[id];
@@ -335,36 +345,38 @@ function libPoll(id, n) {
 
 // -- Takes and draws (the design board, per asset) -------------------------------------
 
-// The story revision whose design pictures this page shows (app.js loadImages / imagesKey).
-const libPkgRef = () => lib.view && lib.view.origin_revision_id
-  ? { package_id: lib.view.origin_package_id, revision_id: lib.view.origin_revision_id } : null;
-function libDesignKey() {
-  const ref = libPkgRef();
-  return ref ? imagesKey(ref) : null;
-}
-
-// After a design action or a poll: reload the asset (its picks may have changed), then
-// redraw, never under someone typing.
-let libAfterDesignBusy = false;
-async function libAfterDesign() {
-  if (libAfterDesignBusy) return;
-  libAfterDesignBusy = true;
-  try {
-    const meta = LIB_KINDS[lib.kind];
-    const id = lib.id;
-    if (id) {
-      const view = await api(`/v1/library/${meta.path}/${encodeURIComponent(id)}`).catch(() => null);
-      if (view && lib.id === id) lib.view = view;
-    }
-  } finally {
-    libAfterDesignBusy = false;
+// Each story revision whose design pictures are on this page (the asset's own, and those of
+// looks or states from linked stories), as "<package>|<revision>".
+function libStoryRefs() {
+  const v = lib.view;
+  if (!v) return [];
+  const meta = LIB_KINDS[v.kind];
+  const parts = [v, ...(v[meta.child] || []), ...(v.items || [])];
+  const refs = {};
+  for (const p of parts) {
+    if (p.origin_revision_id) refs[`${p.origin_package_id}|${p.origin_revision_id}`] = { package_id: p.origin_package_id, revision_id: p.origin_revision_id };
   }
-  if (!typingIn($("#main"))) renderLibrary();
+  return Object.values(refs);
+}
+const libDesignKey = () => null;  // the page keeps its own design data (app.js designOpen)
+
+async function libFetchDesigns() {
+  const refs = libStoryRefs();
+  const got = await Promise.all(refs.map((r) =>
+    api(`/v1/drama-packages/${encodeURIComponent(r.package_id)}/images?${new URLSearchParams({ revision_id: r.revision_id })}`).catch(() => null)));
+  const designs = {};
+  refs.forEach((r, i) => { if (got[i]) designs[imagesKey(r)] = got[i]; });
+  lib.designs = designs;
+  // While anything on the page is drawing, look again in a moment.
+  clearTimeout(lib.designTimer);
+  if (Object.values(designs).some((v) => v.queued > 0)) {
+    const id = lib.id;
+    lib.designTimer = setTimeout(() => { if (lib.id === id) libAfterDesign(); }, 2500);
+  }
 }
 
 function libLoadDesign() {
-  const ref = libPkgRef();
-  if (ref) loadImages(ref);
+  libFetchDesigns().then(() => { if (!typingIn($("#main"))) renderLibrary(); });
 }
 
 // The design slots (deliverables) that show this part: a character's face, a look, a set
@@ -380,19 +392,20 @@ function libSlots(part, v) {
 }
 
 function libDesign(part) {
-  const ref = libPkgRef();
-  const v = ref && state.images.key === imagesKey(ref) ? state.images.view : null;
-  if (!v) return h("p", { class: "muted small" }, state.images.error || "Loading takes…");
+  const ref = part.origin_revision_id ? { package_id: part.origin_package_id, revision_id: part.origin_revision_id } : null;
+  const v = ref && lib.designs[imagesKey(ref)];
+  if (!v) return h("p", { class: "muted small" }, "Loading takes…");
   const slots = libSlots(part, v);
   if (!slots.length) return null;
   const job = jobOf(part.origin_package_id);
   const picked = new Set(v.images.filter((i) => i.selected && i.status === "done").map(keyOf));
+  const foreign = lib.view && part.origin_package_id !== lib.view.origin_package_id;
   return slots.map((slot) => {
     const parent = slot.parent_key && `${slot.parent_key[0]}|${slot.parent_key[1]}`;
     const from = parent && v.slots.find((x) => keyOf(x) === parent);
     const blocked = parent && !picked.has(parent);
     const takes = v.options.filter((o) => keyOf(o) === keyOf(slot)).length;
-    return stickyDetails(`lib:${keyOf(slot)}`, `Takes and draws · ${slot.view} · ${count(takes, "take", "takes")}`,
+    return stickyDetails(`lib:${keyOf(slot)}`, `Takes and draws · ${slot.view} · ${count(takes, "take", "takes")}${foreign ? " · in its own story" : ""}`,
       renderTakeRows(v, slot),
       blocked
         ? h("p", { class: "muted small" }, `Drawn from ${from ? `${from.entity}${from.variant ? ` (${from.variant})` : ""}, ${from.view}` : "another picture"}: pick an image for it first.`)
@@ -402,14 +415,13 @@ function libDesign(part) {
 
 // Draws per new take, and draft or full size (shared with the Casting tab's controls).
 function libDesignControls() {
-  const ref = libPkgRef();
-  const v = ref && state.images.key === imagesKey(ref) ? state.images.view : null;
+  const queued = Object.values(lib.designs).reduce((n, v) => n + v.queued, 0);
   return h("div", { class: "design-row small" },
     h("span", { class: "muted" }, "New takes:"),
     h("span", { class: "muted" }, "draws"), numberSelect(design.draws, 6, (x) => { design.draws = x; renderLibrary(); }, "Draws per take"),
     h("select", { "aria-label": "Size", onchange: (e) => { design.draft = e.target.value === "draft"; renderLibrary(); } },
       h("option", { value: "draft", selected: design.draft }, "Draft (fast)"), h("option", { value: "full", selected: !design.draft }, "Full size")),
-    v && v.queued > 0 && h("span", { class: "chip info" }, `${v.queued} drawing…`),
+    queued > 0 && h("span", { class: "chip info" }, `${queued} drawing…`),
     state.images.error && h("span", { class: "warn-text" }, state.images.error),
     (state.images.notes || []).length > 0 && h("span", { class: "muted" }, state.images.notes.join(" ")));
 }

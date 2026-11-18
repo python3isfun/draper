@@ -233,6 +233,16 @@ story's **Casting** tab replaced its Cast, Sets, Props and Assets tabs: it holds
 story-wide Explore and Develop controls, the style brief, and the story's characters, sets
 and props, each linking to its library page (old links to those tabs land on Casting).
 
+**Casting across stories.** On a story's Casting tab, each character or set card offers
+"Same as <name> in <story>?" when another story has one with the same name (or one name
+containing the other, or the same first name). **Link** makes this story use that asset:
+its own copy is hidden, and its looks or states join the shared asset, still used by its
+own shots and drawn in its own story. Its pictures stay visible under "Also drawn in".
+**Unlink** undoes it. API: `GET /v1/drama-packages/{id}/casting/matches`,
+`POST /v1/drama-packages/{id}/casting` (`story_id`, `asset_id`),
+`DELETE /v1/drama-packages/{id}/casting/{story_id}`. Archived stories' assets are kept but
+not shown or offered.
+
 Each part has an **Edit** button. Your edit is saved to the story the asset came from (the
 same edit the story's sheets take), and the library follows. **Redraw out-of-date** redraws
 just this character's or set's out-of-date pictures, then what is drawn from them

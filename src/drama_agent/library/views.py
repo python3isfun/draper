@@ -70,6 +70,9 @@ def _used_in(repo: Any, a: LibraryAsset) -> list[dict[str, Any]]:
 def _entry(repo: Any, a: LibraryAsset, *, full: bool) -> dict[str, Any]:
     data = a.model_dump(mode="json")
     data["pictures"] = _pictures(repo, a)
+    # The story revision its edits go to (a look of a linked story goes to that story).
+    story = repo.get_package(a.origin_package_id)
+    data["origin_revision_id"] = story.revision_id if story is not None else None
     if full:
         data["used_in"] = _used_in(repo, a)
     return data
@@ -82,6 +85,13 @@ def asset_view(repo: Any, a: LibraryAsset) -> dict[str, Any]:
     story = repo.get_package(a.origin_package_id)
     out["origin_revision_id"] = story.revision_id if story is not None else None
     child = "look" if a.kind == "character" else "set_state"
+    # The copies other stories linked to this one: their own pictures, shown beside its own.
+    out["also"] = [
+        {"package_id": m.origin_package_id, "story_id": m.origin_entity_id,
+         "title": (p.story_bible.title if (p := repo.get_package(m.origin_package_id)) else ""),
+         "pictures": _pictures(repo, m)}
+        for m in repo.list_library_assets(kind=a.kind) if m.merged_into == a.asset_id
+    ]  # fmt: skip
     out["looks" if a.kind == "character" else "states"] = [
         _entry(repo, x, full=True) for x in repo.list_library_assets(kind=child, parent_id=a.asset_id)
     ]  # fmt: skip
@@ -94,7 +104,9 @@ def asset_list(repo: Any, kind: str) -> list[dict[str, Any]]:
     """Every character (or set) in name order, with its pictures and how much it owns."""
     child = "look" if kind == "character" else "set_state"
     out = []
-    for a in sorted(repo.list_library_assets(kind=kind), key=lambda x: x.name.lower()):
+    shown = [a for a in repo.list_library_assets(kind=kind)
+             if a.merged_into is None and not a.archived]  # fmt: skip
+    for a in sorted(shown, key=lambda x: x.name.lower()):
         entry = _entry(repo, a, full=False)
         children = repo.list_library_assets(kind=child, parent_id=a.asset_id)
         entry["children"] = len(children)
