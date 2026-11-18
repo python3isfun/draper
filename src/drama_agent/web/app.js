@@ -25,6 +25,51 @@ function h(tag, attrs, ...children) {
 
 const $ = (sel) => document.querySelector(sel);
 
+/**
+ * Show pictures full size over the page: `items` are {src, caption, title?}, opened at `start`.
+ * Left/right arrows (or the buttons) step through them; Escape, the close button or a click
+ * outside the picture closes it. It lives on <body>, so the board redrawing underneath
+ * doesn't close it.
+ */
+function enlarge(items, start = 0) {
+  if (!items.length) return;
+  $(".lightbox")?.remove();
+  let at = Math.max(0, Math.min(start, items.length - 1));
+  const img = h("img", { alt: "" });
+  const caption = h("figcaption", {});
+  const count = h("span", { class: "muted small" });
+  const show = () => {
+    const it = items[at];
+    img.src = it.src;
+    img.alt = it.title || it.caption || "";
+    caption.replaceChildren(h("strong", {}, it.caption || ""), it.title ? ` ${it.title}` : "");
+    count.textContent = items.length > 1 ? `${at + 1} / ${items.length}` : "";
+  };
+  const step = (d) => { at = (at + d + items.length) % items.length; show(); };
+  const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+    else if (e.key === "ArrowRight") step(1);
+    else if (e.key === "ArrowLeft") step(-1);
+  };
+  const more = items.length > 1;
+  const box = h("div", { class: "lightbox", role: "dialog", "aria-modal": "true", "aria-label": "Picture, full size",
+                         onclick: (e) => { if (e.target === box) close(); } },
+    h("figure", {},
+      img,
+      h("div", { class: "lightbox-bar" },
+        more && h("button", { type: "button", class: "btn ghost small", "aria-label": "Previous picture", onclick: () => step(-1) }, "‹"),
+        caption, count,
+        more && h("button", { type: "button", class: "btn ghost small", "aria-label": "Next picture", onclick: () => step(1) }, "›"),
+        h("a", { class: "btn ghost small", href: "#", target: "_blank", rel: "noopener",
+                 onclick: (e) => { e.currentTarget.href = items[at].src; } }, "Open"),
+        h("button", { type: "button", class: "btn ghost small", "aria-label": "Close", onclick: close }, "Close"))));
+  document.addEventListener("keydown", onKey);
+  document.body.append(box);
+  show();
+  box.querySelector("button[aria-label=Close]").focus();
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     ...opts,

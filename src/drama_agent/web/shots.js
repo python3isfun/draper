@@ -248,18 +248,21 @@ function renderNewFrameTake(pkg, shot, sub) {
   );
 }
 
-function refSrc(r) {
+function refSrc(r, variant = "thumb") {
   if (r.ref_id.startsWith("frame:")) {
     const [, takeId, n] = r.ref_id.split(":");
-    return `/v1/shot-takes/${encodeURIComponent(takeId)}/draws/${n}/thumb`;
+    return `/v1/shot-takes/${encodeURIComponent(takeId)}/draws/${n}/${variant}`;
   }
-  return `/v1/generated-images/${encodeURIComponent(r.ref_id)}/thumb`;
+  return `/v1/generated-images/${encodeURIComponent(r.ref_id)}/${variant}`;
 }
 
+// Each reference picture opens full size; the arrows step through the sub-shot's pictures.
 function renderRefStrip(sub) {
+  const items = sub.references.map((r, i) => ({ src: refSrc(r, "content"), caption: `<Picture ${i + 1}>`, title: r.role }));
   return h("div", { class: "ref-strip" }, sub.references.map((r, i) =>
-    h("figure", { class: "ref", title: r.role },
-      h("img", { src: refSrc(r), alt: r.role, loading: "lazy" }),
+    h("figure", { class: "ref", title: `${r.role} (click to enlarge)` },
+      h("button", { type: "button", class: "ref-open", "aria-label": `Enlarge <Picture ${i + 1}>: ${r.role}`, onclick: () => enlarge(items, i) },
+        h("img", { src: refSrc(r), alt: r.role, loading: "lazy" })),
       h("figcaption", {}, `<Picture ${i + 1}>`, r.likeness && h("span", { class: "warn-text" }, " · likeness")))));
 }
 
@@ -365,8 +368,14 @@ function renderChoices(pkg, shot, sub) {
     const select = h("select", { "aria-label": `Picture for ${c.name}`, onchange: (e) =>
       frameAction(url, null, { revision_id: pkg.revision_id, sub_shot: sub.index, character_id: c.character_id, image_id: e.target.value }) },
       c.candidates.map((x) => h("option", { value: x.image_id, selected: x.image_id === c.image_id, title: x.shows }, x.label.slice(0, 70))));
+    // Opens on the chosen picture; the arrows step through the person's other pictures to compare.
+    const pool = c.candidates.some((x) => x.image_id === c.image_id) ? c.candidates : [{ image_id: c.image_id, label: c.name, shows: c.shows }, ...c.candidates];
+    const items = pool.map((x) => ({ src: `/v1/generated-images/${encodeURIComponent(x.image_id)}/content`,
+      caption: `${c.name}${x.image_id === c.image_id ? " (drawn from)" : ""}`, title: x.label }));
     return h("div", { class: "choice" },
-      h("img", { src: `/v1/generated-images/${encodeURIComponent(c.image_id)}/thumb`, alt: c.name, loading: "lazy", title: c.shows || "" }),
+      h("button", { type: "button", class: "ref-open", "aria-label": `Enlarge ${c.name}'s picture`, title: `${c.shows || c.name} (click to enlarge)`,
+                    onclick: () => enlarge(items, pool.findIndex((x) => x.image_id === c.image_id)) },
+        h("img", { src: `/v1/generated-images/${encodeURIComponent(c.image_id)}/thumb`, alt: c.name, loading: "lazy" })),
       h("div", { class: "small" },
         h("div", {}, h("strong", {}, c.name), " ", h("span", { class: "muted" }, stateLine(c.state))),
         c.keep.length > 0 && h("div", { class: "muted" }, `The picture already has: ${c.keep.join(", ")}`),
