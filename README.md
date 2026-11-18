@@ -221,7 +221,14 @@ Read it with:
 - `GET /v1/drama-packages/{id}/casting`;
 - `POST /v1/library/sync` (`force=true` to rewrite everything).
 
-The UI and editing in the library come next.
+In the app, **Characters** and **Sets** in the top bar open the library:
+- a grid of every character or set, each with its cover, and a filterable list beside it;
+- one character or set with its sheet, its looks or states, and its items. Each has its
+  current pictures (click to enlarge; out-of-date ones are marked), its one-line
+  description, its sheet, and the stories and shots that use it, with links into them.
+
+Editing still happens in the story ("Edit in its story" opens its Cast or Sets tab), and the
+library follows.
 
 ### Reference images
 

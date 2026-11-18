@@ -205,6 +205,18 @@ Each phase is shippable on its own, with draper and dramer working throughout.
 - **On the live database:** 7 stories gave 30 characters, 17 sets and 452 linked pictures.
   Opening it upgrades it to schema 12, and older draper code refuses a newer schema.
 
+## Phase 2, step 1 as built (18 Nov 2026)
+
+- **The pages:** Characters and Sets in the top bar (`web/library.js`, `#lib=characters`,
+  `#lib=sets`, `#lib=<asset id>`). Each shows a grid with covers and a filterable sidebar.
+  An asset's page has its sheet, looks or states, and items. Each part shows its pictures
+  (enlarge on click; `outdated` reasons from the design-edit rules), and the stories and
+  shots that use it, with links.
+- **Still to do in phase 2:**
+  - edit on these pages, still saving to the origin story for now;
+  - "Redraw out-of-date" on these pages;
+  - fold the Cast, Sets, Props and Assets tabs into them.
+
 ## Risks and open questions
 
 1. **Same name is not the same character.** Casting across stories must be confirmed by a

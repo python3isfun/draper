@@ -620,3 +620,25 @@ td.mono { white-space: nowrap; }
 .edit-links { margin-top: 4px; }
 .linklike { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; }
 .card.entity { scroll-margin-top: 84px; }  /* clear the sticky header */
+
+/* The asset library: Characters and Sets */
+.lib-list { list-style: none; padding: 0; margin: 0; }
+.lib-side-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; color: var(--text); text-decoration: none; }
+.lib-side-item:hover, .lib-side-item.active { background: var(--accent-soft); }
+.lib-side-item img, .lib-side-item .lib-noimg { width: 32px; height: 40px; object-fit: cover; border-radius: 4px; background: var(--surface-2); flex: 0 0 32px; }
+.lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+.lib-card { display: flex; flex-direction: column; gap: 4px; padding: 8px; color: var(--text); text-decoration: none; min-width: 0; }
+.lib-card:hover { border-color: var(--accent); }
+.lib-card img, .lib-noimg.big { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 6px; background: var(--surface-2); }
+.lib-noimg.big { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
+.lib-pics { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0; }
+.lib-pic { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.lib-pic img { display: block; height: 180px; max-width: 100%; object-fit: cover; border-radius: 6px; background: var(--surface-2); }
+.lib-pic figcaption { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; color: var(--muted); }
+.lib-sheet { display: grid; grid-template-columns: minmax(120px, max-content) 1fr; gap: 4px 12px; margin: 8px 0; font-size: 13px; }
+.lib-sheet dt { color: var(--muted); }
+.lib-sheet dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.lib-part { margin-top: 10px; }
+.lib-asset h3 { margin: 16px 0 4px; }
+@media (max-width: 640px) { .lib-sheet { grid-template-columns: 1fr; } .lib-pic img { height: 140px; } }
+.modes a { white-space: nowrap; }

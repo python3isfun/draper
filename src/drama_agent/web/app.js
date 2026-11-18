@@ -123,6 +123,15 @@ window.addEventListener("hashchange", route);
 
 async function route() {
   const params = new URLSearchParams(location.hash.slice(1));
+  if (params.has("lib")) {
+    // Characters and Sets: the asset library (library.js).
+    clearTimeout(state.pollTimer);
+    stopActivity();
+    stopExp();
+    stopFace();
+    await libRoute(params.get("lib"));
+    return;
+  }
   if (params.has("exp") || params.has("face")) {
     clearTimeout(state.pollTimer);
     stopActivity();

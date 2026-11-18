@@ -55,6 +55,7 @@ function setMode(mode) {
   $("#drama-side").hidden = mode !== "drama";
   $("#exp-side").hidden = mode !== "exp";
   $("#face-side").hidden = mode !== "face";
+  $("#lib-side").hidden = mode !== "chars" && mode !== "sets";
   for (const a of document.querySelectorAll(".modes a")) {
     const on = a.dataset.mode === mode;
     a.classList.toggle("active", on);

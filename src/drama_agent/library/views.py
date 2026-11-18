@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..images import selected_image
+from ..images import outdated_pictures, selected_image
 from .models import LibraryAsset
 
 
@@ -15,10 +15,14 @@ def _pictures(repo: Any, a: LibraryAsset) -> list[dict[str, Any]]:
     if not links:
         return []
     by_rev: dict[tuple[str, str], list[Any]] = {}
+    stale: dict[tuple[str, str], dict[str, list[str]]] = {}
     for link in links:
         key = (link.package_id, link.revision_id)
         if key not in by_rev:
             by_rev[key] = repo.list_images(*key)
+            pkg = repo.get_package(*key)
+            # Out of date after a design edit (the same rules as the Assets tab).
+            stale[key] = outdated_pictures(pkg, by_rev[key]) if pkg is not None else {}
     out = []
     seen: set[tuple[str, str]] = set()
     for link in links:
@@ -32,6 +36,8 @@ def _pictures(repo: Any, a: LibraryAsset) -> list[dict[str, Any]]:
         out.append({
             "image_id": pick.image_id, "view": link.view, "size": pick.size,
             "picked": pick.selected, "likeness": pick.likeness,
+            "outdated": stale[(link.package_id, link.revision_id)].get(pick.image_id, []),
+            "package_id": link.package_id, "revision_id": link.revision_id,
             "imported_from": pick.imported_from,
             "content": f"/v1/generated-images/{pick.image_id}/content",
             "thumb": f"/v1/generated-images/{pick.image_id}/thumb",

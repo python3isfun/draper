@@ -111,6 +111,15 @@ def test_the_library_api_reads_characters_sets_and_casting(tmp_path):
         assert sets and all(s["cover"] for s in sets)
         place = b.http.get(f"/v1/library/sets/{sets[0]['asset_id']}").json()
         assert place["states"] and place["states"][0]["pictures"][0]["view"] == "wide"
+        assert all(p["outdated"] == [] for st in place["states"] for p in st["pictures"])
+        # After a design edit, the set's pictures say they are out of date.
+        loc = pkg.set_sheet.locations[0].location_id
+        b.http.patch(f"/v1/drama-packages/{b.pid}/entries/{loc}",
+                     json={"revision_id": pkg.revision_id, "sheet": {"layout": "A new room"}})  # fmt: skip
+        mine = next(s for s in sets if s["origin_entity_id"] == loc)
+        place = b.http.get(f"/v1/library/sets/{mine['asset_id']}").json()
+        assert place["sheet"]["layout"] == "A new room"
+        assert any(p["outdated"] for st in place["states"] for p in st["pictures"])
         # A character id asked for as a set is not found.
         assert b.http.get(f"/v1/library/sets/{one['asset_id']}").status_code == 404
         casting = b.http.get(f"/v1/drama-packages/{b.pid}/casting").json()
