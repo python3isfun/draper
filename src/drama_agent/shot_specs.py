@@ -64,6 +64,7 @@ def shot_specs(
     readings: dict[str, SceneReading | None],
     images: list[GeneratedImage],
     exported: dict[str, str],
+    outdated: dict[tuple[str, int], list[str]] | None = None,
 ) -> dict[str, Any]:
     """The shot specs of every shot in shot-list order. `keyframes` maps (shot, sub-shot)
     to its approved keyframe's file in shot_keyframes/; `readings` each scene's fresh
@@ -213,6 +214,10 @@ def shot_specs(
             not_ready += [
                 f"[Shot {i}] has no approved keyframe" for i, f in frames.items() if not f
             ]
+            # An approved keyframe drawn before a design change (outdated_keyframes).
+            not_ready += [f"[Shot {i}]'s keyframe is out of date: {'; '.join(why)}"
+                          for i, f in frames.items()
+                          if f and (why := (outdated or {}).get((shot.shot_id, i)))]  # fmt: skip
             st = set_states.get(shot.location_state_id)
             out.append({
                 "shot_id": shot.shot_id,

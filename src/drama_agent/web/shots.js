@@ -404,7 +404,9 @@ function renderSubShot(pkg, shot, sub, total) {
     h("div", { class: "take-head" },
       h("h4", { style: "margin:0" }, total > 1 ? `[Shot ${sub.index}] at ${sub.timecode}` : "Keyframe"),
       h("span", { class: "muted small" }, `${secs(sub.start_ms)}–${secs(sub.end_ms)}`),
-      h("span", { class: `chip ${sub.approved ? "ok" : "warn"}` }, sub.approved ? "approved ✓" : "approve one")),
+      h("span", { class: `chip ${sub.approved ? "ok" : "warn"}` }, sub.approved ? "approved ✓" : "approve one"),
+      (sub.outdated || []).length > 0 && h("span", { class: "chip warn", title: sub.outdated.join("; ") }, "out of date")),
+    (sub.outdated || []).length > 0 && h("p", { class: "small warn-text" }, `The approved keyframe is out of date: ${sub.outdated.join("; ")}. Draw a new take and approve it.`),
     total > 1 && h("p", { class: "small" }, h("strong", {}, sub.framing), sub.camera ? ` ${sub.camera}` : "", " — ", sub.action),
     total > 1 && h("p", { class: "small muted" }, sub.people_names.length
       ? `On screen: ${sub.people.map((id, i) => `${sub.people_names[i]}${sub.placement[id] ? ` (${sub.placement[id]})` : ""}`).join(", ")}`
@@ -448,6 +450,7 @@ function renderKeyframes(pkg) {
   const subTotal = shots.reduce((n, s) => n + s.sub_shots.length, 0);
   const subApproved = shots.reduce((n, s) => n + s.sub_shots.filter((x) => x.approved).length, 0);
   const blocked = shots.filter((s) => s.sub_shots[0].missing.length).length;
+  const outdated = shots.filter((s) => s.sub_shots.some((x) => (x.outdated || []).length)).length;
   const episodes = [...new Set(shots.map((s) => s.episode_id))];
   const shown = frames.episode === "all" ? shots : shots.filter((s) => s.episode_id === frames.episode);
   const controls = h("section", { class: "card" },
@@ -458,6 +461,7 @@ function renderKeyframes(pkg) {
       h("span", { class: `chip ${complete === shots.length ? "ok" : "info"}` }, `${complete}/${shots.length} shots complete`),
       h("span", { class: "chip" }, `${subApproved}/${subTotal} sub-shot keyframes approved`),
       blocked > 0 && h("span", { class: "chip warn" }, `${blocked} waiting for design picks`),
+      outdated > 0 && h("span", { class: "chip warn", title: "Approved keyframes drawn before a design change" }, `${outdated} with out-of-date keyframes`),
       v.busy > 0 && h("span", { class: "chip info" }, `${v.busy} running`)),
     h("div", { class: "design-row" },
       h("label", {}, "Draws ", numberSelect(frames.draws, 4, (n) => { frames.draws = n; }, "Draws per round")),
@@ -472,6 +476,11 @@ function renderKeyframes(pkg) {
         if (out) frames.notes = out.skipped.map((s) => `${s.shot_id}: ${s.reason}`);
         renderMain();
       } }, "Plan cuts and draw first keyframes for every shot"),
+      outdated > 0 && h("button", { type: "button", class: "btn", title: "A new take for each shot's first out-of-date cut; approving it starts the next out-of-date cut", onclick: async (e) => {
+        const out = await frameAction(framesBase(pkg), e.currentTarget, { revision_id: pkg.revision_id, draws: frames.draws, max_rounds: frames.rounds, outdated: true, provider: frames.provider });
+        if (out) frames.notes = out.skipped.map((s) => `${s.shot_id}: ${s.reason}`);
+        renderMain();
+      } }, `Redraw out-of-date keyframes (${outdated} shots)`),
       episodes.length > 1 && h("select", { "aria-label": "Episode", onchange: (e) => { frames.episode = e.target.value; renderMain(); } },
         h("option", { value: "all", selected: frames.episode === "all" }, "All episodes"),
         episodes.map((ep) => h("option", { value: ep, selected: frames.episode === ep }, ep)))),

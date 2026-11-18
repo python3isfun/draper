@@ -55,14 +55,17 @@ from ..images import (
     ImageWorker,
     NeedsPick,
     design_slots,
+    design_text,
     draws_for,
     image_client_from_env,
     import_pick,
     keyframe_providers_from_env,
     latest_images,
     make_thumb,
+    outdated_pictures,
     package_has_uploads,
     plan_images,
+    plan_refresh,
     slot_title,
     take_draws,
 )
@@ -170,6 +173,9 @@ class ImagesView(BaseModel):
     slots: list[dict] = []
     queued: int = 0  # pending + running images of any version or draw
     notes: list[str] = []
+    # Picks that are out of date (image id -> why): drawn from earlier design text, or from
+    # a picture that was replaced or is out of date itself.
+    outdated: dict[str, list[str]] = {}
 
 
 class ExploreRequest(BaseModel):
@@ -435,8 +441,31 @@ def create_app(
             slots=design_slots(pkg),
             queued=sum(1 for i in imgs if i.status in ("pending", "running")),
             notes=notes or [],
+            outdated=outdated_pictures(pkg, imgs),
             **counts,
         )
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/images/refresh", status_code=202, response_model=ImagesView
+    )
+    async def refresh_images(package_id: str, revision_id: str | None = None) -> ImagesView:
+        """Redraw the out-of-date picks, in order: those drawn from up-to-date pictures now;
+        each takes over its pick when done, and the pictures drawn from the one it replaced
+        follow (a set's wide view, then its other states and its plan view). A hand-written
+        prompt is kept; a model-written one is rewritten when the design text changed."""
+        pkg = _package_or_404(package_id, revision_id)
+        _package_job(pkg.package_id, None, pkg.revision_id)
+        existing = repo.list_images(pkg.package_id, pkg.revision_id)
+        stale = outdated_pictures(pkg, existing)
+        new = plan_refresh(pkg, existing)
+        _save_new([], new)
+        later = sum(
+            1 for why in stale.values() if "drawn from a picture that is out of date" in why
+        )
+        notes = [f"Redrawing {len(new)} out-of-date picture{'s' * (len(new) != 1)}."]
+        if later:
+            notes.append(f"{later} more follow once the pictures they are drawn from are redrawn.")
+        return _images_view(pkg, notes)
 
     @app.get("/v1/drama-packages/{package_id}/images", response_model=ImagesView)
     async def list_package_images(package_id: str, revision_id: str | None = None) -> ImagesView:
@@ -692,6 +721,7 @@ def create_app(
             prompt,
             draws=req.draws or max(1, min(6, len(mine))),
             warnings=found,
+            design=design_text(pkg, (source.requirement_id, source.deliverable_id)),
         )
         _save_new([opt], imgs)
         return opt

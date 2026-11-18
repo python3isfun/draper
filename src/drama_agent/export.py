@@ -42,6 +42,7 @@ from .shot_frames import (
     ShotTake,
     SubShot,
     current_sub,
+    outdated_keyframes,
     plan_of,
     plan_problems,
     shot_lines,
@@ -704,7 +705,11 @@ def build_export(
                                     fresh)),
             )  # fmt: skip
         # Each shot's complete spec for video production, with its references in order.
-        text(SHOT_SPECS_PATH, _json(shot_specs(pkg, stored, files, n, fresh, images, exported)))
+        stale = outdated_keyframes(pkg, images, keyframes or [], plans or [])
+        outdated = {(t.shot_id, t.sub_shot): stale[t.take_id] for t in keyframes or []
+                    if t.take_id in stale}  # fmt: skip
+        text(SHOT_SPECS_PATH,
+             _json(shot_specs(pkg, stored, files, n, fresh, images, exported, outdated)))  # fmt: skip
 
         # Design takes: the chosen take per deliverable, and every other option
         slot_names = {

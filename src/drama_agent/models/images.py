@@ -88,6 +88,8 @@ class GeneratedImage(BaseModel):
     # Where an imported image came from (e.g. "experiment exp_x #17"); None if drawn here.
     imported_from: str | None = None
     finalizes: str | None = None  # the draft image this full-size render replaces
+    # The out-of-date pick this redraw replaces: it takes over the pick when done.
+    refreshes: str | None = None
     model: str = ""
     file: str | None = None  # relative to the media store
     thumb: str | None = None

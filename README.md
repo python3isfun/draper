@@ -177,6 +177,23 @@ Every entry also lists `must_keep` (what the story depends on) and `design_freed
   Images already drawn stay as they are, and the response lists them (`drawn_before`).
   IDs and names can't be edited. The edit is refused (409) if the entry, its parent, or a
   requirement built from it is locked, or while a job is still running on the story.
+- **What an edit makes out of date, and redrawing it in order.** A picked image is out of
+  date when the design text it was drawn from changed (it records that text in its `brief`),
+  or a picture it was drawn from was replaced or is out of date itself (a set's other
+  states and plan views are drawn from its first wide view; a look from the face). The
+  Assets tab marks each one ("Out of date: …", `outdated` on `GET …/images`) and **Redraw
+  out-of-date images** (`POST /v1/drama-packages/{id}/images/refresh`) redraws those whose
+  pictures are up to date; each redraw replaces its pick when done, and the images drawn
+  from it are redrawn next, so a redesigned set goes wide view, then its other states and
+  plan views. A hand-written prompt is kept; a model-written one is rewritten when the text
+  changed. A take you write after the edit records the text as it is now. An approved
+  **keyframe** is out of date when the set, look or prop text it was written against
+  changed, a design picture it was drawn from was replaced or is out of date, or the
+  keyframe it continues from changed. The Keyframes tab marks it; **Redraw out-of-date
+  keyframes** (`{"outdated": true}` on the batch) starts a take for each shot's first such
+  cut once its design pictures are redrawn, and approving it starts the next cut. Until then
+  the export's `shot_specs.json` lists the shot as not ready ("[Shot N]'s keyframe is out of
+  date: …"). A look edit also makes the scene's reading stale, so it is read again.
 
 ### Reference images
 

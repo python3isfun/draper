@@ -1,0 +1,204 @@
+"""A set redesigned after keyframes exist: what goes out of date, and redrawing it in order.
+
+A hand edit to a set's text (sheet_edit) makes its pictures out of date; the pictures drawn
+from them (its other states, its plan views) wait for them; the approved keyframes drawn
+from them are out of date too, and the export says the shots aren't ready. Redrawing goes
+in order: the set's first wide view, then what is drawn from it, then the keyframes.
+"""
+
+import json
+import time
+
+from drama_agent.images import (
+    PICTURE_OUTDATED,
+    PICTURE_REPLACED,
+    TEXT_CHANGED,
+    outdated_pictures,
+)
+from drama_agent.shot_frames import _cached, design_print
+from drama_agent.shot_reading import fingerprint
+
+from .test_shot_frames import Board, member
+
+NEW_ROOM = "Low charcoal mohair sofa against the left wall; king-size bed in a walnut surround"
+
+
+def picks(b: Board) -> dict:
+    return b.http.get(f"/v1/drama-packages/{b.pid}/images").json()
+
+
+def images_idle(b: Board, timeout: float = 30.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while (v := picks(b))["queued"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    return v
+
+
+def location_of(b: Board, shot_id: str) -> str:
+    pkg = b.repo.get_package(b.pid)
+    return next(s.location_id for s in pkg.shot_list if s.shot_id == shot_id)
+
+
+def set_field(b: Board, location_id: str) -> str:
+    pkg = b.repo.get_package(b.pid)
+    loc = next(x for x in pkg.set_sheet.locations if x.location_id == location_id)
+    return "key_furnishings" if hasattr(loc, "key_furnishings") else "layout"
+
+
+def edit_set(b: Board, location_id: str, text: str = NEW_ROOM):
+    r = b.http.patch(
+        f"/v1/drama-packages/{b.pid}/entries/{location_id}",
+        json={"revision_id": b.repo.get_package(b.pid).revision_id,
+              "sheet": {set_field(b, location_id): text}},
+    )  # fmt: skip
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def by_image(v: dict) -> dict:
+    return {i["image_id"]: i for i in v["images"]}
+
+
+def test_nothing_is_out_of_date_before_an_edit(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        assert picks(b)["outdated"] == {}
+        sid = b.board()["shots"][0]["shot_id"]
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        b.http.post(f"/v1/shot-takes/{take['take_id']}/approve", json={"n": 0, "next": False})
+        assert b.shot(sid)["sub_shots"][0]["outdated"] == []
+
+
+def test_a_redesigned_set_is_redrawn_in_order_and_its_keyframes_follow(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = b.board()["shots"][0]["shot_id"]
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        b.http.post(f"/v1/shot-takes/{take['take_id']}/approve", json={"n": 0, "next": False})
+        loc = location_of(b, sid)
+
+        edit_set(b, loc)
+        v = picks(b)
+        imgs = by_image(v)
+        mine = {k: why for k, why in v["outdated"].items() if loc in imgs[k]["requirement_id"]}
+        assert mine, "the set's pictures are out of date"
+        assert all(TEXT_CHANGED in why for why in mine.values())
+        # What is drawn from the set's first picture waits for it.
+        waiting = [k for k, why in mine.items() if PICTURE_OUTDATED in why]
+        roots = [k for k, why in mine.items() if PICTURE_OUTDATED not in why]
+        assert roots and waiting
+        # The keyframe drawn from it is out of date, and the export says the shot isn't ready.
+        sub = b.shot(sid)["sub_shots"][0]
+        assert any(w.startswith(PICTURE_OUTDATED) for w in sub["outdated"])
+        specs = json.loads(member(b.zip(), "03_storyboard/shot_specs.json"))
+        spec = next(s for s in specs["shots"] if s["shot_id"] == sid)
+        assert not spec["ready"] and any("out of date" in r for r in spec["not_ready"])
+        # A keyframe can't be redrawn before the pictures it is drawn from.
+        r = b.http.post(b.base, json={"outdated": True, "draws": 1})
+        assert (
+            r.json()["started"] == []
+            and "design pictures first" in r.json()["skipped"][0]["reason"]
+        )
+
+        # Redraw: the first wide view now; the rest follow as each replaces its pick.
+        r = b.http.post(f"/v1/drama-packages/{b.pid}/images/refresh")
+        assert r.status_code == 202 and r.json()["notes"]
+        v = images_idle(b)
+        assert not any(loc in by_image(v)[k]["requirement_id"] for k in v["outdated"])
+        redrawn = [i for i in v["images"] if i.get("refreshes")]
+        assert {i["refreshes"] for i in redrawn} >= set(mine)
+        # Each redraw finished and is the pick now.
+        assert all(i["status"] == "done" for i in redrawn)
+        current = {(i["requirement_id"], i["deliverable_id"]): i["image_id"] for i in v["images"]
+                   if i["selected"]}  # fmt: skip
+        assert all(current.get((i["requirement_id"], i["deliverable_id"]), i["image_id"])
+                   == i["image_id"] for i in redrawn)  # fmt: skip
+
+        # The keyframe is now out of date because its set picture was replaced: redraw it.
+        sub = b.shot(sid)["sub_shots"][0]
+        assert any(w.startswith(PICTURE_REPLACED) for w in sub["outdated"])
+        r = b.http.post(b.base, json={"outdated": True, "draws": 1})
+        [new_id] = r.json()["started"]
+        b.wait()
+        new = next(t for t in b.takes(sid) if t["take_id"] == new_id)
+        assert new["design_print"]
+        b.http.post(f"/v1/shot-takes/{new_id}/approve", json={"n": 0, "next": False})
+        assert b.shot(sid)["sub_shots"][0]["outdated"] == []
+
+
+def test_approving_a_redrawn_cut_redraws_the_next_one(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        shot = b.busiest()
+        sid = shot["shot_id"]
+        b.http.post(f"{b.base}/{sid}/plan", json=b.two_cuts(shot))
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [one] = b.wait() and b.takes(sid)
+        b.http.post(f"/v1/shot-takes/{one['take_id']}/approve", json={"n": 0})
+        [two] = b.wait() and b.takes(sid, 2)
+        b.http.post(f"/v1/shot-takes/{two['take_id']}/approve", json={"n": 0, "next": False})
+        # A new first cut is approved: the second, drawn from the old one, is redrawn.
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        again = b.takes(sid)[-1]
+        b.http.post(f"/v1/shot-takes/{again['take_id']}/approve", json={"n": 0})
+        b.wait()
+        second = b.shot(sid)["sub_shots"][1]
+        assert len(second["takes"]) == 2
+        b.http.post(f"/v1/shot-takes/{second['takes'][-1]['take_id']}/approve", json={"n": 0})
+        assert b.shot(sid)["sub_shots"][1]["outdated"] == []
+
+
+def test_your_own_wording_after_an_edit_is_not_out_of_date(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = b.board()["shots"][0]["shot_id"]
+        loc = location_of(b, sid)
+        v = picks(b)
+        opt = next(o for o in v["options"] if loc in o["requirement_id"]) if v["options"] else None
+        if opt is None:  # designs drawn without takes: explore one
+            b.http.post(f"/v1/drama-packages/{b.pid}/images/explore",
+                        json={"takes": 1, "draws": 1, "scope": ["sets"]})  # fmt: skip
+            v = images_idle(b)
+            opt = next(o for o in v["options"] if loc in o["requirement_id"])
+        edit_set(b, loc)
+        r = b.http.post(f"/v1/image-options/{opt['option_id']}/edit",
+                        json={"prompt": opt["prompt"] or "An empty room. The image contains "
+                              "no text, letters or numbers.", "draws": 1})  # fmt: skip
+        assert r.status_code == 202, r.text
+        v = images_idle(b)
+        mine = [i for i in v["images"] if i.get("option_id") == r.json()["option_id"]]
+        assert mine and all(i["brief"]["requirement_brief"] for i in mine)
+        pkg = b.repo.get_package(b.pid)
+        imgs = b.repo.list_images(pkg.package_id, pkg.revision_id)
+        b.http.post(f"/v1/generated-images/{mine[0]['image_id']}/select")
+        imgs = b.repo.list_images(pkg.package_id, pkg.revision_id)
+        assert TEXT_CHANGED not in outdated_pictures(pkg, imgs).get(mine[0]["image_id"], [])
+
+
+def test_a_look_edit_makes_the_scene_reading_stale(package):
+    shot = next(s for s in package.shot_list if s.character_ids)
+    before = fingerprint(package, shot.scene_id, {}, [])
+    look = next(lk for lk in package.cast_sheet.looks if lk.character_id in shot.character_ids)
+    look.wardrobe = "A long grey raincoat"
+    assert fingerprint(package, shot.scene_id, {}, []) != before
+
+
+def test_a_design_edit_changes_what_a_keyframe_was_written_against(package):
+    shot = next(s for s in package.shot_list if s.character_ids)
+    before = design_print(package, shot)
+    loc = next(x for x in package.set_sheet.locations if x.location_id == shot.location_id)
+    loc.layout = "A different room"
+    assert design_print(package, shot) != before
+
+
+def test_a_cache_never_outlives_a_hand_edit(package):
+    from drama_agent.models.package import ChangeLogEntry
+
+    first = _cached(package, "probe", lambda: "before")
+    package.change_log.append(ChangeLogEntry(revision_id=package.revision_id, target_ids=["x"],
+                                             changed_ids=["x"], note="edit"))  # fmt: skip
+    assert first == "before" and _cached(package, "probe", lambda: "after") == "after"

@@ -11,8 +11,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from ..content_guard import GuardRefused, screen
+from ..images import PICTURE_OUTDATED
 from ..media import MediaStore
 from ..models import ProductionPackage
+from ..models.images import GeneratedImage
 from ..models.package import utcnow
 from ..models.storyboard import Shot
 from ..shot_frames import (
@@ -34,6 +36,7 @@ from ..shot_frames import (
     is_busy,
     is_hard,
     make_sub_shots,
+    outdated_keyframes,
     plan_of,
     plan_take,
     prompt_findings,
@@ -80,6 +83,9 @@ class KeyframeBatchRequest(BaseModel):
     # Plan the sub-shots of shots that have no plan first (the text model), then draw.
     plan: bool = True
     provider: str | None = Field(None, max_length=40)
+    # Redraw out-of-date keyframes instead: per shot, the first cut whose approved keyframe
+    # is out of date (the later ones follow as each is approved).
+    outdated: bool = False
 
 
 class SubShotIn(BaseModel):
@@ -114,7 +120,8 @@ class ChoiceRequest(BaseModel):
 
 class ApproveRequest(BaseModel):
     n: int = Field(ge=0)
-    # Start the next sub-shot's keyframe (when it has none yet), with the same settings.
+    # Start the next sub-shot's keyframe, drawn from this one, with the same settings
+    # (unless it already has a take drawn from this one).
     next: bool = True
 
 
@@ -427,6 +434,8 @@ def register(
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         plans = {p.shot_id: p for p in repo.list_shot_plans(pkg.package_id, pkg.revision_id)}
         images = repo.list_images(pkg.package_id, pkg.revision_id)
+        if req.outdated:
+            return _redraw_outdated(pkg, takes, plans, images, req)
         ids = (
             req.shot_ids
             if req.shot_ids is not None
@@ -478,6 +487,71 @@ def register(
             runner.start(take_id)
         return {"started": started, "planning": planning, "skipped": skipped}
 
+    def _drawn_from(
+        pkg: ProductionPackage, shot: Shot, plan: ShotPlan, index: int, frame: str
+    ) -> bool:
+        """Whether sub-shot `index` has a take (for the plan as it is) drawn from `frame`,
+        or one still being made."""
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        if is_busy(takes, shot.shot_id, index):
+            return True
+        return any(
+            t.shot_id == shot.shot_id and t.sub_shot == index
+            and current_sub(pkg, shot, plan, t) is not None
+            and t.references and t.references[0].ref_id == frame
+            for t in takes
+        )  # fmt: skip
+
+    def _redraw_outdated(
+        pkg: ProductionPackage,
+        takes: list[ShotTake],
+        plans: dict[str, ShotPlan],
+        images: list[GeneratedImage],
+        req: KeyframeBatchRequest,
+    ) -> dict[str, Any]:
+        """A new take for each shot's first out-of-date cut. A cut drawn from a design
+        picture that is out of date waits until that picture is redrawn."""
+        try:
+            options = runner.take_options(req.provider)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        stale = outdated_keyframes(pkg, images, takes, list(plans.values()))
+        by_shot: dict[str, list[ShotTake]] = {}
+        for t in takes:
+            if t.take_id in stale:
+                by_shot.setdefault(t.shot_id, []).append(t)
+        started, skipped = [], []
+        scene_reading: dict[str, SceneReading | None] = {}
+        for shot in pkg.shot_list:
+            if shot.shot_id not in by_shot or (
+                req.shot_ids is not None and shot.shot_id not in req.shot_ids
+            ):
+                continue
+            first = min(by_shot[shot.shot_id], key=lambda t: t.sub_shot)
+            if is_busy(takes, shot.shot_id):
+                skipped.append({"shot_id": shot.shot_id, "reason": "a keyframe is being made"})
+                continue
+            if any(w.startswith(PICTURE_OUTDATED) for w in stale[first.take_id]):
+                skipped.append({"shot_id": shot.shot_id, "reason": "redraw the out-of-date "
+                                "design pictures first (Assets)"})  # fmt: skip
+                continue
+            if shot.scene_id not in scene_reading:
+                scene_reading[shot.scene_id] = _reading(pkg, shot)
+            try:
+                take = plan_take(pkg, images, takes, plan_of(pkg, shot, plans.get(shot.shot_id)),
+                                 sub_shot=first.sub_shot, draws=req.draws,
+                                 max_rounds=req.max_rounds, reading=scene_reading[shot.scene_id],
+                                 **options)  # fmt: skip
+            except (NotReady, ValueError) as exc:
+                skipped.append({"shot_id": shot.shot_id, "reason": str(exc)})
+                continue
+            repo.save_shot_take(take)
+            takes.append(take)
+            started.append(take.take_id)
+        for take_id in started:
+            runner.start(take_id)
+        return {"started": started, "planning": [], "skipped": skipped}
+
     @app.post("/v1/shot-takes/{take_id}/approve", response_model=ShotTake)
     async def approve_draw(take_id: str, req: ApproveRequest) -> ShotTake:
         """Approve one draw as its sub-shot's keyframe (replacing any other approval of
@@ -507,13 +581,9 @@ def register(
         if (
             req.next
             and following is not None
-            # Takes for an older plan's sub-shot don't count: they can't be approved.
-            and not any(
-                t.shot_id == take.shot_id
-                and t.sub_shot == following.index
-                and current_sub(pkg, shot, plan, t) is not None
-                for t in takes
-            )
+            # Unless the next cut already has a take drawn from this keyframe (takes drawn
+            # from another, or for an older plan, can't be approved after it).
+            and not _drawn_from(pkg, shot, plan, following.index, frame_ref(out))
         ):
             with contextlib.suppress(NotReady, ValueError):
                 _start(

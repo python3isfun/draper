@@ -40,7 +40,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import itertools
+import json
 import logging
 import random
 import re
@@ -258,6 +260,9 @@ class ShotTake(BaseModel):
     size: str
     # The image provider that draws it: "h3" (MiniMax H3) or "nano-banana" (Gemini).
     provider: str = DEFAULT_PROVIDER
+    # The design text it was written and checked against (design_print); None for takes
+    # from before it was recorded, which are judged by their pictures alone.
+    design_print: str | None = None
     draws: int = DEFAULT_DRAWS
     seeds: list[int] = Field(default_factory=list)
     results: list[FrameDraw] = Field(default_factory=list)
@@ -321,7 +326,9 @@ _REVISION_CACHE: dict[tuple[str, str, str], Any] = {}
 
 
 def _cached(pkg: ProductionPackage, what: str, build: Any) -> Any:
-    key = (pkg.package_id, pkg.revision_id, what)
+    # A revision changes in place only by hand edits (sheet_edit), each logged: the count
+    # of changes keeps a cache from outliving one.
+    key = (pkg.package_id, pkg.revision_id, f"{what}#{len(pkg.change_log)}")
     if key not in _REVISION_CACHE:
         if len(_REVISION_CACHE) > 256:
             _REVISION_CACHE.clear()
@@ -817,6 +824,94 @@ def stale_approvals(
     ]  # fmt: skip
 
 
+# Why an approved keyframe is out of date.
+KF_TEXT_CHANGED = "the set, look or prop text changed since it was drawn"
+KF_BEFORE_CHANGED = "the keyframe it continues from has changed"
+KF_BEFORE_OUTDATED = "the keyframe it continues from is out of date"  # redraw that one first
+
+
+def design_print(pkg: ProductionPackage, shot: Shot) -> str:
+    """A fingerprint of the design text a keyframe of this shot is written and checked
+    against: its people's cast entries and looks, its set and state, its props and states
+    (the sheets and the story bible's one-line descriptions)."""
+    entries: dict[str, Any] = {}
+    for sheet in (pkg.cast_sheet, pkg.set_sheet, pkg.prop_sheet):
+        if sheet is not None:
+            entries |= sheet.entries()
+    bible = pkg.story_bible
+    lines = {x.look_id: x.description for x in bible.looks}
+    lines |= {x.location_state_id: x.description for x in bible.location_states}
+    lines |= {x.prop_state_id: x.description for x in bible.prop_states}
+    ids = [*shot.character_ids, *(r.look_id for r in shot.character_look_refs),
+           shot.location_id, shot.location_state_id,
+           *(x for r in shot.prop_state_refs for x in (r.prop_id, r.prop_state_id))]  # fmt: skip
+    data = {i: [e.model_dump() if (e := entries.get(i)) is not None else None, lines.get(i)]
+            for i in ids}  # fmt: skip
+    return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def outdated_keyframes(
+    pkg: ProductionPackage,
+    images: list[GeneratedImage],
+    takes: list[ShotTake],
+    plans: list[ShotPlan],
+) -> dict[str, list[str]]:
+    """Each approved keyframe (of the plans as they are) that is out of date, by take id,
+    with why: the design text it was written against changed, a design picture it was
+    drawn from was replaced or is out of date (see images.outdated_pictures), or the
+    keyframe it continues from (the cut before, or the previous shot's) changed or is out
+    of date itself."""
+    from .images import PICTURE_OUTDATED, PICTURE_REPLACED, is_current, outdated_pictures
+
+    stored = {p.shot_id: p for p in plans}
+    shots = {s.shot_id: s for s in pkg.shot_list}
+    stale_pictures = outdated_pictures(pkg, images)
+    prints: dict[str, str] = {}
+    memo: dict[str, list[str]] = {}
+
+    def reasons(t: ShotTake) -> list[str]:
+        if t.take_id in memo:
+            return memo[t.take_id]
+        memo[t.take_id] = []  # a cycle can't happen, but never loop
+        shot = shots[t.shot_id]
+        out: list[str] = []
+        if t.design_print is not None:
+            if t.shot_id not in prints:
+                prints[t.shot_id] = design_print(pkg, shot)
+            if t.design_print != prints[t.shot_id]:
+                out.append(KF_TEXT_CHANGED)
+        for r in t.references:
+            if r.kind in ("previous_frame", "start_frame", "previous_shot"):
+                now = (previous_shot_frame(pkg, takes, shot) if r.kind == "previous_shot"
+                       else (p := approved_take(takes, t.shot_id, t.sub_shot - 1))
+                       and FrameRef(ref_id=frame_ref(p), role="", kind="previous_frame"))  # fmt: skip
+                if now is None or now.ref_id != r.ref_id:
+                    out.append(KF_BEFORE_CHANGED)
+                    continue
+                before_id = r.ref_id.split(":")[1]
+                before = next((x for x in takes if x.take_id == before_id), None)
+                if before is not None and reasons(before):
+                    out.append(KF_BEFORE_OUTDATED)
+            elif r.ref_id.startswith("img_"):
+                if not is_current(images, r.ref_id):
+                    out.append(f"{PICTURE_REPLACED}: {r.role}")
+                elif r.ref_id in stale_pictures:
+                    out.append(f"{PICTURE_OUTDATED}: {r.role}")
+        memo[t.take_id] = list(dict.fromkeys(out))
+        return memo[t.take_id]
+
+    out: dict[str, list[str]] = {}
+    for t in takes:
+        if t.approved is None or t.sub_shot < 1 or t.shot_id not in shots:
+            continue
+        shot = shots[t.shot_id]
+        if current_sub(pkg, shot, plan_of(pkg, shot, stored.get(t.shot_id)), t) is None:
+            continue  # stale_approvals' business: its sub-shot changed
+        if why := reasons(t):
+            out[t.take_id] = why
+    return out
+
+
 def sub_shot_references(
     pkg: ProductionPackage,
     images: list[GeneratedImage],
@@ -1004,6 +1099,7 @@ def plan_take(
         references=refs,
         size=frame_size(pkg),
         provider=provider,
+        design_print=design_print(pkg, shot),
         draws=draws,
         seeds=_seeds(seeds, draws),
         direction=(direction or "").strip() or None,
@@ -2280,6 +2376,7 @@ def shot_board(
     versions, its takes and its approved keyframe."""
     names = _names(pkg)
     stored = {p.shot_id: p for p in plans}
+    stale = outdated_keyframes(pkg, images, takes, plans)
     by_scene = {r.scene_id: r for r in readings or []}
     fresh_of: dict[str, SceneReading | None] = {}
     for scene_id in {s.scene_id for s in pkg.shot_list}:
@@ -2317,6 +2414,8 @@ def shot_board(
                 })  # fmt: skip
             ap = approved_take(mine, shot.shot_id, sub.index)
             subs.append({
+                # Why the approved keyframe is out of date (empty when it isn't).
+                "outdated": stale.get(ap.take_id, []) if ap is not None else [],
                 **sub.model_dump(),
                 "timecode": sub.timecode,
                 "people_names": [names.get(c, c) for c in sub.people],

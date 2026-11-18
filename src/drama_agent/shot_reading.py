@@ -166,6 +166,10 @@ def fingerprint(
             for s in shots
         ],
         "pictures": [c.image_id for p in people for c in candidates(pkg, images, p)],
+        # The looks it reads (a hand edit to one makes the reading stale).
+        "looks": [[lk.model_dump() for lk in (pkg.cast_sheet.looks if pkg.cast_sheet else [])
+                   if lk.character_id in people],
+                  [lk.model_dump() for lk in pkg.story_bible.looks if lk.character_id in people]],
     }  # fmt: skip
     return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 

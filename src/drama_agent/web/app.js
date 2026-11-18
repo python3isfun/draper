@@ -1247,6 +1247,14 @@ const SCOPE_OF = { character_identity: "cast", character_look: "cast", location:
 const keyOf = (x) => `${x.requirement_id}|${x.deliverable_id}`;
 const thumbUrl = (img, v = "thumb") => `/v1/generated-images/${encodeURIComponent(img.image_id)}/${v}`;
 
+// An item's pick that is out of date (its design text was edited, or a picture it was drawn
+// from changed): a chip saying why.
+function outdatedChip(v, key) {
+  const pick = v && chosenImage(v.images, key);
+  const why = pick && (v.outdated || {})[pick.image_id];
+  return why ? h("span", { class: "chip warn", title: why.join("; ") }, `Out of date: ${why[0]}`) : null;
+}
+
 function chosenImage(images, key) {
   const done = images.filter((i) => keyOf(i) === key && i.status === "done");
   const sel = done.filter((i) => i.selected);
@@ -1290,6 +1298,11 @@ function renderDesignControls(pkg, v) {
       h("button", { type: "button", class: "btn small", disabled: !selectedAnchors,
         onclick: (e) => imageAction(`${base}/develop`, e.currentTarget, { ...ids, draws: design.devDraws, draft: design.draft }) }, "Develop looks & states"),
     ),
+    v && Object.keys(v.outdated || {}).length > 0 && h("div", { class: "design-row" },
+      h("strong", { class: "small" }, "Out of date"),
+      h("span", { class: "small muted" }, `${Object.keys(v.outdated).length} picked images were drawn before a design change. Each is redrawn and replaces its pick when done; images drawn from it follow in turn (a set's wide view, then its other states and plan views).`),
+      h("button", { type: "button", class: "btn small", disabled: busy,
+        onclick: (e) => imageAction(`${base}/refresh?revision_id=${encodeURIComponent(pkg.revision_id)}`, e.currentTarget) }, "Redraw out-of-date images")),
     h("p", { class: "small" }, !v ? (state.images.error ? "Couldn't load images." : "Loading…") : busy ? `${v.queued} images in the queue…` : "Idle."),
     (state.images.notes || []).length > 0 && h("ul", { class: "small" }, state.images.notes.map((t) => h("li", {}, t))),
     state.images.error && h("p", { class: "form-error" }, state.images.error),
@@ -1421,7 +1434,7 @@ function renderDesignBoard(pkg) {
     const parent = d.parent_key && `${d.parent_key[0]}|${d.parent_key[1]}`;
     const blocked = parent && !pickedKeys.has(parent);
     return h("div", { class: "dependent" },
-      h("div", { class: "small" }, h("strong", {}, d.variant || d.view), h("span", { class: "muted" }, ` · ${d.view}`)),
+      h("div", { class: "small" }, h("strong", {}, d.variant || d.view), h("span", { class: "muted" }, ` · ${d.view}`), " ", outdatedChip(v, keyOf(d))),
       renderTakeRows(v, d),
       blocked ? h("p", { class: "muted small" }, `Drawn from ${titleOf(parent)}: pick an image for it first.`) : renderNewTake(pkg, d));
   };
@@ -1442,6 +1455,7 @@ function renderDesignBoard(pkg) {
         chosen && chosen.selected
           ? h("span", { class: "chip ok" }, opt ? `Selected: take ${opt.index}, draw ${chosen.draw}` : "Selected")
           : h("span", { class: "chip warn" }, "Pick one"),
+        outdatedChip(v, keyOf(anchor)),
       ),
       renderTakeRows(v, anchor),
       renderNewTake(pkg, anchor),
