@@ -158,6 +158,10 @@ def register(
         versions = repo.list_prompt_versions(pkg.package_id, pkg.revision_id)
         readings = repo.list_scene_readings(pkg.package_id, pkg.revision_id)
         shots = shot_board(pkg, images, takes, plans, versions, readings)
+        for shot in shots:  # a take asked to pause says so until it does
+            for sub in shot["sub_shots"]:
+                for t in sub["takes"]:
+                    t["pausing"] = t["take_id"] in runner.pausing
         return KeyframeBoard(
             package_id=pkg.package_id,
             revision_id=pkg.revision_id,
@@ -658,6 +662,36 @@ def register(
                 409, f"sub-shot {take.sub_shot} of {take.shot_id} is still being made"
             )
         take.results = [d for d in take.results if d.status == "done"]  # redrawn, same seeds
+        take.status, take.error, take.finished_at = "pending", None, None
+        return _start(take)
+
+    @app.post("/v1/shot-takes/{take_id}/pause", response_model=ShotTake)
+    async def pause_take(take_id: str) -> ShotTake:
+        """Pause a take that is being made, its automatic revision rounds included: it stops
+        after the step it is on (the draw being rendered, or the prompt being written),
+        keeping its finished draws. Resume goes on from there."""
+        take = _take_or_404(take_id)
+        _writable(take.package_id, take.revision_id)
+        if not take.busy:
+            raise HTTPException(409, f"only a take being made can be paused (this one is "
+                                f"{take.status})")  # fmt: skip
+        runner.pause(take_id)
+        return take
+
+    @app.post("/v1/shot-takes/{take_id}/resume", status_code=202, response_model=ShotTake)
+    async def resume_take(take_id: str) -> ShotTake:
+        """Go on with a paused take: its remaining draws, its check, then its automatic
+        rounds, with the same seeds."""
+        take = _take_or_404(take_id)
+        _writable(take.package_id, take.revision_id)
+        if take.status != "paused":
+            raise HTTPException(409, f"only a paused take can be resumed (this one is "
+                                f"{take.status})")  # fmt: skip
+        takes = repo.list_shot_takes(take.package_id, take.revision_id)
+        if is_busy(takes, take.shot_id, take.sub_shot):
+            raise HTTPException(
+                409, f"sub-shot {take.sub_shot} of {take.shot_id} is still being made"
+            )
         take.status, take.error, take.finished_at = "pending", None, None
         return _start(take)
 

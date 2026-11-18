@@ -92,7 +92,8 @@ MINOR_PENALTY = 8
 JUDGE_PX = 1024  # long edge of the draw the judge sees
 NO_OTHER_TEXT = "No other lettering is added."
 
-TakeStatus = Literal["pending", "writing", "drawing", "checking", "done", "failed"]
+# "paused": stopped by the user between steps; resumed, it goes on where it stopped.
+TakeStatus = Literal["pending", "writing", "drawing", "checking", "done", "failed", "paused"]
 CheckKind = Literal[
     "identity", "wardrobe", "set", "prop", "count", "placement", "framing", "action",
     "defects", "text", "style",
@@ -293,7 +294,7 @@ class ShotTake(BaseModel):
 
     @property
     def busy(self) -> bool:
-        return self.status not in ("done", "failed")
+        return self.status not in ("done", "failed", "paused")
 
     def best(self) -> FrameDraw | None:
         """The draw with the best check (passing first), if any was checked."""
@@ -1919,6 +1920,7 @@ class ShotFrameRunner:
         self._planning = asyncio.Semaphore(4)  # sub-shot plans written at once
         self._reading_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        self.pausing: set[str] = set()  # takes asked to pause, by id
 
     def provider(self, name: str | None) -> tuple[str, ImageClient]:
         """A provider by name (None: the default), or ValueError naming the ones there are."""
@@ -2152,15 +2154,45 @@ class ShotFrameRunner:
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def run(self, take_id: str) -> None:
-        """A take, then its automatic next rounds until a draw passes or none are left."""
+        """A take, then its automatic next rounds until a draw passes or none are left, or
+        the user pauses it (between steps: a round paused before its next round starts
+        leaves that round paused, so resuming goes on with the revision)."""
         take = self.repo.get_shot_take(take_id)
+        try:
+            await self._rounds(take)
+        finally:
+            # A pause asked too late to apply (the take had finished) is dropped.
+            if take is not None:
+                stopped = self.repo.list_shot_takes(take.package_id, take.revision_id)
+                self.pausing -= {t.take_id for t in stopped if not t.busy}
+
+    async def _rounds(self, take: ShotTake | None) -> None:
         while take is not None and take.status == "pending":
             await self._run_take(take)
             nxt = next_round(take) if take.status == "done" else None
             if nxt is None:
                 break
+            if take.take_id in self.pausing:
+                # Paused as this round finished: the next round is kept, paused.
+                self.pausing.discard(take.take_id)
+                nxt.status, nxt.finished_at = "paused", utcnow()
             self.repo.save_shot_take(nxt)
             take = nxt
+
+    def pause(self, take_id: str) -> None:
+        """Ask a running take to pause after the step it is on (kept in memory: the take's
+        own saves would overwrite a stored flag, and a restart fails running takes anyway)."""
+        self.pausing.add(take_id)
+
+    def _pause_point(self, take: ShotTake) -> bool:
+        """Pause here if the user asked: the take is saved as paused, keeping its finished
+        draws and prompt. Returns whether it paused."""
+        if take.take_id not in self.pausing:
+            return False
+        self.pausing.discard(take.take_id)
+        take.status, take.finished_at = "paused", utcnow()
+        self.repo.save_shot_take(take)
+        return True
 
     async def _run_take(self, take: ShotTake) -> None:
         pkg = self.repo.get_package(take.package_id, take.revision_id)
@@ -2168,20 +2200,28 @@ class ShotFrameRunner:
             if pkg is None:
                 raise RuntimeError("the package revision is gone")
             shot = shot_of(pkg, take.shot_id)
+            if self._pause_point(take):
+                return
             if not take.prompt:
                 self._set(take, "writing")
                 await self._choose_pictures(pkg, shot, take)
                 await self._write(pkg, shot, take)
+                if self._pause_point(take):
+                    return
             self._guard(pkg, shot, take)
             refs = await asyncio.to_thread(self._reference_bytes, take)
             self._set(take, "drawing")
             take.results = [d for d in take.results if d.status == "done"]
             for n in range(take.draws):
                 if any(d.n == n for d in take.results):
-                    continue  # kept from before a retry
+                    continue  # kept from before a retry or a pause
+                if self._pause_point(take):
+                    return
                 take.results.append(await self._draw(take, n, refs))
                 take.results.sort(key=lambda d: d.n)
                 self.repo.save_shot_take(take)
+            if self._pause_point(take):
+                return
             self._set(take, "checking")
             await self.check(pkg, shot, take)
             take.status, take.error = "done", None

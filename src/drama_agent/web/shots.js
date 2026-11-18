@@ -68,7 +68,7 @@ function checkBadge(d) {
 function renderFrameDraw(take) {
   return (d) => {
     const approved = take.approved === d.n;
-    const finished = take.status === "done" || take.status === "failed";
+    const finished = ["done", "failed", "paused"].includes(take.status);
     const failedItems = d.check ? d.check.items.filter((i) => !i.passed) : [];
     const label = `Draw ${d.n + 1}`;
     return h("figure", { class: `draw keyframe ${d.status}${approved ? " selected" : ""}` },
@@ -96,7 +96,7 @@ function renderFrameDraw(take) {
 }
 
 function renderFrameTake(take, takes = []) {
-  const busy = !["done", "failed"].includes(take.status);
+  const busy = !["done", "failed", "paused"].includes(take.status);
   // The automatic round after this one, if it has started (same run, next round).
   const next = takes.find((t) => t.run_id === take.run_id && t.round === take.round + 1);
   const tid = encodeURIComponent(take.take_id);
@@ -104,7 +104,8 @@ function renderFrameTake(take, takes = []) {
   return h("div", { class: "take" },
     h("div", { class: "take-head" },
       h("strong", {}, `Round ${take.round}`),
-      busy && h("span", { class: "chip info" }, TAKE_STATUS[take.status]),
+      busy && h("span", { class: "chip info" }, take.pausing ? "pausing after this step…" : TAKE_STATUS[take.status]),
+      take.status === "paused" && h("span", { class: "chip warn", title: "Stopped by you; Resume goes on with its remaining draws, its check and its rounds" }, "paused"),
       take.status === "failed" && h("span", { class: "chip bad", title: take.error || "" }, take.refused ? "refused" : "failed"),
       take.status === "done" && (take.results.some((d) => d.check && d.check.passed)
         ? h("span", { class: "chip ok" }, "passed")
@@ -118,6 +119,10 @@ function renderFrameTake(take, takes = []) {
       take.warnings && take.warnings.length > 0 && h("span", { class: "chip warn", title: take.warnings.join("\n") }, `${take.warnings.length} rule finding${take.warnings.length > 1 ? "s" : ""}`),
       take.prompt_source === "template" && h("span", { class: "chip warn" }, "template prompt"),
       h("span", { class: "take-actions" },
+        busy && !take.pausing && h("button", { type: "button", class: "btn ghost small", title: "Stop after the draw or prompt in progress; finished draws are kept",
+          onclick: (e) => frameAction(`/v1/shot-takes/${tid}/pause`, e.currentTarget) }, "Pause"),
+        take.status === "paused" && h("button", { type: "button", class: "btn ghost small", title: "Go on with the remaining draws, the check and the automatic rounds",
+          onclick: (e) => frameAction(`/v1/shot-takes/${tid}/resume`, e.currentTarget) }, "Resume"),
         uncheckable && h("button", { type: "button", class: "btn ghost small",
           onclick: (e) => frameAction(`/v1/shot-takes/${tid}/check`, e.currentTarget) }, "Check again"),
         take.status === "failed" && !take.refused && h("button", { type: "button", class: "btn ghost small",

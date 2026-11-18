@@ -291,3 +291,63 @@ def test_the_writer_and_the_judge_read_the_sets_layout(tmp_path):
             assert calls, stage
             scene = calls[-1].context["scene"]
             assert "set" in scene and any("canvas" in v for v in scene["set"].values()), stage
+
+
+class SlowImages:
+    """Wraps the fixture image client so each draw takes a moment (time to pause)."""
+
+    def __init__(self, inner, delay: float = 0.3):
+        self.inner, self.delay = inner, delay
+        self.model_id, self.max_references = inner.model_id, inner.max_references
+
+    async def generate(self, prompt, size, seed, references):
+        import asyncio
+
+        await asyncio.sleep(self.delay)
+        return await self.inner.generate(prompt, size, seed, references)
+
+
+def test_a_take_can_be_paused_mid_run_and_resumed(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = b.board()["shots"][0]["shot_id"]
+        # The runner reads its provider at draw time: slow H3 down to pause mid-take.
+        runner = next(r for r in _runners(b))
+        runner.providers["h3"] = SlowImages(runner.providers["h3"])
+        r = b.http.post(f"{b.base}/{sid}", json={"draws": 4, "max_rounds": 1}).json()
+        tid = r["take_id"]
+        deadline = time.monotonic() + 10
+        while not any(d["status"] == "done" for d in b.takes(sid)[0]["results"]):
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        assert b.http.post(f"/v1/shot-takes/{tid}/pause").status_code == 200
+        assert any(t["pausing"] for t in b.takes(sid))
+        board = b.wait()
+        take = next(t for t in b.takes(sid) if t["take_id"] == tid)
+        assert board["busy"] == 0 and take["status"] == "paused"
+        done = [d for d in take["results"] if d["status"] == "done"]
+        assert 1 <= len(done) < 4
+        # A paused take's finished draws can be approved; it isn't "being made".
+        assert b.http.post(f"/v1/shot-takes/{tid}/pause").status_code == 409
+        # Resumed, it draws the rest and is checked.
+        assert b.http.post(f"/v1/shot-takes/{tid}/resume").status_code == 202
+        b.wait()
+        take = next(t for t in b.takes(sid) if t["take_id"] == tid)
+        assert take["status"] == "done" and len(take["results"]) == 4
+        assert all(d["check"] for d in take["results"] if d["status"] == "done")
+        assert [d["seed"] for d in take["results"][: len(done)]] == [d["seed"] for d in done]
+
+
+def _runners(b: Board):
+    """The app's keyframe runner (found through the routes' closures)."""
+    from drama_agent.shot_frames import ShotFrameRunner
+
+    for route in b.app.routes:
+        for cell in getattr(getattr(route, "endpoint", None), "__closure__", None) or ():
+            try:
+                v = cell.cell_contents
+            except ValueError:
+                continue
+            if isinstance(v, ShotFrameRunner):
+                yield v
+                return

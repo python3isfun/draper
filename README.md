@@ -463,7 +463,7 @@ person's likeness (content rule 3). Endpoints: `GET/POST /v1/drama-packages/{id}
 (board; plan and draw every shot without a first keyframe), `POST .../keyframes/{shot_id}/plan`
 (model plan, or `sub_shots` of your own), `POST .../keyframes/{shot_id}/prompts` (save a
 prompt version), `POST .../keyframes/{shot_id}` (a take on a `sub_shot`: written, or a
-`prompt_version` drawn as is), `POST|DELETE /v1/shot-takes/{take_id}/approve`, `.../check`, `.../retry`,
+`prompt_version` drawn as is), `POST|DELETE /v1/shot-takes/{take_id}/approve`, `.../check`, `.../retry`, `.../pause` (a take being made, its automatic rounds included, stops after the draw or prompt in progress and is `paused`: its finished draws are kept and can be approved) and `.../resume` (its remaining draws, its check, then its rounds, same seeds),
 `DELETE /v1/shot-takes/{take_id}`, `GET /v1/shot-takes/{take_id}/draws/{n}/{content|thumb}`,
 `POST .../keyframes/scenes/{scene_id}/reading` (read the scene again) and
 `POST .../keyframes/{shot_id}/choice` (draw a person from another of their pictures).

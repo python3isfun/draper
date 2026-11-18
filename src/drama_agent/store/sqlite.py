@@ -840,7 +840,7 @@ class SqliteRepository:
     def fail_unfinished_shot_takes(self, error: str) -> int:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT data FROM shot_takes WHERE status NOT IN ('done', 'failed')"
+                "SELECT data FROM shot_takes WHERE status NOT IN ('done', 'failed', 'paused')"
             ).fetchall()
         for (raw,) in rows:
             t = ShotTake.model_validate_json(raw)
