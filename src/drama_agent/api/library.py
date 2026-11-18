@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from ..library import asset_list, asset_view, sync_library
 from ..library.matching import matches
 from ..library.models import Casting, asset_id
+from ..library.reuse import ReuseError, reuse_anchor
 
 
 class LinkRequest(BaseModel):
@@ -22,7 +23,7 @@ class LinkRequest(BaseModel):
     asset_id: str  # another story's character or set
 
 
-def register(app: FastAPI, *, repo: Any) -> None:
+def register(app: FastAPI, *, repo: Any, media: Any = None) -> None:
     def _kind_or_404(asset_id: str, kind: str) -> Any:
         sync_library(repo)
         a = repo.get_library_asset(asset_id)
@@ -103,6 +104,19 @@ def register(app: FastAPI, *, repo: Any) -> None:
                                   asset_id=target.asset_id, kind=row.kind, source="user"))  # fmt: skip
         sync_library(repo)
         return {"story_id": req.story_id, "asset_id": target.asset_id, "name": target.name}
+
+    @app.post("/v1/drama-packages/{package_id}/casting/{story_id}/reuse")
+    async def reuse_shared(package_id: str, story_id: str) -> dict[str, Any]:
+        """Use the linked asset's current face (a character) or main set view (a set) as
+        this story's: copied in as its pick. What the story drew from its old one goes out
+        of date; redraw it with "Redraw out-of-date"."""
+        sync_library(repo)
+        try:
+            done = reuse_anchor(repo, media, package_id, story_id)
+        except ReuseError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {"image_id": done.image.image_id, "from_image_id": done.source_image_id,
+                "outdated": done.outdated}  # fmt: skip
 
     @app.delete("/v1/drama-packages/{package_id}/casting/{story_id}")
     async def unlink_casting(package_id: str, story_id: str) -> dict[str, Any]:

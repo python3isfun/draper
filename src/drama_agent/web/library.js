@@ -299,7 +299,7 @@ function libRedrawRow(a) {
   const stale = libOutdated(a);
   if (!stale.length && !lib.redrawing) return null;
   return h("div", { class: "banner warn compact" },
-    stale.length ? `${count(stale.length, "picture is", "pictures are")} out of date: drawn before a design change. ` : "",
+    stale.length ? `${count(stale.length, "picture is", "pictures are")} out of date: drawn before a change to its design or to a picture it is drawn from. ` : "",
     lib.redrawing && h("span", {}, lib.redrawing, " "),
     stale.length > 0 && h("button", { type: "button", class: "btn small", disabled: Boolean(lib.redrawing), onclick: () => libRedraw(a) },
       "Redraw out-of-date"));

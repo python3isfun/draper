@@ -279,3 +279,73 @@ def test_an_archived_storys_assets_are_kept_but_not_shown(tmp_path):
             b.repo.save_job(job)
         names = [c["name"] for c in b.http.get("/v1/library/characters").json()]
         assert names.count(first) == 2  # back when it is un-archived
+
+
+def test_a_linked_story_can_use_the_shared_face_and_redraw_from_it(tmp_path):
+    import time
+
+    with Board(tmp_path) as b:
+        b.design()
+        other = second_story(b)
+        b.http.post(f"/v1/drama-packages/{other}/images")
+        deadline = time.monotonic() + 30
+        while b.http.get(f"/v1/drama-packages/{other}/images").json()["queued"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        pkg = b.repo.get_package(b.pid)
+        who = next(c for c in pkg.story_bible.characters
+                   if any(lk.character_id == c.character_id for lk in pkg.story_bible.looks))  # fmt: skip
+        url = f"/v1/drama-packages/{other}/casting"
+        # Not linked yet: nothing to reuse.
+        assert b.http.post(f"{url}/{who.character_id}/reuse").status_code == 409
+        shared = next(c for c in b.http.get("/v1/library/characters").json()
+                      if c["origin_package_id"] == b.pid and c["origin_entity_id"] == who.character_id)  # fmt: skip
+        b.http.post(url, json={"story_id": who.character_id, "asset_id": shared["asset_id"]})
+        r = b.http.post(f"{url}/{who.character_id}/reuse")
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert out["from_image_id"] == shared["pictures"][0]["image_id"]
+        assert out["outdated"] >= 1  # its look was drawn from its old face
+        imgs = b.http.get(f"/v1/drama-packages/{other}/images").json()
+        face = next(i for i in imgs["images"] if i["image_id"] == out["image_id"])
+        assert face["selected"] and face["imported_from"].startswith("library ")
+        assert b.media.path(face["file"]).read_bytes() == b.media.path(
+            next(i for i in b.repo.list_images(b.pid, pkg.revision_id)
+                 if i.image_id == out["from_image_id"]).file).read_bytes()  # fmt: skip
+        stale = [i for i in imgs["images"] if i["image_id"] in imgs["outdated"]]
+        assert any("character_look" in i["requirement_id"] and who.character_id in i["requirement_id"]
+                   for i in stale)  # fmt: skip
+        # Redrawn, the look is drawn from the shared face, and nothing is out of date.
+        b.http.post(f"/v1/drama-packages/{other}/images/refresh")
+        deadline = time.monotonic() + 30
+        while (v := b.http.get(f"/v1/drama-packages/{other}/images").json())["queued"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        assert not any(who.character_id in i["requirement_id"]
+                       for i in v["images"] if i["image_id"] in v["outdated"])  # fmt: skip
+        redrawn = [i for i in v["images"] if i.get("refreshes") and "character_look" in i["requirement_id"]
+                   and who.character_id in i["requirement_id"]]  # fmt: skip
+        assert redrawn and out["image_id"] in redrawn[0]["reference_ids"]
+
+
+def test_a_linked_set_can_use_the_shared_set_view(tmp_path):
+    import time
+
+    with Board(tmp_path) as b:
+        b.design()
+        other = second_story(b)
+        b.http.post(f"/v1/drama-packages/{other}/images")
+        deadline = time.monotonic() + 30
+        while b.http.get(f"/v1/drama-packages/{other}/images").json()["queued"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        place = b.repo.get_package(b.pid).story_bible.locations[0].location_id
+        shared = next(s for s in b.http.get("/v1/library/sets").json()
+                      if s["origin_package_id"] == b.pid and s["origin_entity_id"] == place)  # fmt: skip
+        url = f"/v1/drama-packages/{other}/casting"
+        b.http.post(url, json={"story_id": place, "asset_id": shared["asset_id"]})
+        r = b.http.post(f"{url}/{place}/reuse")
+        assert r.status_code == 200, r.text
+        imgs = b.http.get(f"/v1/drama-packages/{other}/images").json()
+        view = next(i for i in imgs["images"] if i["image_id"] == r.json()["image_id"])
+        assert view["selected"] and view["deliverable_id"].endswith("_wide")

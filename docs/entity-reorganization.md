@@ -254,9 +254,20 @@ Each phase is shippable on its own, with draper and dramer working throughout.
     <story>" with Unlink.
   - **Library pages:** they load each part's own story's design board, so a linked story's look
     keeps its takes ("in its own story"), and each part's edits go to its own story.
+
+## Phase 3, step 2 as built (18 Nov 2026): reuse
+
+- **What it does** (`library/reuse.py`, `POST …/casting/{story_id}/reuse`): a linked story
+  takes the shared asset's current anchor pick, the face of a character or the main wide view
+  of a set (its first state).
+- **How:** it's copied in as an imported pick, like an Experiment image, and the story's old
+  pictures stay among its takes.
+- **What follows:** everything the story drew from its old anchor (a character's looks, a
+  set's other states and plan views) goes out of date. "Redraw out-of-date" on the shared
+  page redraws it from the shared picture, so the stories draw the same face or room.
+- **UI:** a linked Casting card has **Use its face** or **Use its set view**. It says how
+  many pictures went out of date and links to the shared page.
 - **Next:**
-  - **Reuse:** use the shared asset's picked face (or set view) in the linked story, so its
-    looks are redrawn from it with the out-of-date tools.
   - **Matching looks:** match looks and states that duplicate each other (the same "Apron" look
     in both stories).
   - **Suggestions:** propose matches when a new story is made, matched by the model, not only

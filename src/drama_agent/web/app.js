@@ -1195,7 +1195,7 @@ function renderNewTake(pkg, slot, { jobId = state.job?.job_id } = {}) {
 // Sets page, where its sheet is edited and its pictures are drawn), with the story-wide
 // Explore / Develop controls and the style brief.
 
-const castingCache = { key: null, data: null, error: "", loading: false };
+const castingCache = { key: null, data: null, error: "", loading: false, notes: {} };
 
 async function loadCasting(pkg) {
   const key = imagesKey(pkg);
@@ -1238,10 +1238,29 @@ function castingLink(pkg, storyId, kindLabel) {
     await loadCasting(pkg);
   };
   if (m.linked) {
-    return h("div", { class: "small" },
-      h("span", { class: "chip ok", title: `This story uses ${m.linked.name} from ${m.linked.story}` }, `Shared with ${m.linked.story}`), " ",
+    const what = kindLabel === "character" ? "face" : "set view";
+    const reuse = async (e) => {
+      e.currentTarget.disabled = true;
+      castingCache.error = "";
+      try {
+        const r = await api(`${base}/${encodeURIComponent(storyId)}/reuse`, { method: "POST" });
+        castingCache.notes[storyId] = r.outdated
+          ? `Now uses its ${what}. ${r.outdated === 1 ? "1 picture is out of date: redraw it" : `${r.outdated} pictures are out of date: redraw them`} on its page.`
+          : `Now uses its ${what}.`;
+      } catch (err) {
+        castingCache.error = err.message;
+      }
+      castingCache.data = null;
+      await loadCasting(pkg);
+    };
+    return h("div", { class: "small lib-match" },
+      h("span", { class: "chip ok", title: `This story uses ${m.linked.name} from ${m.linked.story}` }, `Shared with ${m.linked.story}`),
+      h("button", { type: "button", class: "btn small", title: `Copy ${m.linked.name}'s picked ${what} into this story as its pick; what this story drew from its own goes out of date`,
+        onclick: reuse }, `Use its ${what}`),
       h("button", { type: "button", class: "btn ghost small", title: `Make ${m.name} this story's own again`,
-        onclick: (e) => act(e, "DELETE", null, `/${encodeURIComponent(storyId)}`) }, "Unlink"));
+        onclick: (e) => act(e, "DELETE", null, `/${encodeURIComponent(storyId)}`) }, "Unlink"),
+      castingCache.notes[storyId] && h("div", { class: "muted" }, castingCache.notes[storyId], " ",
+        h("a", { href: `#lib=${m.linked.asset_id}` }, "Open it")));
   }
   const best = m.candidates[0];
   if (!best) return null;

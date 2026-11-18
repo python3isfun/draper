@@ -238,7 +238,12 @@ and props, each linking to its library page (old links to those tabs land on Cas
 containing the other, or the same first name). **Link** makes this story use that asset:
 its own copy is hidden, and its looks or states join the shared asset, still used by its
 own shots and drawn in its own story. Its pictures stay visible under "Also drawn in".
-**Unlink** undoes it. API: `GET /v1/drama-packages/{id}/casting/matches`,
+A linked card also has **Use its face** (or **Use its set view**): the shared asset's
+picked face, or its set's main wide view, is copied into this story as its pick. What this
+story drew from its own (its looks, its other states and plan views) goes out of date, and
+"Redraw out-of-date" on the shared page redraws it from the shared picture. The old
+pictures stay among the story's takes. API: `POST …/casting/{story_id}/reuse`.
+**Unlink** undoes the link. API: `GET /v1/drama-packages/{id}/casting/matches`,
 `POST /v1/drama-packages/{id}/casting` (`story_id`, `asset_id`),
 `DELETE /v1/drama-packages/{id}/casting/{story_id}`. Archived stories' assets are kept but
 not shown or offered.

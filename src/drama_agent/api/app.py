@@ -1291,7 +1291,7 @@ def create_app(
             return PlainTextResponse(render_markdown(pkg), media_type="text/plain")
         return pkg
 
-    library_api.register(app, repo=repo)
+    library_api.register(app, repo=repo, media=media)
     keyframe_api.register(
         app,
         repo=repo,
