@@ -1065,10 +1065,10 @@ def test_story_words_alone_dont_cost_a_second_call(tmp_path):
 
 
 def test_ordinary_words_are_not_flagged():
-    text = ("Lila in <Picture 1> is <Subject 1>. The target image is a still frame of a quiet "
+    text = ("Maya in <Picture 1> is <Subject 1>. The target image is a still frame of a quiet "
             "conversation; the intimate lamp light shows her face. <Subject 1> is partially "
             "preserved. Use of warm tones. No other lettering is added.")  # fmt: skip
-    ref = FrameRef(ref_id="img_1", role="Lila", kind="look", entity_id="ch_lila")
+    ref = FrameRef(ref_id="img_1", role="Maya", kind="look", entity_id="ch_maya")
     assert prompt_findings(text, [ref]) == []
 
 
