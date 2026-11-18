@@ -70,6 +70,8 @@ PLAN_STAGE = "shot_plan"
 MAX_SUB_SHOTS = 3
 MIN_SUB_SHOT_MS = 1000
 MIN_CLIP_S, MAX_CLIP_S = 4, 15  # H3 renders 4 to 15 s clips, in whole seconds
+# A clip this long with two or more speakers is covered speaker by speaker, not held in one cut.
+COVERAGE_MS = 6000
 # The sub-shot spec's version in the export (05_assets/shot_keyframes/sub_shots.json): the
 # contract video production writes its prompt from.
 SPEC_VERSION = 1
@@ -517,14 +519,49 @@ class PlanProblems(ValueError):
 
 
 TOO_LONG = "the storyboard shot runs"  # the start of the problem a plan can't fix
+ONE_CUT = "dialogue held in one cut"  # the start of the coverage problem
+# A storyboard that says to hold the two-shot (in its framing, camera or notes).
+_HOLD_TWO_SHOT = re.compile(r"\bhold(?:s|ing)?\b[^.;]{0,30}\btwo[- ]shot\b", re.IGNORECASE)
+
+
+def advisory(problem: str) -> bool:
+    """A problem flagged on the board and in the export but never refused on a save: a shot
+    too long for H3 (no plan fixes it) and dialogue held in one cut (a person may hold the
+    two-shot on purpose)."""
+    return problem.startswith((TOO_LONG, ONE_CUT))
+
+
+def holds_two_shot(shot: Shot) -> bool:
+    """Whether the storyboard asks to keep the shot on one two-shot ("hold the two-shot")."""
+    text = f"{shot.framing} {shot.camera} {shot.generation_notes} {shot.continuity}"
+    return bool(_HOLD_TWO_SHOT.search(text))
+
+
+def coverage_cut(lines: list[dict[str, Any]], clip: int) -> int | None:
+    """Where a clip whose lines come from two or more people could cut to the next speaker:
+    the first gap between two different speakers' lines with a moment at least
+    MIN_SUB_SHOT_MS from both ends of the clip (the middle of the usable gap). None when the
+    lines come from one person, or no such moment exists."""
+    ordered = sorted(lines, key=lambda x: x["start_ms"])
+    for a, b in itertools.pairwise(ordered):
+        if a["speaker_id"] == b["speaker_id"]:
+            continue
+        lo = max(a["end_ms"], MIN_SUB_SHOT_MS)
+        hi = min(b["start_ms"], clip - MIN_SUB_SHOT_MS)
+        if lo <= hi:
+            return (lo + hi) // 2
+    return None
 
 
 def check_plan(pkg: ProductionPackage, shot: Shot, subs: list[SubShot]) -> list[str]:
     """Where a sub-shot plan isn't a clean spec for video production (empty if it is):
     the clip's length, every line wholly inside the clip and inside one sub-shot (no cut in
     the middle of a line), each speaker on screen or placed off screen, every on-screen
-    person (and only they) placed in the frame, each cut changing the framing, and screen
-    sides that hold across cuts (the 180-degree rule)."""
+    person (and only they) placed in the frame, each cut changing the framing, screen sides
+    that hold across cuts (the 180-degree rule), and dialogue between two people covered
+    speaker by speaker when the clip is long enough and a cut can fall between their lines
+    (unless the storyboard holds the two-shot). See `advisory` for the problems that are
+    flagged but never refused."""
     names = _names(pkg)
     out: list[str] = []
     clip = subs[-1].end_ms
@@ -536,11 +573,13 @@ def check_plan(pkg: ProductionPackage, shot: Shot, subs: list[SubShot]) -> list[
                    f"{MIN_CLIP_S} to {MAX_CLIP_S}")  # fmt: skip
     cuts = [s.start_ms for s in subs[1:]]
     in_shot = set(shot.character_ids)
+    spoken: list[dict[str, Any]] = []  # the lines that start inside the clip
     for x in shot_lines(pkg, shot):
         said = f'{x["speaker"]}\'s line "{x["text"][:40]}"'
         if x["start_ms"] >= clip:
             out.append(f"{said} starts at {x['start_ms'] / 1000:g} s, after the clip ends")
             continue
+        spoken.append(x)
         if x["end_ms"] > clip:
             out.append(f"{said} runs to {x['end_ms'] / 1000:g} s, past the clip's end at "
                        f"{clip / 1000:g} s")  # fmt: skip
@@ -552,6 +591,16 @@ def check_plan(pkg: ProductionPackage, shot: Shot, subs: list[SubShot]) -> list[
         if who in in_shot and who not in sub.people and who not in sub.off_screen:
             out.append(f"{x['speaker']} speaks in sub-shot {sub.index} but is neither on "
                        "screen nor placed off screen")  # fmt: skip
+    on_screen_lines = [x for x in spoken if x["speaker_id"] in in_shot]
+    if (
+        len(subs) == 1
+        and clip >= COVERAGE_MS
+        and not holds_two_shot(shot)
+        and (cut := coverage_cut(on_screen_lines, clip))
+    ):
+        out.append(f"{ONE_CUT}: two people speak in this {clip / 1000:g} s clip, so cover "
+                       f"them speaker by speaker (2 or 3 sub-shots, e.g. a cut at "
+                       f"{cut / 1000:g} s), or note \"hold the two-shot\" in the storyboard")  # fmt: skip
     for sub in subs:
         for who in sub.people:
             if who not in sub.placement:
@@ -580,9 +629,10 @@ def check_plan(pkg: ProductionPackage, shot: Shot, subs: list[SubShot]) -> list[
 
 def plan_problems(pkg: ProductionPackage, shot: Shot, plan: ShotPlan) -> list[str]:
     """Where a shot's plan in force isn't a clean spec. An unplanned shot (the single
-    plan) is only flagged when no plan could fix it: a shot too long for H3."""
+    plan) is only flagged for what planning would answer or nothing can: dialogue held in one
+    cut, and a shot too long for H3."""
     problems = check_plan(pkg, shot, plan.sub_shots)
-    return problems if plan.source != "single" else [p for p in problems if p.startswith(TOO_LONG)]
+    return problems if plan.source != "single" else [p for p in problems if advisory(p)]
 
 
 def plan_of(pkg: ProductionPackage, shot: Shot, stored: ShotPlan | None) -> ShotPlan:
@@ -626,8 +676,8 @@ def make_sub_shots(
     next starts; the last at the clip's end. Raises ValueError when they can't be a plan
     at all (1 to MAX_SUB_SHOTS, the first at 0, each at least MIN_SUB_SHOT_MS, a framing
     and an action each, only the shot's people). With `strict`, also raises PlanProblems
-    for every rule of check_plan it breaks (a shot too long for H3 aside: no plan fixes
-    that); without, those are left for the caller to flag."""
+    for every rule of check_plan it breaks except the advisory ones (a shot too long for H3,
+    dialogue held in one cut); without, all of them are left for the caller to flag."""
     if not 1 <= len(rows) <= MAX_SUB_SHOTS:
         raise ValueError(f"a shot has 1 to {MAX_SUB_SHOTS} sub-shots")
     clip = clip or clip_ms(shot)
@@ -652,9 +702,7 @@ def make_sub_shots(
                            camera=str(row.get("camera", "")).strip(), action=action,
                            people=people, placement=dict(row.get("placement") or {}),
                            off_screen=dict(row.get("off_screen") or {})))  # fmt: skip
-    if strict and (
-        problems := [p for p in check_plan(pkg, shot, out) if not p.startswith(TOO_LONG)]
-    ):
+    if strict and (problems := [p for p in check_plan(pkg, shot, out) if not advisory(p)]):
         raise PlanProblems(problems)
     return out
 
@@ -907,7 +955,8 @@ else, each with their `frame` side), `off_screen` (the shot's other people and t
 they are off, for eyelines) and the `lines` spoken in it. The keyframe is its first frame: \
 put each person on their side, looking toward where the others are.
 - `pictures`: one entry per <Picture N>, in order (they are attached), each with its \
-`role`, its `define` sentence and its `relationship` sentence. From sub-shot 2 on, \
+`role`, its `define` sentence, its `relationship` sentence and `likeness` (true only for a \
+picture of a real person). From sub-shot 2 on, \
 <Picture 1> is the approved keyframe of the sub-shot before: the same scene a moment \
 before the cut.
 - `shot`: the whole shot from the storyboard (framing, camera, action, continuity, notes, \
@@ -970,11 +1019,20 @@ Return {{"prompt": "...", "motion": "...", "notes": "..."}}:
 # apply, and the runner refuses intimate scenes drawn from a likeness.
 KEYFRAME_RULE = """\
 Keyframes: the look, face, set and prop pictures are the production's chosen designs for \
-this story. Carry each person's face and clothing over exactly; that is the point of a \
-keyframe. Never write a real person's name. In a scene with intimacy, show only the \
-staging `scene.intimacy.on_screen` describes, with each person dressed as their look \
-picture shows: no nudity, undressing or sexual activity is drawn (describe what is there, \
-not what is absent). Rules 1 to 3 above always apply.\
+the fictional characters of this story, however photographic they look. Carry each \
+person's face and clothing over exactly; that is the point of a keyframe. Never write a \
+real person's name.
+
+Rule 3 applies only to a person whose picture has `likeness: true` (it shows a real \
+person). Every other person is a fictional character: don't move, cover up or restage them \
+on a guess that a picture shows a real person, and stage their scene as the plan and the \
+direction say.
+
+Clothes follow the look pictures unless the action or the user's `direction` changes them \
+(a jacket off, a man bare-chested in bed); follow such a direction within rules 1 and 2. In \
+a scene with intimacy, show the staging `scene.intimacy.on_screen` describes: no nudity \
+(no genitals, no woman's bare breasts) and no sexual activity is drawn; describe what is \
+there, not what is absent. Rules 1 to 3 above always apply.\
 """
 
 
@@ -1119,7 +1177,7 @@ def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, 
                 define = f"{who or 'The object'} in <Picture {n}> is {subject}."
                 rel = f"{subject} is fully preserved."
         out.append({"picture": f"<Picture {n}>", "role": r.role, "define": define,
-                    "relationship": rel})  # fmt: skip
+                    "relationship": rel, "likeness": r.likeness})  # fmt: skip
     return out
 
 
@@ -1239,6 +1297,9 @@ reframe or a push-in is a camera move inside one sub-shot, not a cut.
 or an over-the-shoulder) shortly before their line starts, and stay on them until it ends; \
 a reaction can follow in the gap between lines. Keep a two-shot for a line only when the \
 storyboard's framing or notes ask to hold both people.
+- **A clip of {coverage_s:g} s or more in which two or more people on screen speak is 2 \
+or 3 sub-shots** (e.g. the two-shot for the first line, then a single of the person who answers), \
+unless the storyboard's framing or notes say to hold the two-shot.
 - **Never cut in the middle of a line.** Every cut falls between lines (or before the first \
 or after the last).
 - **Each cut changes the view**: a different shot size, angle or subject. Two sub-shots \
@@ -1288,7 +1349,11 @@ class PlanOutput(BaseModel):
 
 def plan_instructions() -> str:
     return (
-        PLAN_ROLE + "\n\n" + PLAN_GUIDE.format(max_sub=MAX_SUB_SHOTS, min_s=MIN_SUB_SHOT_MS / 1000)
+        PLAN_ROLE
+        + "\n\n"
+        + PLAN_GUIDE.format(
+            max_sub=MAX_SUB_SHOTS, min_s=MIN_SUB_SHOT_MS / 1000, coverage_s=COVERAGE_MS / 1000
+        )
     )
 
 
@@ -1409,6 +1474,8 @@ camera, action and `people` (exactly these, `people_count` of them). From sub-sh
 props must match it, across the cut.
 - `shot`: the whole shot (props, dialogue, continuity), for context.
 - `prompt`: the prompt the frame was drawn from (for context; judge the frame, not the prompt).
+- `direction`: what the user asked of this take, if anything ("his shirt off", "tighter on \
+her"). It overrides the look pictures where they disagree.
 
 ## Check these items
 
@@ -1427,6 +1494,9 @@ and action say.
 - **defects**: hands, fingers, limbs, merged bodies, warped faces, broken perspective.
 - **text**: no stray letters, captions or watermarks (lettering the scene needs is fine).
 - **style**: a photographic live-action frame in the scene's light, not an illustration.
+- **direction**: when `direction` is given, one item (kind "action", named "Direction: \
+<what was asked>") that fails, major, when the frame doesn't do what was asked. Judge the \
+wardrobe against the look pictures as changed by the direction.
 
 Each item: `passed`, `severity` (major: a viewer would notice or the clip would carry it; \
 minor: small), and a concrete `finding` when it fails ("her blouse is blue; the look \
@@ -1555,6 +1625,8 @@ class ShotFrameRunner:
                     if attempt:
                         raise
                     subs, problems = None, [str(exc)]
+                # Dialogue held in one cut is the planner's to fix (the check already spares a
+                # storyboard that holds the two-shot); a shot too long for H3 isn't.
                 fixable = [p for p in problems if not p.startswith(TOO_LONG)]
                 if subs is not None and (not fixable or attempt):
                     # Clean, or still not after the retry: kept, and flagged until fixed.
@@ -1800,6 +1872,7 @@ class ShotFrameRunner:
                 for n, r in enumerate(take.references, 1)
             ],
             "prompt": take.prompt,
+            "direction": take.direction,
         }
         refs = self._media(take)
         todo = [d for d in take.results

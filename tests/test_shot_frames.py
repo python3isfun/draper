@@ -30,6 +30,7 @@ from drama_agent.shot_frames import (
     ShotPicks,
     ShotPlan,
     ShotTake,
+    check_plan,
     clip_ms,
     current_sub,
     make_sub_shots,
@@ -48,6 +49,7 @@ from drama_agent.shot_frames import (
     spread,
     stale_approvals,
     template_prompt,
+    writer_instructions,
 )
 from drama_agent.store import InMemoryRepository
 from drama_agent.store.sqlite import SqliteRepository
@@ -1232,3 +1234,99 @@ def test_a_keyframe_from_before_whole_second_clips_still_counts(package):
     other = plan.sub_shots[0].model_copy(update={"end_ms": 7500, "framing": "else"})
     take.spec = other
     assert current_sub(package, shot, plan, take) is None
+
+
+# ---------------------------------------------------------------------------
+# Seen live on Heartbeats ep1 shot 1 (2026-11-17)
+
+
+def two_speakers(package):
+    """The busiest shot with a second line, by another person on screen, after the first."""
+    from drama_agent.models.storyboard import DialogueCue
+
+    shot = busiest(package)
+    first = shot_lines(package, shot)[0]
+    other = next(
+        bt.dialogue
+        for ep in package.episodes for sc in ep.scenes for bt in sc.beats
+        if bt.dialogue and bt.dialogue.character_id in shot.character_ids
+        and bt.dialogue.character_id != first["speaker_id"]
+    )  # fmt: skip
+    cue = DialogueCue(dialogue_id=other.dialogue_id, start_ms=shot.start_ms + 8000,
+                      end_ms=shot.start_ms + 11000)  # fmt: skip
+    return shot.model_copy(update={"dialogue_cues": [*shot.dialogue_cues, cue]})
+
+
+def test_dialogue_between_two_people_in_one_cut_is_flagged_but_may_be_kept(package):
+    shot = two_speakers(package)
+    plan = single_plan(package, shot)
+    [problem] = plan_problems(package, shot, plan)
+    assert problem.startswith("dialogue held in one cut: two people speak in this 15 s clip")
+    assert "a cut at" in problem and 'note "hold the two-shot" in the storyboard' in problem
+    # A person may hold the two-shot on purpose: their save isn't refused for it.
+    ids = shot.character_ids
+    row = {"start_ms": 0, "framing": "wide", "action": "x", "people": ids, "placement": spread(ids)}
+    assert any(p.startswith("dialogue held in one cut")
+               for p in check_plan(package, shot, make_sub_shots(package, shot, [row])))  # fmt: skip
+
+
+def test_a_storyboard_that_holds_the_two_shot_is_not_flagged(package):
+    shot = two_speakers(package).model_copy(update={"generation_notes": "Hold the two-shot."})
+    assert plan_problems(package, shot, single_plan(package, shot)) == []
+
+
+def test_coverage_needs_a_place_to_cut_and_lines_inside_the_clip(package):
+    from drama_agent.shot_frames import coverage_cut
+
+    a = {"speaker_id": "a", "start_ms": 200, "end_ms": 1100}
+    b = {"speaker_id": "b", "start_ms": 1300, "end_ms": 7600}
+    assert coverage_cut([a, b], 8000) == 1200  # between the lines, 1 s from the start
+    assert coverage_cut([a, {**b, "speaker_id": "a"}], 8000) is None  # one speaker
+    assert coverage_cut([{**a, "end_ms": 400}, {**b, "start_ms": 600}], 8000) is None  # too early
+    # A second speaker whose line starts after the clip ends doesn't count.
+    shot = two_speakers(package)
+    late = shot.model_copy(update={"dialogue_cues": [
+        *shot.dialogue_cues[:-1],
+        shot.dialogue_cues[-1].model_copy(update={"start_ms": shot.start_ms + 15500,
+                                                  "end_ms": shot.start_ms + 16000}),
+    ]})  # fmt: skip
+    assert not any(
+        p.startswith("dialogue held")
+        for p in plan_problems(package, late, single_plan(package, late))
+    )
+
+
+def test_advisory_problems_are_matched_by_their_start():
+    from drama_agent.shot_frames import advisory
+
+    assert advisory("dialogue held in one cut: two people speak ...")
+    assert not advisory(
+        'the cut at 2 s falls in the middle of X\'s line "dialogue held in one cut"'
+    )
+
+
+def test_the_planner_is_told_the_coverage_length():
+    from drama_agent.shot_frames import COVERAGE_MS, plan_instructions
+
+    assert f"A clip of {COVERAGE_MS / 1000:g} s or more" in plan_instructions()
+
+
+def test_the_writer_knows_which_pictures_show_a_real_person(package):
+    take = face_take(package)
+    take.references[0] = take.references[0].model_copy(update={"likeness": True})
+    pictures = picture_sentences(package, take)
+    assert pictures[0]["likeness"] is True and pictures[1]["likeness"] is False
+    rules = writer_instructions()
+    assert "Rule 3 applies only to a person whose picture has `likeness: true`" in rules
+    assert "follow such a direction within rules 1 and 2" in rules
+
+
+def test_the_judge_is_told_the_direction(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1, "direction": "his shirt off"})
+        b.wait()
+        check = b.calls("shot_check")[-1]
+        assert check.context["direction"] == "his shirt off"
+        assert "Direction: <what was asked>" in check.instructions

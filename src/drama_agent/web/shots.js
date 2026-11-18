@@ -95,8 +95,10 @@ function renderFrameDraw(take) {
   };
 }
 
-function renderFrameTake(take) {
+function renderFrameTake(take, takes = []) {
   const busy = !["done", "failed"].includes(take.status);
+  // The automatic round after this one, if it has started (same run, next round).
+  const next = takes.find((t) => t.run_id === take.run_id && t.round === take.round + 1);
   const tid = encodeURIComponent(take.take_id);
   const uncheckable = take.status === "done" && take.results.some((d) => d.status === "done" && !d.check);
   return h("div", { class: "take" },
@@ -106,7 +108,9 @@ function renderFrameTake(take) {
       take.status === "failed" && h("span", { class: "chip bad", title: take.error || "" }, take.refused ? "refused" : "failed"),
       take.status === "done" && (take.results.some((d) => d.check && d.check.passed)
         ? h("span", { class: "chip ok" }, "passed")
-        : h("span", { class: "chip warn" }, take.auto && take.round < take.max_rounds ? "revising…" : "no draw passed: your call")),
+        : next ? h("span", { class: "chip" }, `revised in round ${next.round}`)
+        // The next automatic round is created as this one finishes, so it shows on the next poll.
+        : h("span", { class: "chip warn" }, "no draw passed: your call")),
       take.direction && h("span", { class: "chip" }, `“${take.direction}”`),
       take.prompt_version && h("span", { class: "chip", title: "The prompt version this take draws" }, `prompt v${take.prompt_version}`),
       take.prompt_source === "user" && h("span", { class: "chip" }, "your prompt"),
@@ -363,7 +367,7 @@ function renderSubShot(pkg, shot, sub, total) {
     blocked
       ? h("p", { class: "small warn-text" }, `First: ${sub.missing.join("; ")}.`)
       : renderRefStrip(sub),
-    sub.takes.map((t) => renderFrameTake(t)),
+    sub.takes.map((t) => renderFrameTake(t, sub.takes)),
     !blocked && renderNewFrameTake(pkg, shot, sub));
 }
 
