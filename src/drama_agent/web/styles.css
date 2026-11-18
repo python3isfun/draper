@@ -449,6 +449,10 @@ td.mono { white-space: nowrap; }
 .prompt-diff { white-space: pre-wrap; font: 12px/1.5 var(--mono, ui-monospace, monospace); background: var(--surface-2); padding: 8px; border-radius: 6px; margin: 6px 0; }
 .prompt-diff del { color: var(--bad); text-decoration: line-through; }
 .prompt-diff ins { color: var(--ok); text-decoration: none; background: var(--ok-soft); }
+.choices { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+.choice { display: flex; gap: 8px; align-items: flex-start; }
+.choice img { width: 48px; height: 64px; object-fit: cover; border-radius: 4px; background: var(--surface-2); flex: 0 0 48px; }
+.choice select { width: auto; max-width: 100%; padding: 2px 4px; }
 .prompt-view { white-space: pre-wrap; font: 12px/1.45 var(--mono, ui-monospace, monospace); background: var(--surface-2); padding: 8px; border-radius: 6px; margin: 6px 0; }
 
 /* Mode tabs (Drama / Experiment) ------------------------------------------ */

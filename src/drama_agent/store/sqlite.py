@@ -18,12 +18,13 @@ from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceE
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 from ..shot_frames import PromptVersion, ShotPlan, ShotTake, approval_changes
+from ..shot_reading import SceneReading
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
 # v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns.
-# v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. v10: shot_prompts. Each
-# step is additive, so older files upgrade in place (see _migrate).
-SCHEMA_VERSION = 10
+# v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. v10: shot_prompts.
+# v11: scene_readings. Each step is additive, so older files upgrade in place (see _migrate).
+SCHEMA_VERSION = 11
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -139,6 +140,14 @@ CREATE TABLE IF NOT EXISTS shot_prompts (
     v           INTEGER NOT NULL,           -- 1, 2, ... per shot and sub-shot
     data        TEXT NOT NULL,
     UNIQUE (package_id, revision_id, shot_id, sub_shot, v)
+);
+CREATE TABLE IF NOT EXISTS scene_readings (
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    scene_id    TEXT NOT NULL,
+    status      TEXT NOT NULL,              -- writing | done | failed
+    data        TEXT NOT NULL,
+    PRIMARY KEY (package_id, revision_id, scene_id)
 );
 CREATE TABLE IF NOT EXISTS shot_plans (
     package_id  TEXT NOT NULL,
@@ -780,6 +789,44 @@ class SqliteRepository:
                 (package_id, revision_id),
             ).fetchall()
         return [PromptVersion.model_validate_json(r[0]) for r in rows]
+
+    def save_scene_reading(self, reading: SceneReading) -> None:
+        self._exec(
+            "INSERT INTO scene_readings (package_id, revision_id, scene_id, status, data) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (package_id, revision_id, scene_id) DO UPDATE "
+            "SET status = excluded.status, data = excluded.data",
+            (reading.package_id, reading.revision_id, reading.scene_id, reading.status,
+             reading.model_dump_json()),
+        )  # fmt: skip
+
+    def get_scene_reading(
+        self, package_id: str, revision_id: str, scene_id: str
+    ) -> SceneReading | None:
+        raw = self._one(
+            "SELECT data FROM scene_readings WHERE package_id = ? AND revision_id = ? "
+            "AND scene_id = ?",
+            (package_id, revision_id, scene_id),
+        )
+        return SceneReading.model_validate_json(raw) if raw else None
+
+    def list_scene_readings(self, package_id: str, revision_id: str) -> list[SceneReading]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM scene_readings WHERE package_id = ? AND revision_id = ?",
+                (package_id, revision_id),
+            ).fetchall()
+        return [SceneReading.model_validate_json(r[0]) for r in rows]
+
+    def fail_unfinished_scene_readings(self, error: str) -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM scene_readings WHERE status = 'writing'"
+            ).fetchall()
+        for (raw,) in rows:
+            r = SceneReading.model_validate_json(raw)
+            r.status, r.error = "failed", error
+            self.save_scene_reading(r)
+        return len(rows)
 
     def fail_unfinished_shot_takes(self, error: str) -> int:
         with self._lock:

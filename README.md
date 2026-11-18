@@ -330,6 +330,31 @@ failed items, likeness, motion, prompt) and `sub_shots.json` (every shot's plan,
 sub-shot's keyframe file or null). Even a draw a person approved after it failed the check
 is exported, marked failed.
 
+**Which pictures each keyframe is drawn from: reading the scene.** A character has a few
+design pictures (a face, a picture per look), and the storyboard names one look per shot; that
+is the intended outfit, not always what the camera sees (a work look with pinned hair and a bag
+while she is still dressing). So before a scene's first written take, one text call
+(`shot_reading`, **gpt-6-luna** unless `MCPHUB_MODEL_SHOT_READING` says otherwise) reads the
+whole scene in order, with every candidate picture attached, and decides for each person on
+screen in each sub-shot:
+
+- their **state** at that moment: what they wear (shoes or bare feet), their hair, what they
+  hold, their condition, carried over from the moment before unless the action changes it;
+- the **closest picture** of theirs (clothing matters most, then hair; what is held and the
+  condition are easy to change in words), what it already gets right, and why.
+
+The prompt's sentence for that picture keeps the face, build and what it gets right and states
+the rest ("... wears an ivory blouse and charcoal trousers, barefoot, hair loose, with empty
+hands"), so a picture's bag or pinned hair isn't carried into a moment that doesn't have them;
+the writer and the judge both see each person's state, and the judge checks the wardrobe
+against it. Each sub-shot on the board shows the choice, the state and the reason, with a menu
+to draw a person from another of their pictures (**Read the scene again** keeps your choices).
+A reading is redone when a shot of the scene is re-planned or a pick changes; if it can't be
+used, the storyboard's looks are. A shot's first cut also starts from the approved keyframe of
+the shot before it in the scene, when there is one, so light, set dressing and everyone's state
+carry across the cut. Each prompt version keeps the pictures it was written for. The export's
+`sub_shots.json` gives each cut's `now`: every person's state and their chosen picture.
+
 **The sub-shot spec is the contract for video production.** Draper runs first: its plan
 says how each shot is cut, and video production (dramer) writes its prompt from it rather
 than re-timing the shot. `05_assets/shot_keyframes/sub_shots.json` (`spec_version` 1) gives,
@@ -361,7 +386,9 @@ person's likeness (content rule 3). Endpoints: `GET/POST /v1/drama-packages/{id}
 (model plan, or `sub_shots` of your own), `POST .../keyframes/{shot_id}/prompts` (save a
 prompt version), `POST .../keyframes/{shot_id}` (a take on a `sub_shot`: written, or a
 `prompt_version` drawn as is), `POST|DELETE /v1/shot-takes/{take_id}/approve`, `.../check`, `.../retry`,
-`DELETE /v1/shot-takes/{take_id}`, `GET /v1/shot-takes/{take_id}/draws/{n}/{content|thumb}`.
+`DELETE /v1/shot-takes/{take_id}`, `GET /v1/shot-takes/{take_id}/draws/{n}/{content|thumb}`,
+`POST .../keyframes/scenes/{scene_id}/reading` (read the scene again) and
+`POST .../keyframes/{shot_id}/choice` (draw a person from another of their pictures).
 
 ### Production hand-off zip
 
@@ -558,7 +585,9 @@ restart, and separate worker processes aren't possible.
 
 **Per-step models.** `MCPHUB_MODEL` is the default for every pipeline step. Override it
 for individual steps with `MCPHUB_MODEL_INGEST`, `MCPHUB_MODEL_OUTLINE`,
-`MCPHUB_MODEL_SCRIPT`, `MCPHUB_MODEL_STORYBOARD` and `MCPHUB_MODEL_REVIEW`, e.g. a cheaper
+`MCPHUB_MODEL_SCRIPT`, `MCPHUB_MODEL_STORYBOARD`, `MCPHUB_MODEL_REVIEW` and the keyframe steps
+(`MCPHUB_MODEL_SHOT_PLAN`, `_SHOT_FRAMES`, `_SHOT_CHECK`, `_SHOT_READING`; reading a scene
+defaults to `gpt-6-luna`), e.g. a cheaper
 model for the light steps:
 
 ```bash

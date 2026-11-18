@@ -43,6 +43,7 @@ from ..shot_frames import (
     stale_approvals,
     sub_shot_for,
 )
+from ..shot_reading import SceneReading, candidates, scene_shots
 
 
 class KeyframeRequest(BaseModel):
@@ -97,6 +98,17 @@ class PlanRequest(BaseModel):
     clip_s: int | None = Field(None, ge=MIN_CLIP_S, le=MAX_CLIP_S)
 
 
+class ReadingRequest(BaseModel):
+    revision_id: str | None = None
+
+
+class ChoiceRequest(BaseModel):
+    revision_id: str | None = None
+    sub_shot: int = Field(1, ge=1, le=MAX_SUB_SHOTS)
+    character_id: str
+    image_id: str
+
+
 class ApproveRequest(BaseModel):
     n: int = Field(ge=0)
     # Start the next sub-shot's keyframe (when it has none yet), with the same settings.
@@ -128,12 +140,15 @@ def register(
         plans = repo.list_shot_plans(pkg.package_id, pkg.revision_id)
         images = repo.list_images(pkg.package_id, pkg.revision_id)
         versions = repo.list_prompt_versions(pkg.package_id, pkg.revision_id)
-        shots = shot_board(pkg, images, takes, plans, versions)
+        readings = repo.list_scene_readings(pkg.package_id, pkg.revision_id)
+        shots = shot_board(pkg, images, takes, plans, versions, readings)
         return KeyframeBoard(
             package_id=pkg.package_id,
             revision_id=pkg.revision_id,
             image_model=image_model,
-            busy=sum(1 for t in takes if t.busy) + sum(1 for p in plans if p.busy),
+            busy=sum(1 for t in takes if t.busy)
+            + sum(1 for p in plans if p.busy)
+            + sum(1 for r in readings if r.busy),
             shots=shots,
         )
 
@@ -159,6 +174,11 @@ def register(
         stored = repo.get_shot_plan(pkg.package_id, pkg.revision_id, shot.shot_id)
         return stored, plan_of(pkg, shot, stored)
 
+    def _reading(pkg: ProductionPackage, shot: Shot) -> SceneReading | None:
+        """The shot's scene reading when it read the scene as it is now (else the runner
+        reads it before the take's prompt is written)."""
+        return runner.fresh_reading(pkg, shot.scene_id)
+
     def _start(take: ShotTake) -> ShotTake:
         repo.save_shot_take(take)
         runner.start(take.take_id)
@@ -170,6 +190,58 @@ def register(
         what is missing, its keyframe takes (each draw with its quality check) and its
         approved keyframe."""
         return _board(package_or_404(package_id, revision_id))
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/keyframes/scenes/{scene_id}/reading",
+        status_code=202,
+    )
+    async def read_scene(package_id: str, scene_id: str, req: ReadingRequest) -> dict[str, Any]:
+        """Read the scene again (in the background): each person's state in every sub-shot,
+        and the design picture closest to it. Your own picture choices carry over."""
+        pkg = _writable(package_id, req.revision_id)
+        if not any(s.scene_id == scene_id for s in pkg.shot_list):
+            raise HTTPException(404, f"no scene {scene_id}")
+        stored = repo.get_scene_reading(pkg.package_id, pkg.revision_id, scene_id)
+        if stored is not None and stored.busy:
+            raise HTTPException(409, "the scene is being read")
+        images = repo.list_images(pkg.package_id, pkg.revision_id)
+        people = sorted({c for s in scene_shots(pkg, scene_id) for c in s.character_ids})
+        if not any(candidates(pkg, images, who) for who in people):
+            raise HTTPException(409, "pick design pictures for the scene's people first")
+        # Marked as being read before this returns, so a second click is refused.
+        busy = (stored or SceneReading(package_id=pkg.package_id, revision_id=pkg.revision_id,
+                                       scene_id=scene_id)).model_copy(update={"status": "writing"})  # fmt: skip
+        repo.save_scene_reading(busy)
+        runner.start_reading(pkg, scene_id)
+        return {"scene_id": scene_id, "status": "writing"}
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/choice",
+        response_model=SceneReading,
+    )
+    async def choose_picture(package_id: str, shot_id: str, req: ChoiceRequest) -> SceneReading:
+        """Draw a person in one sub-shot from another of their design pictures than the one
+        the reading chose. Their state stays the reading's; the prompt says what differs."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        stored = repo.get_scene_reading(pkg.package_id, pkg.revision_id, shot.scene_id)
+        if stored is not None and stored.busy:
+            raise HTTPException(409, "the scene is being read; choose when it is done")
+        reading = _reading(pkg, shot)
+        if reading is None:
+            raise HTTPException(409, "read the scene first: its reading is missing or out of date")
+        choice = reading.choice(shot_id, req.sub_shot, req.character_id)
+        if choice is None:
+            raise HTTPException(
+                404, f"{req.character_id} is not on screen in sub-shot {req.sub_shot}"
+            )
+        if not any(c.image_id == req.image_id and c.character_id == req.character_id
+                   for c in reading.candidates):  # fmt: skip
+            raise HTTPException(422, f"{req.image_id} is not one of {req.character_id}'s pictures")
+        choice.image_id, choice.keep = req.image_id, []
+        choice.source, choice.reason = "user", "Chosen by you."
+        repo.save_scene_reading(reading)
+        return reading
 
     @app.post(
         "/v1/drama-packages/{package_id}/keyframes/{shot_id}/plan",
@@ -215,7 +287,11 @@ def register(
         return plan
 
     async def _save_version(
-        pkg: ProductionPackage, shot: Shot, plan: ShotPlan, req: PromptRequest
+        pkg: ProductionPackage,
+        shot: Shot,
+        plan: ShotPlan,
+        req: PromptRequest,
+        reading: SceneReading | None = None,
     ) -> PromptVersion:
         """A person's prompt as the sub-shot's next version: checked against the H3 image
         rules (a picture it can't cite, empty or too long is refused; other findings are
@@ -223,7 +299,7 @@ def register(
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         images = repo.list_images(pkg.package_id, pkg.revision_id)
         try:
-            sub, refs = sub_shot_for(pkg, images, takes, plan, req.sub_shot)
+            sub, refs = sub_shot_for(pkg, images, takes, plan, req.sub_shot, reading)
         except NotReady as exc:
             raise HTTPException(409, str(exc)) from None
         prompt = req.prompt.strip()
@@ -248,6 +324,7 @@ def register(
                 package_id=pkg.package_id, revision_id=pkg.revision_id, shot_id=shot.shot_id,
                 sub_shot=req.sub_shot, spec=sub, prompt=prompt, source="user",
                 note=req.note.strip(), based_on=req.based_on, findings=findings,
+                references=refs,
             )
         )  # fmt: skip
 
@@ -264,7 +341,7 @@ def register(
         pkg = _writable(package_id, req.revision_id)
         shot = _shot(pkg, shot_id)
         _, plan = _plan(pkg, shot)
-        return await _save_version(pkg, shot, plan, req)
+        return await _save_version(pkg, shot, plan, req, _reading(pkg, shot))
 
     @app.post(
         "/v1/drama-packages/{package_id}/keyframes/{shot_id}",
@@ -283,17 +360,20 @@ def register(
         version = None
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         images = repo.list_images(pkg.package_id, pkg.revision_id)
+        reading = _reading(pkg, shot)  # once per request
         if req.prompt is not None:
             # Check the draw can start before the prompt is saved, so a refused draw
             # leaves no version behind.
             try:
-                plan_take(pkg, images, takes, plan, sub_shot=req.sub_shot, draws=req.draws)
+                plan_take(pkg, images, takes, plan, sub_shot=req.sub_shot, draws=req.draws,
+                          reading=reading)  # fmt: skip
             except NotReady as exc:
                 raise HTTPException(409, str(exc)) from None
             version = await _save_version(
                 pkg, shot, plan,
                 PromptRequest(revision_id=req.revision_id, sub_shot=req.sub_shot,
                               prompt=req.prompt, based_on=req.based_on, note=req.note),
+                reading,
             )  # fmt: skip
         elif req.prompt_version is not None:
             version = next(
@@ -316,6 +396,7 @@ def register(
                 version=version,
                 auto=req.auto,
                 max_rounds=req.max_rounds,
+                reading=reading,
             )
         except NotReady as exc:
             raise HTTPException(409, str(exc)) from None
@@ -346,6 +427,7 @@ def register(
         )
         options = {"sub_shot": 1, "draws": req.draws, "max_rounds": req.max_rounds}
         started, planning, skipped = [], [], []
+        scene_reading: dict[str, SceneReading | None] = {}
         for shot_id in ids:
             try:
                 shot = shot_of(pkg, shot_id)
@@ -365,7 +447,10 @@ def register(
                 planning.append(shot_id)
                 continue
             try:
-                take = plan_take(pkg, images, takes, plan_of(pkg, shot, stored), **options)
+                if shot.scene_id not in scene_reading:  # once per scene
+                    scene_reading[shot.scene_id] = _reading(pkg, shot)
+                take = plan_take(pkg, images, takes, plan_of(pkg, shot, stored), **options,
+                                 reading=scene_reading[shot.scene_id])  # fmt: skip
             except (NotReady, ValueError) as exc:
                 skipped.append({"shot_id": shot_id, "reason": str(exc)})
                 continue
@@ -423,6 +508,7 @@ def register(
                         sub_shot=following.index,
                         draws=take.draws,
                         max_rounds=take.max_rounds,
+                        reading=_reading(pkg, shot),
                     )
                 )
         return out

@@ -1,5 +1,6 @@
 """Shot keyframes: a sub-shot plan per shot and a checked keyframe per sub-shot."""
 
+import asyncio
 import csv
 import io
 import json
@@ -1330,3 +1331,332 @@ def test_the_judge_is_told_the_direction(tmp_path):
         check = b.calls("shot_check")[-1]
         assert check.context["direction"] == "his shirt off"
         assert "Direction: <what was asked>" in check.instructions
+
+
+# ---------------------------------------------------------------------------
+# Choosing the pictures by reading the scene (shot_reading.py)
+
+
+def test_reading_the_scene_runs_on_gpt_6_luna_unless_set(monkeypatch):
+    from drama_agent import config
+
+    for k in list(__import__("os").environ):
+        if k.startswith("MCPHUB_MODEL_"):
+            monkeypatch.delenv(k)
+    for k, v in {"DRAMA_MODEL_CLIENT": "mcphub", "MCPHUB_URL": "http://x", "MCPHUB_KEY": "k",
+                 "MCPHUB_MODEL": "gpt-6.1-sol"}.items():  # fmt: skip
+        monkeypatch.setenv(k, v)
+    client = config.client_from_env()
+    assert client.model_for("shot_reading") == "gpt-6-luna"
+    assert client.model_for("shot_frames") == "gpt-6.1-sol"
+    monkeypatch.setenv("MCPHUB_MODEL_SHOT_READING", "gpt-6.1-sol")
+    assert config.client_from_env().model_for("shot_reading") == "gpt-6.1-sol"
+
+
+class FaceForTheFirst(FixtureModelClient):
+    """The reading draws the first person of every sub-shot from their face picture, in a
+    state of its own (hair loose, nothing in hand)."""
+
+    async def generate(self, request, output_model):
+        out = await super().generate(request, output_model)
+        if request.stage == "shot_reading":
+            pics = request.context["pictures"]
+            for st in out.states:
+                face = next((p["image"] for p in pics
+                             if p["person"] == st.person and p["meant_as"].startswith("face")), None)  # fmt: skip
+                if face and st.person == request.context["shots"][0]["sub_shots"][0]["people"][0]:
+                    st.image, st.hair, st.carrying, st.keep = face, "loose to the shoulders", "", []
+                    st.reason = "Closest for the moment."
+        return out
+
+
+def test_a_written_take_is_drawn_from_the_pictures_the_reading_chose(tmp_path):
+    with Board(tmp_path, text=FaceForTheFirst()) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        reading = b.calls("shot_reading")[-1]
+        assert reading.media and reading.media[0].label == "<Image 1>"
+        first = b.shot(sid)["sub_shots"][0]["choices"][0]
+        assert first["state"]["hair"] == "loose to the shoulders" and first["source"] == "model"
+        ref = next(r for r in take["references"] if r["entity_id"] == first["character_id"])
+        assert ref["image_id" if "image_id" in ref else "ref_id"] == first["image_id"]
+        assert ref["state"]["hair"] == "loose to the shoulders"
+        # The prompt says how they look now, not "every garment and accessory".
+        assert "hair loose to the shoulders, with empty hands" in take["prompt"]
+        assert "every garment and accessory" not in take["prompt"]
+        # The judge checks the wardrobe against that state.
+        check = b.calls("shot_check")[-1]
+        people = check.context["sub_shot"]["people"]
+        assert people[0]["now"]["hair"] == "loose to the shoulders"
+        assert b.shot(sid)["reading"]["fresh"] is True
+
+
+def test_a_person_can_choose_another_picture_and_it_survives_a_new_reading(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        sub = b.shot(sid)["sub_shots"][0]
+        c = sub["choices"][0]
+        other = next(x["image_id"] for x in c["candidates"] if x["image_id"] != c["image_id"])
+        r = b.http.post(f"{b.base}/{sid}/choice", json={"sub_shot": 1, "character_id":
+                        c["character_id"], "image_id": other})  # fmt: skip
+        assert r.status_code == 200, r.text
+        # Someone else's picture is refused.
+        foreign = next(x["image_id"] for ch in sub["choices"][1:] for x in ch["candidates"])
+        r = b.http.post(f"{b.base}/{sid}/choice", json={"sub_shot": 1, "character_id":
+                        c["character_id"], "image_id": foreign})  # fmt: skip
+        assert r.status_code == 422
+        scene = b.shot(sid)["scene_id"]
+        b.http.post(f"{b.base}/scenes/{scene}/reading", json={})
+        b.wait()
+        assert len(b.calls("shot_reading")) == 2
+        mine = b.shot(sid)["sub_shots"][0]["choices"][0]
+        assert (mine["image_id"], mine["source"]) == (other, "user")
+        # The next take draws them from it.
+        r = b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        assert any(x["ref_id"] == other for x in r.json()["references"])
+
+
+def test_a_new_plan_makes_the_reading_stale_and_it_is_read_again(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        shot = b.busiest()
+        sid = shot["shot_id"]
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        assert len(b.calls("shot_reading")) == 1 and b.shot(sid)["reading"]["fresh"]
+        b.http.post(f"{b.base}/{sid}/plan", json=b.two_cuts(shot))
+        assert b.shot(sid)["reading"]["fresh"] is False
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        assert len(b.calls("shot_reading")) == 2 and b.shot(sid)["reading"]["fresh"]
+        assert [len(s["choices"]) for s in b.shot(sid)["sub_shots"]] == [len(shot["people"]), 1]
+
+
+class WrongPicture(FixtureModelClient):
+    """The reading gives a person someone else's picture, every time."""
+
+    async def generate(self, request, output_model):
+        out = await super().generate(request, output_model)
+        if request.stage == "shot_reading":
+            pics = request.context["pictures"]
+            for st in out.states:
+                st.image = next(p["image"] for p in pics if p["person"] != st.person)
+        return out
+
+
+def test_a_reading_that_cant_be_used_leaves_the_storyboard_looks(tmp_path):
+    with Board(tmp_path, text=WrongPicture()) as b:
+        b.design()
+        sid = b.busiest()["shot_id"]
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        assert len(b.calls("shot_reading")) == 2  # tried once more with what was wrong
+        assert b.calls("shot_reading")[-1].context["problems"]
+        assert take["status"] == "done"
+        assert all(r.get("state") is None for r in take["references"])
+        s = b.shot(sid)
+        assert s["reading"]["status"] == "failed" and "is not a picture of" in s["reading"]["error"]
+
+
+def test_the_previous_shots_keyframe_opens_the_next_shot(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        shots = b.board()["shots"]
+        a, nxt = shots[0], shots[1]
+        assert a["scene_id"] == nxt["scene_id"]
+        b.http.post(f"{b.base}/{a['shot_id']}", json={"draws": 1})
+        [take] = b.wait() and b.takes(a["shot_id"])
+        b.http.post(f"/v1/shot-takes/{take['take_id']}/approve", json={"n": 0})
+        r = b.http.post(f"{b.base}/{nxt['shot_id']}", json={"draws": 1})
+        refs = r.json()["references"]
+        kinds = [x["kind"] for x in refs]
+        before = refs[kinds.index("previous_shot")]
+        assert (
+            before["ref_id"] == f"frame:{take['take_id']}:0" and "previous shot" in before["role"]
+        )
+        # After the people and the set: it never pushes out a look picture.
+        assert kinds.index("previous_shot") > kinds.index("set")
+        assert all(k in ("look", "face", "set") for k in kinds[: kinds.index("previous_shot")])
+        # It lends the set and light, not the people or their clothes.
+        b.wait()
+        prompt = b.takes(nxt["shot_id"])[0]["prompt"]
+        n = kinds.index("previous_shot") + 1
+        assert (f"<Subject {n}> serves as the reference for the set, the light and the props"
+                in prompt)  # fmt: skip
+        # The board shows the same pictures as the draw.
+        board_refs = b.shot(nxt["shot_id"])["sub_shots"][0]["references"]
+        assert [x["ref_id"] for x in board_refs] == [x["ref_id"] for x in refs]
+
+
+def test_a_version_is_drawn_with_the_pictures_it_was_written_for(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        [v1] = b.shot(sid)["sub_shots"][0]["versions"]
+        assert [r["ref_id"] for r in v1["references"]] == [r["ref_id"] for r in take["references"]]
+        c = b.shot(sid)["sub_shots"][0]["choices"][0]
+        other = next(x["image_id"] for x in c["candidates"] if x["image_id"] != c["image_id"])
+        b.http.post(f"{b.base}/{sid}/choice", json={"sub_shot": 1, "character_id":
+                    c["character_id"], "image_id": other})  # fmt: skip
+        r = b.http.post(f"{b.base}/{sid}", json={"prompt_version": 1, "draws": 1})
+        assert [x["ref_id"] for x in r.json()["references"]] == [
+            x["ref_id"] for x in v1["references"]
+        ]
+
+
+def test_the_export_says_how_each_person_looks_in_each_cut(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        spec = json.loads(member(b.zip(), "shot_keyframes/sub_shots.json"))
+        mine = next(p for p in spec["shots"] if p["shot_id"] == sid)
+        now = mine["sub_shots"][0]["now"]
+        assert now and all(v["picture"].startswith("reference_images/") for v in now.values())
+        assert all("wearing" in v for v in now.values())
+
+
+def test_a_version_opens_from_the_keyframe_approved_now(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        shot = b.busiest()
+        sid = shot["shot_id"]
+        b.http.post(f"{b.base}/{sid}/plan", json=b.two_cuts(shot))
+        b.http.post(f"{b.base}/{sid}", json={"draws": 2})
+        [one] = b.wait() and b.takes(sid)
+        b.http.post(f"/v1/shot-takes/{one['take_id']}/approve", json={"n": 0})
+        b.wait()
+        [v1] = b.shot(sid)["sub_shots"][1]["versions"]
+        assert v1["references"][0]["ref_id"] == f"frame:{one['take_id']}:0"
+        # Another sub-shot 1 draw is approved: v1 is drawn from it, same slot.
+        b.http.post(f"/v1/shot-takes/{one['take_id']}/approve", json={"n": 1, "next": False})
+        r = b.http.post(f"{b.base}/{sid}", json={"sub_shot": 2, "prompt_version": 1})
+        assert r.status_code == 202, r.text
+        assert r.json()["references"][0]["ref_id"] == f"frame:{one['take_id']}:1"
+        b.wait()
+        # Withdrawn: drawing v1 is refused with the reason.
+        b.http.delete(f"/v1/shot-takes/{one['take_id']}/approve")
+        r = b.http.post(f"{b.base}/{sid}", json={"sub_shot": 2, "prompt_version": 1})
+        assert r.status_code == 409
+
+
+def test_your_own_version_keeps_its_pictures(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        mine = take["prompt"].replace("No other lettering", "Soft rain. No other lettering")
+        v = b.http.post(f"{b.base}/{sid}/prompts", json={"prompt": mine}).json()
+        assert [r["ref_id"] for r in v["references"]] == [r["ref_id"] for r in take["references"]]
+
+
+class ReadingFailsLater(FixtureModelClient):
+    """The first reading works; every later one fails."""
+
+    readings = 0
+
+    async def generate(self, request, output_model):
+        if request.stage == "shot_reading":
+            self.readings += 1
+            if self.readings > 1:
+                await asyncio.sleep(0.5)  # long enough for a second click to arrive
+                raise RuntimeError("model unavailable")
+        return await super().generate(request, output_model)
+
+
+def test_a_failed_re_read_keeps_the_good_reading_and_your_choices(tmp_path):
+    with Board(tmp_path, text=ReadingFailsLater()) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        c = b.shot(sid)["sub_shots"][0]["choices"][0]
+        other = next(x["image_id"] for x in c["candidates"] if x["image_id"] != c["image_id"])
+        b.http.post(f"{b.base}/{sid}/choice", json={"sub_shot": 1, "character_id":
+                    c["character_id"], "image_id": other})  # fmt: skip
+        scene = b.shot(sid)["scene_id"]
+        assert b.http.post(f"{b.base}/scenes/{scene}/reading", json={}).status_code == 202
+        # Being read: a second click and a choice change are refused.
+        assert b.http.post(f"{b.base}/scenes/{scene}/reading", json={}).status_code == 409
+        b.wait()
+        s = b.shot(sid)
+        assert s["reading"]["fresh"] and "model unavailable" in s["reading"]["error"]
+        assert s["sub_shots"][0]["choices"][0]["image_id"] == other
+
+
+def test_a_choice_cant_change_while_the_scene_is_read(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        c = b.shot(sid)["sub_shots"][0]["choices"][0]
+        pkg = b.repo.get_package(b.pid)
+        reading = b.repo.get_scene_reading(pkg.package_id, pkg.revision_id, b.shot(sid)["scene_id"])
+        b.repo.save_scene_reading(reading.model_copy(update={"status": "writing"}))
+        r = b.http.post(f"{b.base}/{sid}/choice", json={"sub_shot": 1, "character_id":
+                        c["character_id"], "image_id": c["image_id"]})  # fmt: skip
+        assert r.status_code == 409 and "being read" in r.json()["detail"]
+
+
+def test_a_scene_with_no_picks_isnt_read(tmp_path):
+    with Board(tmp_path) as b:
+        scene = b.board()["shots"][0]["scene_id"]
+        r = b.http.post(f"{b.base}/scenes/{scene}/reading", json={})
+        assert r.status_code == 409 and "pick design pictures" in r.json()["detail"]
+
+
+def test_a_chosen_picture_unblocks_a_person_without_a_storyboard_pick(package):
+    images = done_images(package)
+    shot = busiest(package)
+    who = shot.character_ids[0]
+    look_req = next(r.requirement_id for r in package.asset_requirements.items
+                    if r.asset_type == "character_look" and r.requirement_id in shot.asset_requirement_ids
+                    and r.subject_refs[0].entity_id == who)  # fmt: skip
+    without = [i for i in images if i.requirement_id != look_req]
+    plan = single_plan(package, shot)
+    with pytest.raises(NotReady, match="first: "):
+        plan_take(package, without, [], plan)
+    from drama_agent.shot_reading import Candidate, Choice, SceneReading
+
+    face = next(i for i in without if i.requirement_id.startswith("ar_character_identity")
+                and who in i.requirement_id)  # fmt: skip
+    reading = SceneReading(
+        package_id=package.package_id, revision_id=package.revision_id, scene_id=shot.scene_id,
+        candidates=[Candidate(image_id=face.image_id, character_id=who, kind="face", label="face")],
+        choices=[Choice(shot_id=shot.shot_id, sub_shot=1, character_id=who,
+                        state={"wearing": "a robe"}, image_id=face.image_id)],
+    )  # fmt: skip
+    take = plan_take(package, without, [], plan, reading=reading)
+    mine = next(r for r in take.references if r.entity_id == who)
+    assert mine.ref_id == face.image_id and mine.state.wearing == "a robe"
+
+
+def test_a_reading_for_a_cut_or_person_that_isnt_there_is_refused(package):
+    from drama_agent.shot_reading import (
+        PictureOut,
+        ReadingOutput,
+        StateOut,
+        candidates,
+        read_output,
+    )
+
+    shot = busiest(package)
+    images = done_images(package)
+    who = shot.character_ids[0]
+    names = {c.character_id: c.name for c in package.story_bible.characters}
+    pool = candidates(package, images, who)
+    out = ReadingOutput(pictures=[PictureOut(image="<Image 1>")], states=[
+        StateOut(shot_id=shot.shot_id, sub_shot=3, person=names[who], image="<Image 1>"),
+    ])  # fmt: skip
+    with pytest.raises(ValueError, match="has no sub-shot 3"):
+        read_output(package, shot.scene_id, {}, pool, out)

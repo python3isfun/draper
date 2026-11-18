@@ -48,7 +48,7 @@ def client_from_env() -> ModelClient:
             base_url=os.environ["MCPHUB_URL"],
             api_key=os.environ["MCPHUB_KEY"],
             model=os.environ["MCPHUB_MODEL"],
-            stage_models=stage_models_from_env(),
+            stage_models={**DEFAULT_STAGE_MODELS, **stage_models_from_env()},
             api=os.environ.get("MCPHUB_API", "responses"),  # type: ignore[arg-type]
             transcribe_model=os.environ.get("MCPHUB_TRANSCRIBE_MODEL", "whisper-1"),
             timeout_s=float(os.environ.get("MCPHUB_TIMEOUT_S", "600")),
@@ -59,15 +59,24 @@ def client_from_env() -> ModelClient:
 
 STAGE_MODEL_PREFIX = "MCPHUB_MODEL_"
 
+# Steps whose model is chosen here unless MCPHUB_MODEL_<STEP> says otherwise: reading a scene
+# to choose each shot's reference pictures is reasoning, done by gpt-6-luna.
+DEFAULT_STAGE_MODELS = {"shot_reading": "gpt-6-luna"}
+# The keyframe steps (shot_frames.py, shot_reading.py), overridable like the pipeline's.
+KEYFRAME_STAGES = ("shot_plan", "shot_frames", "shot_check", "shot_reading")
+
 
 def stage_models_from_env() -> dict[str, str]:
     """Per-step model overrides: MCPHUB_MODEL_<STEP> for each pipeline step (INGEST, OUTLINE,
-    SCRIPT, CAST, SETS, PROPS, STORYBOARD, REVIEW) and IMAGE_PROMPTS (the call that writes
-    image prompts). Steps without one use MCPHUB_MODEL. A misspelt variable is an error
-    rather than a silently ignored setting."""
+    SCRIPT, CAST, SETS, PROPS, STORYBOARD, REVIEW), IMAGE_PROMPTS (the call that writes
+    image prompts) and the keyframe steps (SHOT_PLAN, SHOT_FRAMES, SHOT_CHECK, SHOT_READING).
+    Steps without one use DEFAULT_STAGE_MODELS, else MCPHUB_MODEL. A misspelt variable is an
+    error rather than a silently ignored setting."""
     from .models.package import STAGES
 
-    known = {f"{STAGE_MODEL_PREFIX}{s.upper()}": s for s in (*STAGES, "image_prompts")}
+    known = {
+        f"{STAGE_MODEL_PREFIX}{s.upper()}": s for s in (*STAGES, "image_prompts", *KEYFRAME_STAGES)
+    }
     overrides: dict[str, str] = {}
     for key, value in os.environ.items():
         if not key.startswith(STAGE_MODEL_PREFIX):

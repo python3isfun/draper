@@ -350,6 +350,41 @@ function renderPlan(pkg, shot) {
   );
 }
 
+const stateLine = (st) => [st.wearing && `wears ${st.wearing}`, st.hair && `hair ${st.hair}`, st.carrying ? `holding ${st.carrying}` : "empty hands", st.condition].filter(Boolean).join(" · ");
+
+// Each person in the sub-shot: how they look at this moment, the design picture chosen for it
+// (by reading the scene), why, and a menu to draw them from another of their pictures.
+function renderChoices(pkg, shot, sub) {
+  if (!sub.choices || !sub.choices.length) return null;
+  const url = `${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/choice`;
+  return h("div", { class: "choices" }, sub.choices.map((c) => {
+    const select = h("select", { "aria-label": `Picture for ${c.name}`, onchange: (e) =>
+      frameAction(url, null, { revision_id: pkg.revision_id, sub_shot: sub.index, character_id: c.character_id, image_id: e.target.value }) },
+      c.candidates.map((x) => h("option", { value: x.image_id, selected: x.image_id === c.image_id, title: x.shows }, x.label.slice(0, 70))));
+    return h("div", { class: "choice" },
+      h("img", { src: `/v1/generated-images/${encodeURIComponent(c.image_id)}/thumb`, alt: c.name, loading: "lazy", title: c.shows || "" }),
+      h("div", { class: "small" },
+        h("div", {}, h("strong", {}, c.name), " ", h("span", { class: "muted" }, stateLine(c.state))),
+        c.keep.length > 0 && h("div", { class: "muted" }, `The picture already has: ${c.keep.join(", ")}`),
+        c.reason && h("div", { class: "muted" }, c.source === "user" ? "Chosen by you." : c.reason),
+        h("label", { class: "muted" }, "Draw from ", select)));
+  }));
+}
+
+function renderReading(pkg, shot) {
+  const r = shot.reading;
+  const label = r.status === "writing" ? "reading the scene…"
+    : r.fresh ? `scene read${r.model ? ` by ${r.model}` : ""}${r.error ? " (the last re-read failed)" : ""}`
+    : r.status === "failed" ? "scene reading failed"
+    : "scene not read yet: read before the next written take";
+  return h("div", { class: "take-head small" },
+    h("span", { class: `chip ${r.fresh ? "ok" : r.status === "failed" ? "bad" : "info"}`, title: r.error || "" }, label),
+    h("button", { type: "button", class: "btn ghost small", disabled: r.status === "writing",
+      title: "Work out how each person looks in every sub-shot of this scene, and choose the closest design picture for each",
+      onclick: (e) => frameAction(`${framesBase(pkg)}/scenes/${encodeURIComponent(r.scene_id)}/reading`, e.currentTarget, { revision_id: pkg.revision_id }) },
+      r.fresh ? "Read the scene again" : "Read the scene"));
+}
+
 function renderSubShot(pkg, shot, sub, total) {
   const blocked = sub.missing.length > 0;
   return h("div", { class: "frame-block" },
@@ -364,6 +399,7 @@ function renderSubShot(pkg, shot, sub, total) {
       Object.keys(sub.off_screen || {}).length > 0 && ` · off frame: ${Object.entries(sub.off_screen).map(([id, side]) => `${(shot.people.find((p) => p.id === id) || { name: id }).name} (${side})`).join(", ")}`),
     sub.lines.length > 0 && h("ul", { class: "plain small sub-lines" }, sub.lines.map((x) =>
       h("li", {}, h("span", { class: "muted" }, `${(x.start_ms / 1000).toFixed(1)}–${(x.end_ms / 1000).toFixed(1)} s `), h("strong", {}, x.speaker), x.where !== "on screen" ? h("span", { class: "muted" }, ` (${x.where})`) : "", `: “${x.text}”`))),
+    renderChoices(pkg, shot, sub),
     blocked
       ? h("p", { class: "small warn-text" }, `First: ${sub.missing.join("; ")}.`)
       : renderRefStrip(sub),
@@ -384,6 +420,7 @@ function renderShotCard(pkg, shot) {
     h("p", { class: "small" }, shot.action),
     h("p", { class: "small muted" }, shot.people.length ? `On screen: ${shot.people.map((p) => p.name).join(", ")}` : "No one on screen"),
     renderPlan(pkg, shot),
+    renderReading(pkg, shot),
     subs.map((s) => renderSubShot(pkg, shot, s, subs.length)),
   );
 }

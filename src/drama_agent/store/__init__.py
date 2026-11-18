@@ -10,6 +10,7 @@ from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceE
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 from ..shot_frames import PromptVersion, ShotPlan, ShotTake, approval_changes
+from ..shot_reading import SceneReading
 
 
 class Repository(Protocol):
@@ -76,6 +77,12 @@ class Repository(Protocol):
     def list_shot_plans(self, package_id: str, revision_id: str) -> list[ShotPlan]: ...
     def fail_unfinished_shot_plans(self, error: str) -> int: ...
     def add_prompt_version(self, version: PromptVersion) -> PromptVersion: ...
+    def save_scene_reading(self, reading: SceneReading) -> None: ...
+    def get_scene_reading(
+        self, package_id: str, revision_id: str, scene_id: str
+    ) -> SceneReading | None: ...
+    def list_scene_readings(self, package_id: str, revision_id: str) -> list[SceneReading]: ...
+    def fail_unfinished_scene_readings(self, error: str) -> int: ...
     def list_prompt_versions(self, package_id: str, revision_id: str) -> list[PromptVersion]: ...
 
 
@@ -103,6 +110,7 @@ class InMemoryRepository:
         self.shot_takes: dict[str, ShotTake] = {}
         self.shot_plans: dict[tuple[str, str, str], ShotPlan] = {}
         self.prompt_versions: list[PromptVersion] = []
+        self.scene_readings: dict[tuple[str, str, str], SceneReading] = {}
 
     def save_source_asset(self, asset_id: str, meta: dict[str, Any]) -> None:
         self.source_assets[asset_id] = meta
@@ -372,6 +380,27 @@ class InMemoryRepository:
     def list_shot_plans(self, package_id: str, revision_id: str) -> list[ShotPlan]:
         return [p.model_copy(deep=True) for (pid, rid, _), p in self.shot_plans.items()
                 if (pid, rid) == (package_id, revision_id)]  # fmt: skip
+
+    def save_scene_reading(self, reading: SceneReading) -> None:
+        key = (reading.package_id, reading.revision_id, reading.scene_id)
+        self.scene_readings[key] = reading.model_copy(deep=True)
+
+    def get_scene_reading(
+        self, package_id: str, revision_id: str, scene_id: str
+    ) -> SceneReading | None:
+        r = self.scene_readings.get((package_id, revision_id, scene_id))
+        return r.model_copy(deep=True) if r else None
+
+    def list_scene_readings(self, package_id: str, revision_id: str) -> list[SceneReading]:
+        return [r.model_copy(deep=True) for (pid, rid, _), r in self.scene_readings.items()
+                if (pid, rid) == (package_id, revision_id)]  # fmt: skip
+
+    def fail_unfinished_scene_readings(self, error: str) -> int:
+        n = 0
+        for r in self.scene_readings.values():
+            if r.busy:
+                r.status, r.error, n = "failed", error, n + 1
+        return n
 
     def add_prompt_version(self, version: PromptVersion) -> PromptVersion:
         key = (version.package_id, version.revision_id, version.shot_id, version.sub_shot)

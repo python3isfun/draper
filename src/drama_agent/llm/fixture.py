@@ -96,6 +96,10 @@ class FixtureModelClient:
                 from ..shot_frames import fixture_plan
 
                 output = fixture_plan(request)
+            case "shot_reading":
+                from ..shot_reading import fixture_reading
+
+                output = fixture_reading(request)
             case "shot_check":
                 from ..shot_frames import fixture_check
 

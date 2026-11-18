@@ -1220,6 +1220,7 @@ def create_app(
                 options=repo.list_options(pkg.package_id, pkg.revision_id),
                 keyframes=repo.list_shot_takes(pkg.package_id, pkg.revision_id),
                 plans=repo.list_shot_plans(pkg.package_id, pkg.revision_id),
+                readings=repo.list_scene_readings(pkg.package_id, pkg.revision_id),
             )
         except BaseException:
             tmp.unlink(missing_ok=True)

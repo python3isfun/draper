@@ -47,6 +47,9 @@ from .shot_frames import (
     shot_lines,
     sub_shot_lines,
 )
+from .shot_reading import SceneReading
+from .shot_reading import fingerprint as reading_fingerprint
+from .shot_reading import fresh as fresh_reading
 
 MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".webm"}
 
@@ -460,6 +463,7 @@ def build_export(
     options: list[DesignOption] | None = None,
     keyframes: list[ShotTake] | None = None,
     plans: list[ShotPlan] | None = None,
+    readings: list[SceneReading] | None = None,
 ) -> str:
     """Write the hand-off zip to `dest`; returns the download file name."""
     takes = {o.option_id: o for o in options or []}
@@ -693,7 +697,7 @@ def build_export(
         if keyframes or plans:
             text(
                 "05_assets/shot_keyframes/sub_shots.json",
-                _json(sub_shot_spec(pkg, stored, files, n)),
+                _json(sub_shot_spec(pkg, stored, files, n, readings or [], images, exported)),
             )
 
         # Design takes: the chosen take per deliverable, and every other option
@@ -850,13 +854,37 @@ def sub_shot_spec(
     stored: dict[str, ShotPlan],
     files: dict[tuple[str, int], str],
     n: Any,
+    readings: list[SceneReading] | None = None,
+    images: list[GeneratedImage] | None = None,
+    exported: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The sub-shot spec of every shot: the contract video production writes its prompt
     from. Per shot, the clip's length (render exactly this), and per sub-shot (`[Shot N]`
     of the prompt, at its `timecode`): framing, camera, action, who is on screen and on
     which side of the frame, who is off screen and on which side, the lines spoken in it
     with their timing, and its approved keyframe (the cut's first frame), if any. `clean`
-    says whether the plan passes every rule of check_plan; `problems` lists what doesn't."""
+    says whether the plan passes every rule of check_plan; `problems` lists what doesn't.
+    Where the scene has a fresh reading (shot_reading.py), each sub-shot's `now` gives each
+    person on screen their state at that moment and the design picture chosen for it."""
+    by_scene = {r.scene_id: r for r in readings or []}
+    fresh_of = {
+        scene_id: fresh_reading(
+            by_scene.get(scene_id), reading_fingerprint(pkg, scene_id, stored, images or [])
+        )
+        for scene_id in {s.scene_id for s in pkg.shot_list}
+    }
+
+    def now(shot_id: str, scene_id: str, sub: SubShot) -> dict[str, Any]:
+        reading = fresh_of.get(scene_id)
+        out = {}
+        for who in sub.people:
+            c = reading.choice(shot_id, sub.index, who) if reading else None
+            if c is not None:
+                pic = (exported or {}).get(c.image_id)
+                out[n.any(who)] = {**c.state.model_dump(),
+                                   "picture": f"reference_images/{pic}" if pic else None}  # fmt: skip
+        return out
+
     shots = []
     for shot in pkg.shot_list:
         plan = plan_of(pkg, shot, stored.get(shot.shot_id))
@@ -887,6 +915,7 @@ def sub_shot_spec(
                         for x in sub_shot_lines(lines, sub)
                     ],
                     "keyframe": files.get((shot.shot_id, sub.index)),
+                    "now": now(shot.shot_id, shot.scene_id, sub),
                 }
                 for sub in plan.sub_shots
             ],

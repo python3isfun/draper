@@ -50,6 +50,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from . import shot_reading
 from .content_guard import RULES as CONTENT_RULES
 from .content_guard import GuardRefused, text_guard, upload_guard
 from .experiment import SIZES, cited_beyond
@@ -61,6 +62,7 @@ from .models import ProductionPackage
 from .models.images import GeneratedImage
 from .models.package import utcnow
 from .models.storyboard import Shot
+from .shot_reading import PersonState, SceneReading
 
 log = logging.getLogger(__name__)
 
@@ -112,9 +114,14 @@ class FrameRef(BaseModel):
     role: str  # "Lila in this shot's look, full body", "the approved keyframe of sub-shot 1"
     # previous_frame: the approved keyframe of the sub-shot before ("start_frame": older
     # takes' name for it).
-    kind: Literal["look", "face", "set", "prop", "previous_frame", "start_frame"]
+    # previous_shot: the approved keyframe of the shot before, in the same scene.
+    kind: Literal["look", "face", "set", "prop", "previous_frame", "start_frame", "previous_shot"]
     entity_id: str | None = None  # the character, location or prop shown
     likeness: bool = False  # shows a real person's likeness (content rule 3)
+    # For a person's picture chosen by reading the scene (shot_reading.py): how they look at
+    # this moment, and what the picture already gets right.
+    state: PersonState | None = None
+    keep: list[str] = Field(default_factory=list)
 
 
 class SubShot(BaseModel):
@@ -182,6 +189,9 @@ class PromptVersion(BaseModel):
     based_on: int | None = None  # the version this one edits
     take_id: str | None = None  # the take whose writer wrote it
     findings: list[str] = Field(default_factory=list)  # where it breaks the H3 image rules
+    # The pictures it was written for, in <Picture N> order: drawing it sends these, so its
+    # picture numbers still mean what they meant when it was written.
+    references: list[FrameRef] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -369,18 +379,31 @@ class ShotPicks:
     props: list[FrameRef]
     missing: list[tuple[str | None, str]]  # (the character it is for, or None; what)
 
-    def refs(self, people: set[str] | None = None,
-             previous: FrameRef | None = None) -> list[FrameRef]:  # fmt: skip
+    def refs(
+        self,
+        people: set[str] | None = None,
+        previous: FrameRef | None = None,
+        chosen: dict[str, FrameRef] | None = None,
+        previous_shot: FrameRef | None = None,
+    ) -> list[FrameRef]:
         """The pictures for `people` (None: everyone), in the order the prompt names them,
-        as dramer sends them: the previous keyframe, each person in their look, the set's
-        wide view, the props, then faces while the nine-picture limit allows."""
+        as dramer sends them: the previous keyframe, each person in their look (or the
+        picture `chosen` for them by reading the scene), the set's wide view, the props, then
+        faces while the nine-picture limit allows."""
+        chosen = chosen or {}
 
         def mine(r: FrameRef) -> bool:
             return people is None or r.entity_id in people
 
-        refs = [*([previous] if previous else []), *filter(mine, self.looks), *self.sets,
-                *self.props][:MAX_REFERENCES]  # fmt: skip
-        return refs + [f for f in self.faces if mine(f)][: MAX_REFERENCES - len(refs)]
+        looks = [chosen.get(r.entity_id or "", r) for r in self.looks if mine(r)]
+        looks += [r for who, r in chosen.items() if (people is None or who in people)
+                  and all(x.entity_id != who for x in looks)]  # fmt: skip
+        used = {r.ref_id for r in looks}
+        faces = [f for f in self.faces if mine(f) and f.ref_id not in used]
+        refs = [*([previous] if previous else []), *looks, *self.sets,
+                *([previous_shot] if previous_shot else []), *self.props]  # fmt: skip
+        refs = refs[:MAX_REFERENCES]
+        return refs + faces[: MAX_REFERENCES - len(refs)]
 
     def missing_for(self, people: set[str] | None = None) -> list[str]:
         """What is missing for `people` (None: everyone); the set and props always count."""
@@ -780,15 +803,21 @@ def sub_shot_references(
     shot: Shot,
     sub: SubShot,
     picks: ShotPicks | None = None,
+    reading: SceneReading | None = None,
 ) -> tuple[list[FrameRef], list[str]]:
-    """(the pictures a sub-shot's keyframe is drawn from, what is missing): the picks of
-    the people in this sub-shot, the set and the props, and from sub-shot 2 on, first the
-    approved keyframe of the sub-shot before it. Chosen per sub-shot, then capped at nine,
-    so a close-up keeps its person's face however crowded the shot is."""
+    """(the pictures a sub-shot's keyframe is drawn from, what is missing): for each person
+    in this sub-shot, the picture a fresh `reading` of the scene chose (with their state at
+    this moment), else their storyboard look; the set and the props. First comes the
+    approved keyframe of the sub-shot before it (sub-shot 2 on; it must be approved), or for
+    sub-shot 1, of the previous shot of the scene when it has one (light, set dressing and
+    everyone's state carry over the cut; not waited for). Chosen per sub-shot, then capped at
+    nine, so a close-up keeps its person's face however crowded the shot is."""
     picks = picks or shot_picks(pkg, images, shot)
     people = set(sub.people)
-    missing = picks.missing_for(people)
-    previous = None
+    chosen = chosen_pictures(pkg, shot, sub, reading)
+    # A person the reading drew from a picture of theirs needs no storyboard pick.
+    missing = picks.missing_for(people - set(chosen))
+    previous = previous_shot = None
     if sub.index > 1:
         prev = approved_take(takes, shot.shot_id, sub.index - 1)
         if prev is None:
@@ -797,7 +826,51 @@ def sub_shot_references(
             previous = FrameRef(ref_id=frame_ref(prev), kind="previous_frame",
                                 role=f"the approved keyframe of sub-shot {sub.index - 1}, "
                                 "just before this cut", likeness=prev.likeness)  # fmt: skip
-    return picks.refs(people, previous), missing
+    else:
+        previous_shot = previous_shot_frame(pkg, takes, shot)
+    return picks.refs(people, previous, chosen, previous_shot), missing
+
+
+def chosen_pictures(
+    pkg: ProductionPackage, shot: Shot, sub: SubShot, reading: SceneReading | None
+) -> dict[str, FrameRef]:
+    """Each person's picture as a fresh reading chose it for this sub-shot, with their
+    state; empty without a reading."""
+    if reading is None:
+        return {}
+    names = _names(pkg)
+    pool = {c.image_id: c for c in reading.candidates}
+    out: dict[str, FrameRef] = {}
+    for who in sub.people:
+        c = reading.choice(shot.shot_id, sub.index, who)
+        cand = c and pool.get(c.image_id)
+        if c is None or cand is None:
+            continue
+        out[who] = FrameRef(ref_id=c.image_id, kind=cand.kind, entity_id=who,
+                            likeness=cand.likeness, state=c.state, keep=c.keep,
+                            role=f"{names.get(who, who)}, the design picture closest to this "
+                            f"moment ({cand.label[:80]})")  # fmt: skip
+    return out
+
+
+def previous_shot_frame(
+    pkg: ProductionPackage, takes: list[ShotTake], shot: Shot
+) -> FrameRef | None:
+    """The approved keyframe that last opened a cut of the shot before this one in its
+    scene (its highest approved sub-shot), if any."""
+    before = [s for s in pkg.shot_list
+              if s.scene_id == shot.scene_id and s.start_ms < shot.start_ms]  # fmt: skip
+    if not before:
+        return None
+    prev_shot = max(before, key=lambda s: s.start_ms)
+    approved = [t for t in takes if t.shot_id == prev_shot.shot_id and t.approved is not None
+                and t.sub_shot >= 1]  # fmt: skip
+    if not approved:
+        return None
+    last = max(approved, key=lambda t: t.sub_shot)
+    return FrameRef(ref_id=frame_ref(last), kind="previous_shot", likeness=last.likeness,
+                    role=f"the approved keyframe of the previous shot ({prev_shot.shot_id}, "
+                    f"[Shot {last.sub_shot}]): the set and light a moment earlier")  # fmt: skip
 
 
 def _seeds(seeds: list[int] | None, n: int) -> list[int]:
@@ -811,16 +884,18 @@ def sub_shot_for(
     takes: list[ShotTake],
     plan: ShotPlan,
     sub_shot: int,
+    reading: SceneReading | None = None,
 ) -> tuple[SubShot, list[FrameRef]]:
     """(the sub-shot, the pictures its keyframe is drawn from), or NotReady saying why it
-    can't be drawn now."""
+    can't be drawn now. With a fresh `reading` of the scene, each person's picture is the one
+    it chose."""
     shot = shot_of(pkg, plan.shot_id)
     if plan.busy:
         raise NotReady(f"the sub-shots of {shot.shot_id} are still being planned")
     sub = plan.sub(sub_shot)
     if sub is None:
         raise NotReady(f"{shot.shot_id} has no sub-shot {sub_shot}")
-    refs, missing = sub_shot_references(pkg, images, takes, shot, sub)
+    refs, missing = sub_shot_references(pkg, images, takes, shot, sub, reading=reading)
     if missing:
         raise NotReady("first: " + "; ".join(missing))
     if not refs:
@@ -841,6 +916,7 @@ def plan_take(
     version: PromptVersion | None = None,
     auto: bool = True,
     max_rounds: int = MAX_ROUNDS,
+    reading: SceneReading | None = None,
 ) -> ShotTake:
     """A new take on a sub-shot's keyframe: written by the model (steered by `direction`,
     and building on the newest take's prompt and check), or drawn from a prompt `version`
@@ -850,7 +926,28 @@ def plan_take(
     shot_id = shot.shot_id
     if is_busy(takes, shot_id, sub_shot):
         raise NotReady(f"sub-shot {sub_shot} of {shot_id} is still being made")
-    sub, refs = sub_shot_for(pkg, images, takes, plan, sub_shot)
+    sub, refs = sub_shot_for(pkg, images, takes, plan, sub_shot, reading)
+    if version is not None and version.references:
+        # The pictures its numbers were written for, with any earlier keyframe swapped for
+        # the one approved now (same slot, so the numbers still hold).
+        refs = []
+        done = {i.image_id for i in images if i.status == "done" and i.file}
+        for r in version.references:
+            if r.kind in ("previous_frame", "start_frame"):
+                prev = approved_take(takes, shot_id, sub_shot - 1)
+                if prev is None:
+                    raise NotReady(f"approve a keyframe for sub-shot {sub_shot - 1} first: "
+                                   f"prompt v{version.v} is drawn from it")  # fmt: skip
+                r = r.model_copy(update={"ref_id": frame_ref(prev), "likeness": prev.likeness})
+            elif r.kind == "previous_shot":
+                now = previous_shot_frame(pkg, takes, shot)
+                if now is None:
+                    raise NotReady(f"prompt v{version.v} was written with the previous shot's "
+                                   "keyframe, which isn't approved now")  # fmt: skip
+                r = r.model_copy(update={"ref_id": now.ref_id, "likeness": now.likeness})
+            elif r.ref_id not in done:
+                raise NotReady(f"prompt v{version.v} names a picture that is gone ({r.role})")
+            refs.append(r)
     if version is not None and (version.sub_shot, version.spec) != (sub_shot, sub):
         raise NotReady(f"prompt v{version.v} was written for an older plan of this sub-shot")
     draws = max(1, min(draws, MAX_DRAWS))
@@ -951,8 +1048,10 @@ WRITER_GUIDE = """\
 
 - `sub_shot`: the cut this keyframe opens: its number of `of`, its time in the clip, \
 framing, camera, action, `people` (exactly these on screen, `people_count` of them, no one \
-else, each with their `frame` side), `off_screen` (the shot's other people and the side \
-they are off, for eyelines) and the `lines` spoken in it. The keyframe is its first frame: \
+else, each with their `frame` side and, when known, `now`: what they wear, their hair, \
+what they hold and their condition at this moment, which wins over their picture), \
+`off_screen` (the shot's other people and the side they are off, for eyelines) and the \
+`lines` spoken in it. The keyframe is its first frame: \
 put each person on their side, looking toward where the others are.
 - `pictures`: one entry per <Picture N>, in order (they are attached), each with its \
 `role`, its `define` sentence, its `relationship` sentence and `likeness` (true only for a \
@@ -1106,7 +1205,13 @@ def shot_context(pkg: ProductionPackage, shot: Shot) -> dict[str, Any]:
     }
 
 
-def sub_shot_context(pkg: ProductionPackage, shot: Shot, sub: SubShot, of: int) -> dict[str, Any]:
+def sub_shot_context(
+    pkg: ProductionPackage,
+    shot: Shot,
+    sub: SubShot,
+    of: int,
+    states: dict[str, PersonState] | None = None,
+) -> dict[str, Any]:
     """The sub-shot a keyframe opens, for the writer and the judge: its view, who is where
     in the frame and off it, and the lines spoken in it."""
     names = _names(pkg)
@@ -1119,7 +1224,12 @@ def sub_shot_context(pkg: ProductionPackage, shot: Shot, sub: SubShot, of: int) 
         "camera": sub.camera,
         "action": sub.action,
         "people": [
-            {"name": names.get(c, c), "frame": sub.placement.get(c, "")} for c in sub.people
+            {
+                "name": names.get(c, c),
+                "frame": sub.placement.get(c, ""),
+                **({"now": states[c].model_dump()} if states and c in states else {}),
+            }
+            for c in sub.people
         ],
         "people_count": len(sub.people),
         "off_screen": [
@@ -1132,6 +1242,11 @@ def sub_shot_context(pkg: ProductionPackage, shot: Shot, sub: SubShot, of: int) 
     }
 
 
+def take_states(take: ShotTake) -> dict[str, PersonState]:
+    """Each person's state at this moment, as the take's pictures were chosen for it."""
+    return {r.entity_id: r.state for r in take.references if r.entity_id and r.state}
+
+
 def take_sub(pkg: ProductionPackage, shot: Shot, take: ShotTake) -> SubShot:
     """The sub-shot a take was made for (takes from before sub-shots: the whole shot)."""
     return take.spec or single_plan(pkg, shot).sub_shots[0]
@@ -1140,8 +1255,20 @@ def take_sub(pkg: ProductionPackage, shot: Shot, take: ShotTake) -> SubShot:
 def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, Any]]:
     """Per <Picture N>: its role, and the definition and relationship sentences the prompt
     uses for it (MiniMax's edit form). Written here, not by the model, so every picture is
-    used for what it is: a face picture always transfers that exact face."""
+    used for what it is: a face picture always transfers that exact face. A person's picture
+    chosen by reading the scene keeps the face, build and what it already gets right, and
+    states how they look at this moment (shot_reading.py), so what the picture shows that
+    the moment doesn't (a bag in hand, pinned hair) is not carried over. Without a reading,
+    the garments carry over but things held only appear where the action puts them."""
     names = _names(pkg)
+
+    def to_state(subject: str, who: str, r: FrameRef) -> str:
+        kept = ", ".join(["the face", "build", *r.keep])
+        assert r.state is not None
+        return (f"{subject} is partially preserved: {kept} remain; "
+                f"{r.state.sentence(who or 'the person')}; the pose, position and expression "
+                "follow this description.")  # fmt: skip
+
     look_of = {r.entity_id: n for n, r in enumerate(take.references, 1) if r.kind == "look"}
     out = []
     for n, r in enumerate(take.references, 1):
@@ -1153,16 +1280,28 @@ def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, 
                 rel = (f"{subject} is partially preserved: the set, the light, each person's "
                        "face, hair and clothing, and the props in their current state remain; "
                        "the camera position, framing and poses follow this description.")  # fmt: skip
+            case "previous_shot":
+                define = f"The film frame in <Picture {n}> is {subject}."
+                rel = (f"{subject} serves as the reference for the set, the light and the props "
+                       "as they are at this moment; the people, their clothing and the camera "
+                       "follow this description.")  # fmt: skip
+            case "look" if r.state is not None:
+                define = f"{who or 'The person'} in <Picture {n}> is {subject}."
+                rel = to_state(subject, who, r)
             case "look":
                 define = f"{who or 'The person'} in <Picture {n}> is {subject}."
                 rel = (f"{subject} is partially preserved: the face, hair, build and every "
-                       "garment and accessory remain; the pose, position and expression "
-                       "follow this description.")  # fmt: skip
+                       "garment remain; anything held in the picture appears only where the "
+                       "action puts it; the pose, position and expression follow this "
+                       "description.")  # fmt: skip
             case "face" if r.entity_id in look_of:
                 scope = f"{who}'s face" if who else "The face"
                 define = f"{scope} in <Picture {n}> is {subject}."
                 rel = (f"{subject} supplies the exact facial features transferred to "
                        f"<Subject {look_of[r.entity_id]}>.")  # fmt: skip
+            case "face" if r.state is not None:
+                define = f"{who or 'The person'} in <Picture {n}> is {subject}."
+                rel = to_state(subject, who, r)
             case "face":
                 define = f"{who or 'The person'} in <Picture {n}> is {subject}."
                 rel = (f"{subject} is partially preserved: the face, hair and build remain; "
@@ -1227,11 +1366,12 @@ def is_hard(finding: str) -> bool:
     return finding == "empty" or finding.startswith(("longer than", "not allowed", "cites"))
 
 
-def prompt_findings(prompt: str, refs: list[FrameRef]) -> list[str]:
+def prompt_findings(prompt: str, refs: list[FrameRef], fixed: tuple[str, ...] = ()) -> list[str]:
     """Where a keyframe prompt breaks the H3 image rules, as far as a program can tell:
     the edit form (every picture defined, the overview, one relationship each, the closing
     sentence), negations, instructions, story words, and a face picture used as anything
-    but the face."""
+    but the face. The wording checks skip the `fixed` sentences the program wrote (a
+    person's state quotes the costume notes, which may say "not")."""
     from .image_prompts import problems
 
     out = [
@@ -1240,7 +1380,10 @@ def prompt_findings(prompt: str, refs: list[FrameRef]) -> list[str]:
         else f
         for f in problems(prompt, len(refs))
     ]
-    body = _QUOTED.sub("", prompt).replace(NO_OTHER_TEXT, "")
+    body = prompt
+    for sentence in fixed:
+        body = body.replace(sentence, ".")  # a sentence boundary stays where it was
+    body = _QUOTED.sub("", body).replace(NO_OTHER_TEXT, "")
     if words := sorted({m.lower() for m in _NEGATION.findall(body)}):
         out.append(f"uses negation ({', '.join(words)}): H3 draws what is named; say what is there")
     if words := sorted({m.lower() for m in _COMMAND.findall(body)}):
@@ -1480,8 +1623,10 @@ her"). It overrides the look pictures where they disagree.
 ## Check these items
 
 - For each person in `sub_shot.people`: one item each for **identity** (face shape, features, \
-skin, age: the same person as their picture) and **wardrobe** (clothes, hair, accessories \
-as in their look picture). Name them: "Lila: face", "Lila: wardrobe".
+skin, age: the same person as their picture) and **wardrobe** (clothes, hair, what they \
+hold). When the person has `now`, judge the wardrobe against it, not the picture: the \
+picture may show a bag or pinned hair the moment doesn't have. Name them: "Lila: face", \
+"Lila: wardrobe".
 - **count**: exactly `sub_shot.people_count` people with visible faces or bodies, no extras \
 (small background silhouettes are fine if the shot implies them).
 - **placement**: who is where (each person's `frame` side in `sub_shot.people`, \
@@ -1556,13 +1701,134 @@ class ShotFrameRunner:
         self.text = text_client
         self._gpu = gpu or asyncio.Lock()
         self._planning = asyncio.Semaphore(4)  # sub-shot plans written at once
+        self._reading_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[None]] = set()
 
     def recover(self) -> int:
         error = "Interrupted by a server restart. Retry to run it again."
-        return self.repo.fail_unfinished_shot_takes(error) + self.repo.fail_unfinished_shot_plans(
-            error
+        return (
+            self.repo.fail_unfinished_shot_takes(error)
+            + self.repo.fail_unfinished_shot_plans(error)
+            + self.repo.fail_unfinished_scene_readings(error)
         )
+
+    # -- reading the scene (shot_reading.py) ----------------------------------
+
+    def scene_inputs(
+        self, pkg: ProductionPackage
+    ) -> tuple[list[GeneratedImage], dict[str, ShotPlan]]:
+        images = self.repo.list_images(pkg.package_id, pkg.revision_id)
+        plans = {p.shot_id: p for p in self.repo.list_shot_plans(pkg.package_id, pkg.revision_id)}
+        return images, plans
+
+    def fresh_reading(self, pkg: ProductionPackage, scene_id: str) -> SceneReading | None:
+        images, plans = self.scene_inputs(pkg)
+        return shot_reading.fresh(
+            self.repo.get_scene_reading(pkg.package_id, pkg.revision_id, scene_id),
+            shot_reading.fingerprint(pkg, scene_id, plans, images),
+        )
+
+    def start_reading(self, pkg: ProductionPackage, scene_id: str) -> None:
+        """Read the scene again in the background (the board's "Read the scene again")."""
+        task = asyncio.create_task(self.ensure_reading(pkg, scene_id, force=True))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def ensure_reading(
+        self, pkg: ProductionPackage, scene_id: str, *, force: bool = False
+    ) -> SceneReading | None:
+        """The scene's fresh reading, read now if it is missing or stale (once per scene at
+        a time). None when the scene has no pictures to choose from or the reading failed:
+        the storyboard's looks are used then."""
+        key = (pkg.package_id, pkg.revision_id, scene_id)
+        lock = self._reading_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            images, plans = self.scene_inputs(pkg)
+            print_ = shot_reading.fingerprint(pkg, scene_id, plans, images)
+            stored = self.repo.get_scene_reading(*key)
+            if not force and (ready := shot_reading.fresh(stored, print_)) is not None:
+                return ready
+            return await self._read_scene(pkg, scene_id, plans, images, print_, stored)
+
+    async def _read_scene(
+        self,
+        pkg: ProductionPackage,
+        scene_id: str,
+        plans: dict[str, ShotPlan],
+        images: list[GeneratedImage],
+        print_: str,
+        stored: SceneReading | None,
+    ) -> SceneReading | None:
+        people = sorted(
+            {c for s in shot_reading.scene_shots(pkg, scene_id) for c in s.character_ids}
+        )
+        pool = [c for who in people for c in shot_reading.candidates(pkg, images, who)]
+        if not pool:
+            return None
+        reading = SceneReading(package_id=pkg.package_id, revision_id=pkg.revision_id,
+                               scene_id=scene_id, status="writing", fingerprint=print_,
+                               candidates=pool)  # fmt: skip
+        if stored is not None:  # the board keeps showing the old choices meanwhile
+            reading.choices = stored.choices
+        self.repo.save_scene_reading(reading)
+        media = []
+        for i, c in enumerate(pool, 1):
+            found = self._ref_file(c.image_id, "thumb")
+            if found is not None and found[0].is_file():
+                media.append(MediaPart(label=f"<Image {i}>", path=found[0], mime=found[1]))
+        context = shot_reading.reading_context(pkg, scene_id, plans, pool)
+        try:
+            for attempt in range(2):  # once more with what was wrong
+                request = GenerationRequest(
+                    stage=shot_reading.STAGE,  # type: ignore[arg-type]
+                    instructions=shot_reading.instructions(),
+                    context=context,
+                    media=media,
+                    attempt=attempt,
+                )
+                out = await self.text.generate(request, shot_reading.ReadingOutput)
+                try:
+                    pool, choices = shot_reading.read_output(pkg, scene_id, plans, pool, out)
+                    break
+                except ValueError as exc:
+                    if attempt:
+                        raise
+                    context = context | {"problems": str(exc).split("; ")}
+            reading.candidates = pool
+            # The person's choices as they are now (choices can't change while a scene is read).
+            latest = self.repo.get_scene_reading(pkg.package_id, pkg.revision_id, scene_id)
+            reading.choices = shot_reading.merge_overrides(choices, latest or stored, pool)
+            reading.model = request.model or getattr(self.text, "model_id", None)
+            reading.status, reading.error = "done", None
+        except Exception as exc:
+            log.warning("scene reading failed for %s", scene_id, exc_info=True)
+            error = f"The scene couldn't be read: {str(exc)[:300]}"
+            if stored is not None and stored.choices and stored.status != "failed":
+                # The last good reading stays in use (with the person's choices), the failure
+                # shown beside it.
+                reading = stored.model_copy(update={"status": "done", "error": error})
+            else:
+                reading.status, reading.error = "failed", error
+        reading.updated_at = utcnow()
+        self.repo.save_scene_reading(reading)
+        return reading if reading.status == "done" else None
+
+    async def _choose_pictures(self, pkg: ProductionPackage, shot: Shot, take: ShotTake) -> None:
+        """A written take's pictures, chosen by reading its scene (read now if needed)."""
+        reading = await self.ensure_reading(pkg, shot.scene_id)
+        if reading is None:
+            return
+        refs, missing = sub_shot_references(
+            pkg,
+            self.repo.list_images(pkg.package_id, pkg.revision_id),
+            self.repo.list_shot_takes(pkg.package_id, pkg.revision_id),
+            shot,
+            take_sub(pkg, shot, take),
+            reading=reading,
+        )
+        if not missing and refs:
+            take.references, take.likeness = refs, any(r.likeness for r in refs)
+            self.repo.save_shot_take(take)
 
     def start(self, take_id: str) -> None:
         task = asyncio.create_task(self.run(take_id))
@@ -1671,6 +1937,7 @@ class ShotFrameRunner:
             shot = shot_of(pkg, take.shot_id)
             if not take.prompt:
                 self._set(take, "writing")
+                await self._choose_pictures(pkg, shot, take)
                 await self._write(pkg, shot, take)
             self._guard(pkg, shot, take)
             refs = await asyncio.to_thread(self._reference_bytes, take)
@@ -1710,9 +1977,14 @@ class ShotFrameRunner:
         allowed) fall back to the template; other findings stay on the take as warnings.
         The prompt becomes the sub-shot's next version."""
         template = template_prompt(pkg, take)
+        pictures = picture_sentences(pkg, take)
+        # The program's own sentences: the wording checks leave them to their authors.
+        fixed = tuple(x[k] for x in pictures for k in ("define", "relationship"))
         context = {
-            "sub_shot": sub_shot_context(pkg, shot, take_sub(pkg, shot, take), self._of(take)),
-            "pictures": picture_sentences(pkg, take),
+            "sub_shot": sub_shot_context(
+                pkg, shot, take_sub(pkg, shot, take), self._of(take), take_states(take)
+            ),
+            "pictures": pictures,
             **shot_context(pkg, shot),
             "aspect": next((k for k, v in SIZES.items() if v == take.size), take.size),
             "previous_prompt": take.previous_prompt,
@@ -1739,7 +2011,7 @@ class ShotFrameRunner:
                 error = exc
                 break
             prompt = out.prompt.strip()
-            findings = prompt_findings(prompt, take.references)
+            findings = prompt_findings(prompt, take.references, fixed)
             tries.append((prompt, out, findings, request))
             if not worth_repair(findings):
                 break
@@ -1753,7 +2025,7 @@ class ShotFrameRunner:
         if not usable:
             why = str(error) if error else "; ".join(f for f in tries[-1][2] if is_hard(f))
             take.prompt, take.prompt_source = template, "template"
-            take.warnings = prompt_findings(template, take.references)
+            take.warnings = prompt_findings(template, take.references, fixed)
             take.notes = f"The prompt writer failed ({why[:120]}); using the built-in template."
             self._version(take, "template", None)
             return
@@ -1775,7 +2047,7 @@ class ShotFrameRunner:
                 package_id=take.package_id, revision_id=take.revision_id,
                 shot_id=take.shot_id, sub_shot=take.sub_shot, spec=take.spec,
                 prompt=take.prompt, source=source, model=model, note=take.notes,  # type: ignore[arg-type]
-                take_id=take.take_id, findings=take.warnings,
+                take_id=take.take_id, findings=take.warnings, references=take.references,
             )
         )  # fmt: skip
         take.prompt_version = ver.v
@@ -1866,7 +2138,9 @@ class ShotFrameRunner:
         all at once. A check that can't run leaves the draw unchecked, with the reason; it
         never counts as a pass."""
         context = shot_context(pkg, shot) | {
-            "sub_shot": sub_shot_context(pkg, shot, take_sub(pkg, shot, take), self._of(take)),
+            "sub_shot": sub_shot_context(
+                pkg, shot, take_sub(pkg, shot, take), self._of(take), take_states(take)
+            ),
             "pictures": [
                 {"picture": f"<Picture {n}>", "role": r.role}
                 for n, r in enumerate(take.references, 1)
@@ -1942,13 +2216,22 @@ def shot_board(
     takes: list[ShotTake],
     plans: list[ShotPlan],
     versions: list[PromptVersion] | None = None,
+    readings: list[SceneReading] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every shot with its sub-shot plan, and per sub-shot what it draws from, what is
-    missing, its prompt versions, its takes and its approved keyframe."""
+    """Every shot with its sub-shot plan and its scene's reading, and per sub-shot what it
+    draws from (each person's chosen picture, state and why), what is missing, its prompt
+    versions, its takes and its approved keyframe."""
     names = _names(pkg)
     stored = {p.shot_id: p for p in plans}
+    by_scene = {r.scene_id: r for r in readings or []}
+    fresh_of: dict[str, SceneReading | None] = {}
+    for scene_id in {s.scene_id for s in pkg.shot_list}:
+        print_ = shot_reading.fingerprint(pkg, scene_id, stored, images)
+        fresh_of[scene_id] = shot_reading.fresh(by_scene.get(scene_id), print_)
     out = []
     for shot in pkg.shot_list:
+        reading = fresh_of.get(shot.scene_id)
+        pool = {c.image_id: c for c in reading.candidates} if reading else {}
         own = stored.get(shot.shot_id)
         plan = plan_of(pkg, shot, own)
         mine = sorted((t for t in takes if t.shot_id == shot.shot_id), key=lambda t: t.created_at)
@@ -1956,7 +2239,25 @@ def shot_board(
         lines = shot_lines(pkg, shot)
         subs = []
         for sub in plan.sub_shots:
-            refs, missing = sub_shot_references(pkg, images, mine, shot, sub, picks)
+            # Every take: the previous shot's keyframe is among them.
+            refs, missing = sub_shot_references(pkg, images, takes, shot, sub, picks, reading)
+            choices = []
+            for who in sub.people:
+                c = reading.choice(shot.shot_id, sub.index, who) if reading else None
+                if c is None:
+                    continue
+                choices.append({
+                    "character_id": who,
+                    "name": names.get(who, who),
+                    "image_id": c.image_id,
+                    "state": c.state.model_dump(),
+                    "keep": c.keep,
+                    "reason": c.reason,
+                    "source": c.source,
+                    "shows": pool[c.image_id].shows if c.image_id in pool else "",
+                    "candidates": [{"image_id": x.image_id, "label": x.label, "shows": x.shows}
+                                   for x in pool.values() if x.character_id == who],
+                })  # fmt: skip
             ap = approved_take(mine, shot.shot_id, sub.index)
             subs.append({
                 **sub.model_dump(),
@@ -1974,6 +2275,7 @@ def shot_board(
                                          if (v.shot_id, v.sub_shot) == (shot.shot_id, sub.index)),
                                         default=0),
                 # Prompt versions written for this sub-shot as it is now, oldest first.
+                "choices": choices,
                 "versions": [v.model_dump(mode="json") for v in versions or []
                              if (v.shot_id, v.sub_shot, v.spec) == (shot.shot_id, sub.index, sub)],
             })  # fmt: skip
@@ -1989,6 +2291,14 @@ def shot_board(
             "place": names.get(shot.location_id, shot.location_id),
             "intimacy": intimate_scene(pkg, shot),
             "clip_ms": plan.sub_shots[-1].end_ms,
+            # The scene's reading of who looks how (shot_reading.py): fresh, or not yet.
+            "reading": {
+                "scene_id": shot.scene_id,
+                "status": (r := by_scene.get(shot.scene_id)) and r.status,
+                "fresh": reading is not None,
+                "error": r.error if r else None,
+                "model": r.model if r else None,
+            },
             "plan": {
                 "status": own.status if own else "done",
                 "source": plan.source,
