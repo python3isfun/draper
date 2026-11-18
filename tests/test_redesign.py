@@ -351,3 +351,40 @@ def _runners(b: Board):
             if isinstance(v, ShotFrameRunner):
                 yield v
                 return
+
+
+class ScreenWatcher:
+    """The fixture model, recording what the content screen is told."""
+
+    def __init__(self):
+        from drama_agent.llm import FixtureModelClient
+
+        self.inner = FixtureModelClient()
+        self.calls = self.inner.calls
+        self.screens: list[dict] = []
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    async def generate(self, request, output_model):
+        from drama_agent.content_guard import STAGE
+
+        if request.stage == STAGE:
+            self.screens.append(request.context)
+        return await self.inner.generate(request, output_model)
+
+
+def test_your_own_prompt_is_screened_knowing_who_is_a_real_person(tmp_path):
+    watcher = ScreenWatcher()
+    with Board(tmp_path, text=watcher) as b:
+        b.design()
+        sid = b.board()["shots"][0]["shot_id"]
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        mine = take["prompt"].replace("No other lettering", "Soft morning haze. No other lettering")
+        r = b.http.post(f"{b.base}/{sid}", json={"draws": 1, "prompt": mine, "based_on": 1})
+        assert r.status_code == 202, r.text
+        b.wait()
+        kinds = [p["kind"] for p in watcher.screens[-1]["pictures"]]
+        assert kinds and all("real person" in k for k in kinds)
+        assert all("no real person's likeness" in k for k in kinds)  # designed, not uploaded

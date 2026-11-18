@@ -9,7 +9,7 @@
 
 const frames = { key: null, view: null, error: "", notes: [], timer: null, loading: false,
   draws: 2, rounds: 3, provider: null, directions: {}, prompts: {}, plans: {}, episode: "all",
-  sel: {}, notes2: {}, compare: {}, diffs: new Map() };
+  sel: {}, notes2: {}, compare: {}, diffs: new Map(), vdraws: {}, verr: {} };
 
 const framesKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
 const framesBase = (pkg) => `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/keyframes`;
@@ -46,12 +46,15 @@ async function frameAction(url, button, body, method = "POST") {
   if (button) button.disabled = true;
   frames.error = "";
   let out = null;
+  let failed = "";
   try {
     out = await api(url, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
   } catch (e) {
-    frames.error = e.message;
+    failed = e.message;
   }
   await loadFrames(state.pkg);
+  // The action's own error wins: reloading the board succeeds and would clear it.
+  if (failed) frames.error = failed;
   renderMain();
   return out;
 }
@@ -186,29 +189,46 @@ function renderPromptVersions(pkg, shot, sub) {
   const text = draft ?? (sel ? sel.prompt : "");
   const box = h("textarea", { class: "prompt-edit", rows: 9, spellcheck: "false",
     placeholder: "Write the prompt: <Picture N> are the reference pictures above, in order.",
-    oninput: (e) => { frames.prompts[key] = e.target.value; sync(); } });
+    oninput: (e) => { frames.prompts[key] = e.target.value; sync(); },
+    // ⌘/Ctrl+Enter: save the edit as the next version and draw it.
+    onkeydown: (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !drawBtn.disabled) { e.preventDefault(); drawBtn.click(); } } });
   box.value = text;
   const note = h("input", { type: "text", placeholder: "What you changed (optional)",
     oninput: (e) => { frames.notes2[key] = e.target.value; } });
   note.value = frames.notes2[key] || "";
   const edited = () => sel ? box.value.trim() !== sel.prompt.trim() : box.value.trim() !== "";
+  // The outcome of this editor's last save or draw, shown here (not only atop the board).
+  const settle = () => { if (frames.error) frames.verr[key] = frames.error; else delete frames.verr[key]; };
   const saveBtn = h("button", { type: "button", class: "btn small", onclick: async (e) => {
+    e.currentTarget.textContent = "Saving and checking…";
     const out = await frameAction(`${url}/prompts`, e.currentTarget, { revision_id: pkg.revision_id, sub_shot: sub.index, prompt: box.value, based_on: sel ? sel.v : null, note: frames.notes2[key] || "" });
-    if (out && !frames.error) { delete frames.prompts[key]; delete frames.notes2[key]; frames.sel[key] = out.v; renderMain(); }
+    settle();
+    if (out && !frames.error) { delete frames.prompts[key]; delete frames.notes2[key]; frames.sel[key] = out.v; }
+    renderMain();
   } }, `Save as v${nextV}`);
-  const drawBtn = h("button", { type: "button", class: "btn small", onclick: async (e) => {
-    const body = { revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws, provider: frames.provider };
+  // Draws for this editor's button (defaults to the board's Draws setting).
+  const draws = () => frames.vdraws[key] || frames.draws;
+  const drawsSel = numberSelect(draws(), 4, (n) => { frames.vdraws[key] = n; sync(); }, "Draws for this prompt");
+  const drawBtn = h("button", { type: "button", class: "btn small primary-outline", onclick: async (e) => {
+    const body = { revision_id: pkg.revision_id, sub_shot: sub.index, draws: draws(), provider: frames.provider };
     if (edited()) Object.assign(body, { prompt: box.value, based_on: sel ? sel.v : null, note: frames.notes2[key] || "" });
     else body.prompt_version = sel.v;
+    e.currentTarget.textContent = edited() ? "Saving, checking and drawing…" : "Starting…";
     await frameAction(url, e.currentTarget, body);
-    if (!frames.error) { delete frames.prompts[key]; delete frames.notes2[key]; delete frames.sel[key]; renderMain(); }
+    settle();
+    if (!frames.error) { delete frames.prompts[key]; delete frames.notes2[key]; delete frames.sel[key]; }
+    renderMain();
   } }, "");
   const counter = h("span", { class: "muted small" });
   function sync() {
     const changed = edited();
     saveBtn.disabled = !changed || !box.value.trim();
     drawBtn.disabled = !box.value.trim();
-    drawBtn.textContent = changed ? "Save and draw" : sel ? `Draw v${sel.v}` : "Draw";
+    const n = draws();
+    drawBtn.textContent = changed ? `Save as v${nextV} and draw ${n}` : sel ? `Draw v${sel.v} ×${n}` : `Draw ×${n}`;
+    drawBtn.title = changed
+      ? `Save your edit as v${nextV}${sel ? ` (from v${sel.v})` : ""} and draw it ${n} time${n > 1 ? "s" : ""} with the last take's seeds (⌘/Ctrl+Enter)`
+      : `Draw v${sel ? sel.v : ""} as written, ${n} time${n > 1 ? "s" : ""}`;
     counter.textContent = `${box.value.length.toLocaleString()} characters${changed ? " · edited" : ""}`;
   }
   sync();
@@ -230,10 +250,11 @@ function renderPromptVersions(pkg, shot, sub) {
     base && h("div", { class: "prompt-diff small" }, h("div", { class: "muted" }, `Changes from v${base.v} to v${sel.v}:`), diffNodes(wordDiff(base.prompt, sel.prompt))),
     box,
     h("div", { class: "prompt-edit-actions" }, note),
-    h("div", { class: "prompt-edit-actions" }, saveBtn, drawBtn,
+    h("div", { class: "prompt-edit-actions" }, saveBtn, h("label", { class: "small muted", style: "display:inline-flex;align-items:center;gap:4px" }, "draws", drawsSel), drawBtn,
       draft != null && h("button", { type: "button", class: "btn ghost small", onclick: () => { delete frames.prompts[key]; renderMain(); } }, "Discard edits"),
       counter),
-    h("p", { class: "muted small" }, "Saving keeps every version. Drawing a version uses the last take's seeds, so its draws compare one for one; a version is drawn as written, never rewritten. To restore an old version, pick it and draw it, or save it again as the newest."));
+    frames.verr[key] && h("p", { class: "small warn-text", role: "alert" }, `Not saved or drawn: ${frames.verr[key]}`),
+    h("p", { class: "muted small" }, "Edit any version and press Save and draw (⌘/Ctrl+Enter): it is saved as the next version and drawn right away. Saving keeps every version. Drawing a version uses the last take's seeds, so its draws compare one for one; a version is drawn as written, never rewritten. To restore an old version, pick it and draw it, or save it again as the newest."));
 }
 
 function renderNewFrameTake(pkg, shot, sub) {

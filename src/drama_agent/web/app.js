@@ -1227,14 +1227,17 @@ async function loadImages(pkg) {
 async function imageAction(url, button, body) {
   if (button) button.disabled = true;
   state.images.error = "";
+  let failed = "";
   try {
     const out = await api(url, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) });
     // Develop/Explore notes (e.g. "pick an image for X first") stay until the next run.
     if (out && Array.isArray(out.notes)) state.images.notes = out.notes;
   } catch (e) {
-    state.images.error = e.message;
+    failed = e.message;
   }
   await loadImages(state.pkg);
+  // The action's own error wins: reloading the images succeeds and would clear it.
+  if (failed) state.images.error = failed;
   renderMain();
 }
 

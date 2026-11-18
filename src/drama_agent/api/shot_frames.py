@@ -35,6 +35,7 @@ from ..shot_frames import (
     current_sub,
     design_print,
     frame_ref,
+    intimate_scene,
     is_busy,
     is_hard,
     make_sub_shots,
@@ -329,17 +330,28 @@ def register(
         findings = prompt_findings(prompt, refs)
         if hard := [f for f in findings if is_hard(f)]:
             raise HTTPException(422, "The prompt " + "; ".join(hard) + ".")
+        if (level := intimate_scene(pkg, shot)) and any(r.likeness for r in refs):
+            # The runner's rule, said before saving: no intimacy drawn from a real likeness.
+            raise HTTPException(422, f"this shot is in a scene staged as {level} intimacy, and a "
+                                "picked design image shows a real person's likeness (content "
+                                "rule 3): pick a design image without a likeness")  # fmt: skip
         try:
             # Open-mode rules: the face and look pictures are the production's chosen
-            # designs (rule 3 still applies; the runner refuses intimacy with a likeness).
+            # designs. Each says whether it shows a real person's likeness (its recorded
+            # flag), so the screen doesn't have to guess: a designed character in a bedroom
+            # scene is not rule 3's case.
             await screen(
                 text_client,
                 prompt,
                 pictures=[
-                    {"picture": f"<Picture {n}>", "kind": r.role} for n, r in enumerate(refs, 1)
+                    {"picture": f"<Picture {n}>", "kind": r.role + (
+                        "; shows a real person's likeness" if r.likeness else
+                        "; a designed character, set or prop made by this production (no real "
+                        "person's likeness)")}
+                    for n, r in enumerate(refs, 1)
                 ],
                 restrictive=False,
-            )
+            )  # fmt: skip
         except GuardRefused as exc:
             raise HTTPException(422, str(exc)) from exc
         return repo.add_prompt_version(
