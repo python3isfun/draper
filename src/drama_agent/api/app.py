@@ -75,6 +75,7 @@ from ..images import explore as explore_plan
 from ..images import new_take as new_take_plan
 from ..images import select as select_plan
 from ..jobqueue import InMemoryJobQueue, JobQueue
+from ..library import sync_library
 from ..llm import FixtureModelClient, ModelClient
 from ..media import MediaError, MediaStore, UploadTooLarge, media_from_env
 from ..models import (
@@ -100,6 +101,7 @@ from ..sheet_edit import EditError, EntryLocked, edit_entry
 from ..shot_frames import ShotFrameRunner
 from ..store import InMemoryRepository, Repository
 from ..worker import JobWorker, pause_job, recover, resume_job, retry_job
+from . import library as library_api
 from . import shot_frames as keyframe_api
 
 log = logging.getLogger(__name__)
@@ -357,6 +359,12 @@ def create_app(
     async def lifespan(_: FastAPI):
         # Stories from before the app became English-only are archived, not deleted.
         archive_non_english(repo)
+        try:  # the asset library mirrors every story (library/); never blocks startup
+            made = sync_library(repo, force=True)
+            log.info("library: %d stories, %d assets added, %d updated, %d pictures",
+                     made.stories, made.added, made.updated, made.pictures)  # fmt: skip
+        except Exception:
+            log.warning("library sync failed", exc_info=True)
         if n := experiments.recover():
             log.info("marked %d interrupted experiment turns failed", n)
         if n := keyframes.recover():
@@ -1276,6 +1284,7 @@ def create_app(
             return PlainTextResponse(render_markdown(pkg), media_type="text/plain")
         return pkg
 
+    library_api.register(app, repo=repo)
     keyframe_api.register(
         app,
         repo=repo,

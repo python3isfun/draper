@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from ..experiment import ExpSession, ExpTurn
+from ..library.models import AssetImage, Casting, LibraryAsset
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
@@ -84,6 +85,21 @@ class Repository(Protocol):
     ) -> SceneReading | None: ...
     def list_scene_readings(self, package_id: str, revision_id: str) -> list[SceneReading]: ...
     def fail_unfinished_scene_readings(self, error: str) -> int: ...
+    # The asset library (library/): characters, sets, their looks, states and items
+    def list_package_ids(self) -> list[str]: ...
+    def save_library_asset(self, asset: LibraryAsset) -> None: ...
+    def get_library_asset(self, asset_id: str) -> LibraryAsset | None: ...
+    def list_library_assets(
+        self, kind: str | None = None, parent_id: str | None = None
+    ) -> list[LibraryAsset]: ...
+    def save_casting(self, casting: Casting) -> None: ...
+    def list_casting(
+        self, package_id: str | None = None, asset_id: str | None = None
+    ) -> list[Casting]: ...
+    def link_asset_image(self, link: AssetImage) -> None: ...
+    def list_asset_images(
+        self, asset_id: str | None = None, package_id: str | None = None
+    ) -> list[AssetImage]: ...
     def list_prompt_versions(self, package_id: str, revision_id: str) -> list[PromptVersion]: ...
 
 
@@ -112,6 +128,9 @@ class InMemoryRepository:
         self.shot_plans: dict[tuple[str, str, str], ShotPlan] = {}
         self.prompt_versions: list[PromptVersion] = []
         self.scene_readings: dict[tuple[str, str, str], SceneReading] = {}
+        self.library: dict[str, LibraryAsset] = {}
+        self.casting: dict[tuple[str, str], Casting] = {}
+        self.asset_images: dict[str, AssetImage] = {}
 
     def save_source_asset(self, asset_id: str, meta: dict[str, Any]) -> None:
         self.source_assets[asset_id] = meta
@@ -409,6 +428,45 @@ class InMemoryRepository:
             if r.busy:
                 r.status, r.error, n = "failed", error, n + 1
         return n
+
+    # The asset library ---------------------------------------------------
+
+    def list_package_ids(self) -> list[str]:
+        return list(self.packages)
+
+    def save_library_asset(self, asset: LibraryAsset) -> None:
+        self.library[asset.asset_id] = asset.model_copy(deep=True)
+
+    def get_library_asset(self, asset_id: str) -> LibraryAsset | None:
+        a = self.library.get(asset_id)
+        return a.model_copy(deep=True) if a else None
+
+    def list_library_assets(
+        self, kind: str | None = None, parent_id: str | None = None
+    ) -> list[LibraryAsset]:
+        return [a.model_copy(deep=True) for a in self.library.values()
+                if (kind is None or a.kind == kind)
+                and (parent_id is None or a.parent_id == parent_id)]  # fmt: skip
+
+    def save_casting(self, casting: Casting) -> None:
+        self.casting[(casting.package_id, casting.story_id)] = casting.model_copy()
+
+    def list_casting(
+        self, package_id: str | None = None, asset_id: str | None = None
+    ) -> list[Casting]:
+        return [c.model_copy() for c in self.casting.values()
+                if (package_id is None or c.package_id == package_id)
+                and (asset_id is None or c.asset_id == asset_id)]  # fmt: skip
+
+    def link_asset_image(self, link: AssetImage) -> None:
+        self.asset_images[link.image_id] = link.model_copy()
+
+    def list_asset_images(
+        self, asset_id: str | None = None, package_id: str | None = None
+    ) -> list[AssetImage]:
+        return [x.model_copy() for x in self.asset_images.values()
+                if (asset_id is None or x.asset_id == asset_id)
+                and (package_id is None or x.package_id == package_id)]  # fmt: skip
 
     def add_prompt_version(self, version: PromptVersion) -> PromptVersion:
         key = (version.package_id, version.revision_id, version.shot_id, version.sub_shot)

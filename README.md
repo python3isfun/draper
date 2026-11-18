@@ -206,6 +206,23 @@ Every entry also lists `must_keep` (what the story depends on) and `design_freed
   furnishings, materials, the state's light and dressing), so each camera direction puts
   the right wall, window or door behind each person, and the judge fails one that doesn't.
 
+### The asset library (characters and sets)
+
+Draper keeps a library of **characters** (with their looks and the items they carry) and
+**sets** (with their states and their dressing), shared across stories. See
+`docs/entity-reorganization.md`. So far (phase 1), each story's latest revision is mirrored
+into it at startup and before every library read. Pictures stay where they are and are
+linked to the asset they show, and each story's casting maps its ids to the library's.
+Read it with:
+
+- `GET /v1/library/characters` and `GET /v1/library/sets` (each with a cover picture);
+- `GET /v1/library/characters/{id}` and `GET /v1/library/sets/{id}` (looks or states, items,
+  current pictures, and the stories and shots that use each);
+- `GET /v1/drama-packages/{id}/casting`;
+- `POST /v1/library/sync` (`force=true` to rewrite everything).
+
+The UI and editing in the library come next.
+
 ### Reference images
 
 On a finished package, **Generate images** (Assets tab, or `POST

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..experiment import ExpSession, ExpTurn
+from ..library.models import AssetImage, Casting, LibraryAsset
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
@@ -23,8 +24,9 @@ from ..shot_reading import SceneReading
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
 # v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns.
 # v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. v10: shot_prompts.
-# v11: scene_readings. Each step is additive, so older files upgrade in place (see _migrate).
-SCHEMA_VERSION = 11
+# v11: scene_readings. v12: the asset library (library_assets, story_casting, asset_images).
+# Each step is additive, so older files upgrade in place (see _migrate).
+SCHEMA_VERSION = 12
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -149,6 +151,28 @@ CREATE TABLE IF NOT EXISTS scene_readings (
     data        TEXT NOT NULL,
     PRIMARY KEY (package_id, revision_id, scene_id)
 );
+CREATE TABLE IF NOT EXISTS library_assets (
+    asset_id    TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,              -- character | look | set | set_state | item
+    parent_id   TEXT,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS library_assets_kind ON library_assets (kind, parent_id);
+CREATE TABLE IF NOT EXISTS story_casting (
+    package_id  TEXT NOT NULL,
+    story_id    TEXT NOT NULL,              -- the story's character, look, location... id
+    asset_id    TEXT NOT NULL,
+    data        TEXT NOT NULL,
+    PRIMARY KEY (package_id, story_id)
+);
+CREATE INDEX IF NOT EXISTS story_casting_asset ON story_casting (asset_id);
+CREATE TABLE IF NOT EXISTS asset_images (
+    image_id    TEXT PRIMARY KEY,           -- a generated_images row, kept where it is
+    asset_id    TEXT NOT NULL,
+    package_id  TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS asset_images_asset ON asset_images (asset_id);
 CREATE TABLE IF NOT EXISTS shot_plans (
     package_id  TEXT NOT NULL,
     revision_id TEXT NOT NULL,
@@ -825,6 +849,79 @@ class SqliteRepository:
                 (package_id, revision_id),
             ).fetchall()
         return [SceneReading.model_validate_json(r[0]) for r in rows]
+
+    # The asset library ------------------------------------------------------
+
+    def list_package_ids(self) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT package_id FROM packages GROUP BY package_id ORDER BY min(seq)"
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def save_library_asset(self, asset: LibraryAsset) -> None:
+        self._exec(
+            "INSERT INTO library_assets (asset_id, kind, parent_id, data) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (asset_id) DO UPDATE SET kind = excluded.kind, "
+            "parent_id = excluded.parent_id, data = excluded.data",
+            (asset.asset_id, asset.kind, asset.parent_id, asset.model_dump_json()),
+        )
+
+    def get_library_asset(self, asset_id: str) -> LibraryAsset | None:
+        raw = self._one("SELECT data FROM library_assets WHERE asset_id = ?", (asset_id,))
+        return LibraryAsset.model_validate_json(raw) if raw else None
+
+    def list_library_assets(
+        self, kind: str | None = None, parent_id: str | None = None
+    ) -> list[LibraryAsset]:
+        sql, args = "SELECT data FROM library_assets WHERE 1 = 1", []
+        if kind is not None:
+            sql, args = sql + " AND kind = ?", [*args, kind]
+        if parent_id is not None:
+            sql, args = sql + " AND parent_id = ?", [*args, parent_id]
+        with self._lock:
+            rows = self._conn.execute(sql, tuple(args)).fetchall()
+        return [LibraryAsset.model_validate_json(r[0]) for r in rows]
+
+    def save_casting(self, casting: Casting) -> None:
+        self._exec(
+            "INSERT INTO story_casting (package_id, story_id, asset_id, data) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (package_id, story_id) DO UPDATE SET asset_id = excluded.asset_id, "
+            "data = excluded.data",
+            (casting.package_id, casting.story_id, casting.asset_id, casting.model_dump_json()),
+        )
+
+    def list_casting(
+        self, package_id: str | None = None, asset_id: str | None = None
+    ) -> list[Casting]:
+        sql, args = "SELECT data FROM story_casting WHERE 1 = 1", []
+        if package_id is not None:
+            sql, args = sql + " AND package_id = ?", [*args, package_id]
+        if asset_id is not None:
+            sql, args = sql + " AND asset_id = ?", [*args, asset_id]
+        with self._lock:
+            rows = self._conn.execute(sql, tuple(args)).fetchall()
+        return [Casting.model_validate_json(r[0]) for r in rows]
+
+    def link_asset_image(self, link: AssetImage) -> None:
+        self._exec(
+            "INSERT INTO asset_images (image_id, asset_id, package_id, data) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (image_id) DO UPDATE SET asset_id = excluded.asset_id, "
+            "package_id = excluded.package_id, data = excluded.data",
+            (link.image_id, link.asset_id, link.package_id, link.model_dump_json()),
+        )
+
+    def list_asset_images(
+        self, asset_id: str | None = None, package_id: str | None = None
+    ) -> list[AssetImage]:
+        sql, args = "SELECT data FROM asset_images WHERE 1 = 1", []
+        if asset_id is not None:
+            sql, args = sql + " AND asset_id = ?", [*args, asset_id]
+        if package_id is not None:
+            sql, args = sql + " AND package_id = ?", [*args, package_id]
+        with self._lock:
+            rows = self._conn.execute(sql, tuple(args)).fetchall()
+        return [AssetImage.model_validate_json(r[0]) for r in rows]
 
     def fail_unfinished_scene_readings(self, error: str) -> int:
         with self._lock:

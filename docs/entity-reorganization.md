@@ -183,6 +183,28 @@ decision.
 
 Each phase is shippable on its own, with draper and dramer working throughout.
 
+## Phase 1 as built (18 Nov 2026)
+
+- **Code:** `src/drama_agent/library/` (models, `sync`, read views), API in
+  `api/library.py`, schema 12 (`library_assets`, `story_casting`, `asset_images`), tests in
+  `tests/test_library.py`.
+- **Pictures are linked, not moved.** `asset_images` links each `generated_images` row to
+  the asset it shows. Rows and ids stay where they are, which is safer than moving them now.
+  Moving them can wait until something needs it.
+- **The library mirrors the stories.** Each story's latest revision is synced into it at
+  startup and before every library read. A story unchanged since its last sync is skipped.
+  Edits still happen on the story (sheet_edit) and flow into the library. The library
+  becomes the original you edit in phase 2.
+- **One asset per story entity.** Ids are derived from the story and its ids, so a resync
+  finds the same asset. Matching across stories is phase 3's casting.
+- **Props, split by use:** an owner in the story bible makes a prop that character's item;
+  otherwise it dresses the set it appears in most, by shot count.
+- **Read API:** `GET /v1/library/characters[/{id}]`, `GET /v1/library/sets[/{id}]` (each with
+  its looks or states, items, current pictures, and the stories and shots that use it; lists
+  carry a `cover`), `GET /v1/drama-packages/{id}/casting`, `POST /v1/library/sync`.
+- **On the live database:** 7 stories gave 30 characters, 17 sets and 452 linked pictures.
+  Opening it upgrades it to schema 12, and older draper code refuses a newer schema.
+
 ## Risks and open questions
 
 1. **Same name is not the same character.** Casting across stories must be confirmed by a
