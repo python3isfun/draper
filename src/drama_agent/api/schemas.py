@@ -1,0 +1,246 @@
+"""Request and response models of the API, and helpers the route modules share."""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import tempfile
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
+
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from ..experiment import (
+    MAX_DRAWS,
+    ExpSession,
+    ExpTurn,
+)
+from ..experiment import MAX_PROMPT_CHARS as EXP_MAX_PROMPT_CHARS
+from ..image_prompts import MAX_PROMPT_CHARS
+from ..models import (
+    Job,
+    LLMCall,
+    TraceEvent,
+)
+from ..models.images import DesignOption, GeneratedImage
+
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+class RevalidatingStaticFiles(StaticFiles):
+    """Static files the browser must revalidate on each load (ETag makes that cheap).
+
+    Without Cache-Control, browsers cache app.js heuristically and keep running an old
+    version of the UI after an update.
+    """
+
+    async def get_response(self, path: str, scope):  # type: ignore[no-untyped-def]
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+class JobCreated(BaseModel):
+    job_id: str
+    status: str
+
+
+class JobSummary(BaseModel):
+    job_id: str
+    status: str
+    created_at: datetime
+    seed: str
+    package_id: str | None
+    revision_id: str | None
+
+
+class LLMCallView(BaseModel):
+    """A model call for the live view: no request body; running calls carry an output tail."""
+
+    call: LLMCall
+    output_tail: str = ""
+
+
+class Trace(BaseModel):
+    events: list[TraceEvent]
+    calls: list[LLMCallView]
+    next_seq: int  # pass back as after_seq to get only newer events
+
+
+OUTPUT_TAIL_CHARS = 4000
+
+
+class Meta(BaseModel):
+    model_id: str  # default model
+    client: str
+    stage_models: dict[str, str] = {}  # per-step overrides of the default
+    image_model: str = ""
+    image_client: str = ""
+
+
+class ImagesView(BaseModel):
+    package_id: str
+    revision_id: str
+    image_model: str
+    images: list[GeneratedImage]
+    # Over the current (newest) version of each deliverable.
+    pending: int
+    running: int
+    done: int
+    failed: int
+    # Design exploration: the takes, the deliverables (anchor or drawn from one), and the
+    # whole queue (every draw counts).
+    options: list[DesignOption] = []
+    slots: list[dict] = []
+    queued: int = 0  # pending + running images of any version or draw
+    notes: list[str] = []
+    # Picks that are out of date (image id -> why): drawn from earlier design text, or from
+    # a picture that was replaced or is out of date itself.
+    outdated: dict[str, list[str]] = {}
+
+
+class ExploreRequest(BaseModel):
+    takes: int = Field(4, ge=1, le=6)
+    draws: int = Field(3, ge=1, le=6)
+    draft: bool = True
+    scope: list[Literal["cast", "sets", "props"]] = ["cast", "sets", "props"]
+    revision_id: str | None = None
+    job_id: str | None = None
+
+
+class ImportImageRequest(BaseModel):
+    """An Experiment image (#N in a chat) as the pick for a package deliverable."""
+
+    session_id: str
+    image: int = Field(..., ge=1)  # the image's number in the chat (#N)
+    requirement_id: str
+    deliverable_id: str | None = None  # default: the requirement's first deliverable
+    # None: as the Experiment recorded it (unknown counts as a likeness). False is for an
+    # invented person whose image inherited the mark from someone else in its source.
+    likeness: bool | None = None
+    revision_id: str | None = None
+    job_id: str | None = None
+
+
+class EntryEditRequest(BaseModel):
+    """A hand edit to one cast, set or prop entry. `sheet` holds design sheet fields
+    (lists as lists of strings); `bible` a look's or state's one-line `description`."""
+
+    revision_id: str
+    sheet: dict[str, Any] = Field(default_factory=dict)
+    bible: dict[str, Any] = Field(default_factory=dict)
+
+
+class EntryEditResult(BaseModel):
+    package_id: str
+    revision_id: str
+    entry_id: str
+    changed: list[str]
+    requirement_ids: list[str]  # requirements whose design text was rebuilt
+    # Of those, the ones whose model-written design text the rebuild replaced.
+    replaced_written: list[str]
+    drawn_before: list[str]  # board items with images drawn from the earlier text
+
+
+class DevelopRequest(BaseModel):
+    draws: int = Field(3, ge=1, le=6)
+    draft: bool = True
+    revision_id: str | None = None
+    job_id: str | None = None
+
+
+class NewTakeRequest(BaseModel):
+    requirement_id: str
+    deliverable_id: str
+    direction: str | None = Field(None, max_length=500)
+    draws: int = Field(3, ge=1, le=6)
+    draft: bool = True
+    revision_id: str | None = None
+    job_id: str | None = None
+
+
+class DrawsRequest(BaseModel):
+    draws: int = Field(3, ge=1, le=6)
+
+
+class EditTakeRequest(BaseModel):
+    prompt: str = Field(..., max_length=MAX_PROMPT_CHARS)
+    draws: int | None = Field(None, ge=1, le=6)  # default: as many as the source take has
+
+
+class ExpSessionCreate(BaseModel):
+    title: str | None = Field(None, max_length=120)
+    kind: Literal["chat", "face"] = "chat"  # face: a Face Lab study
+
+
+class FaceDescribeRequest(BaseModel):
+    asset_id: str | None = None  # a new photo; default: the study's photo again
+    hint: str = Field("", max_length=500)  # what to focus on ("the eyes", "older")
+    restrictive: bool = False
+
+
+class FaceTestRequest(BaseModel):
+    prompt: str = Field(..., max_length=EXP_MAX_PROMPT_CHARS)
+    draws: int = Field(1, ge=1, le=MAX_DRAWS)
+    seeds: list[int] | None = Field(None, max_length=MAX_DRAWS)  # fixed seeds (one per draw)
+    size: str | None = None
+    restrictive: bool = False
+
+
+class ExpSessionPatch(BaseModel):
+    title: str | None = Field(None, min_length=1, max_length=120)
+    size: str | None = None  # "auto" or one of EXP_SIZES
+    current: str | None = None  # an image of the session: "asset:<id>" or "turn:<id>:<n>"
+    clear_current: bool = False  # the next message makes a new image (text to image)
+
+
+class ExpTurnRequest(BaseModel):
+    text: str = Field("", max_length=EXP_MAX_PROMPT_CHARS)
+    attachments: list[str] = Field(default_factory=list, max_length=9)  # source asset ids
+    mode: Literal["rewrite", "exact"] = "rewrite"
+    draws: int = Field(1, ge=1, le=MAX_DRAWS)
+    size: str | None = None  # overrides the session's size for this message
+    # Restrictive mode (top-of-page switch, off by default): no real-person likeness by name
+    # or face. The content rules that protect minors and real people apply either way.
+    restrictive: bool = False
+
+
+class ExpSessionView(BaseModel):
+    session: ExpSession
+    turns: list[ExpTurn]
+    sizes: dict[str, str]  # aspect ratio -> size
+
+
+EXPORT_DIR = Path(tempfile.gettempdir()) / "drama-exports"
+EXPORT_MAX_AGE_S = 3600
+
+
+def _new_export_file() -> Path:
+    """A fresh temp file for an export zip. Zips are deleted after they are sent; one left
+    behind by a cancelled download (the cleanup task doesn't run then) is swept here once
+    it is an hour old."""
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - EXPORT_MAX_AGE_S
+    for old in EXPORT_DIR.glob("drama-export-*.zip"):
+        with contextlib.suppress(OSError):
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+    fd, path = tempfile.mkstemp(prefix="drama-export-", suffix=".zip", dir=EXPORT_DIR)
+    os.close(fd)  # build_export reopens it by path
+    return Path(path)
+
+
+def _seed_label(job: Job, assets: dict[str, dict]) -> str:
+    """Job list label: the first text, else the first uploaded file's name."""
+    sources = job.request.sources
+    text = next((s.text for s in sources if s.type in ("text", "script") and s.text), None)
+    if text:
+        return text
+    prompt = next((s.text for s in sources if s.text), None)
+    first = sources[0]
+    name = (assets.get(first.asset_id or "") or {}).get("filename") or first.asset_id or ""
+    label = f"[{first.type}] {name}"
+    return f"{label} · {prompt}" if prompt else label

@@ -194,8 +194,11 @@ def test_jobs_for_package_finds_the_job_without_scanning_the_list(kind, tmp_path
 
 def test_export_without_job_id_and_old_temp_files_are_swept(tmp_path):
     import os
+    import tempfile
+    from pathlib import Path
 
-    from drama_agent.api import app as app_module
+    # The export folder lives with the API's shared helpers (api/schemas.py).
+    from drama_agent.api import schemas as app_module
 
     app_module.EXPORT_DIR = tmp_path / "exports"
     app_module.EXPORT_DIR.mkdir()
@@ -212,4 +215,4 @@ def test_export_without_job_id_and_old_temp_files_are_swept(tmp_path):
         assert not stale.exists()  # swept
         assert list(app_module.EXPORT_DIR.iterdir()) == []  # this export's file deleted too
     finally:
-        app_module.EXPORT_DIR = app_module.Path(app_module.tempfile.gettempdir()) / "drama-exports"
+        app_module.EXPORT_DIR = Path(tempfile.gettempdir()) / "drama-exports"

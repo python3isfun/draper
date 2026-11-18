@@ -273,6 +273,30 @@ Each phase is shippable on its own, with draper and dramer working throughout.
   - **Suggestions:** propose matches when a new story is made, matched by the model, not only
     by name.
 
+## Phase 4 as built (18 Nov 2026): the big files split
+
+This changes no behaviour. The split was done by script, and each new module's imports were
+derived from what it uses, with any import cycle refused.
+
+- **`shot_frames.py` (2,600 lines) became `shots/`:**
+  - the data: `models`, `common`;
+  - shot planning: `picks`, `plans`, `approvals`, `staleness`, `references`, `takes`;
+  - the model prompts: `writer`, `planner`, `judge`;
+  - running and showing it: `runner`, `board`.
+- **`images.py` (1,400 lines) became `design/`:** `prompts`, `slots`, `staleness`, `takes`,
+  `worker`, `setup`.
+- **Old names still work:** the old modules re-export every name, including names other
+  files took from them that they had only imported, so existing imports keep working.
+- **`api/app.py` (1,400 lines) is now about 290:**
+  - its request and response models went to `api/schemas.py`;
+  - its route groups became `designs`, `experiments`, `jobs` and `packages`, each a
+    `register(app, ctx)`;
+  - helpers used by more than one group stay in `create_app`;
+  - `packages` registers last, since its `/{package_id}/{sheet}` route catches what the
+    others don't (the same 79 routes, and no overlapping pair changed order);
+  - one test now patches the export folder in `api/schemas`.
+- **Done in a git worktree:** splitting in place took the live server down twice.
+
 ## Risks and open questions
 
 1. **Same name is not the same character.** Casting across stories must be confirmed by a

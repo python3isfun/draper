@@ -3,21 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import tempfile
-import time
 from contextlib import asynccontextmanager
-from datetime import datetime
-from pathlib import Path
-from typing import Annotated, Any, Literal
+from types import SimpleNamespace
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from starlette.background import BackgroundTask
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
 from ..archive import archive_non_english
 from ..config import (
@@ -27,301 +20,47 @@ from ..config import (
     repo_from_env,
     worker_settings,
 )
-from ..content_guard import GuardRefused, screen, upload_guard
 from ..experiment import (
-    MAX_DRAWS,
     ExperimentRunner,
-    ExpError,
     ExpSession,
     ExpTurn,
     apply_labels,
-    image_labels,
     is_busy,
-    known_refs,
-    likeness_of,
-    new_session,
-    plan_turn,
     unlabeled,
 )
-from ..experiment import MAX_PROMPT_CHARS as EXP_MAX_PROMPT_CHARS
-from ..experiment import SIZES as EXP_SIZES
-from ..export import build_export
-from ..face_lab import new_study, plan_describe, plan_test, source_photo
-from ..image_prompts import MAX_PROMPT_CHARS, ImagePromptWriter, problems
+from ..image_prompts import ImagePromptWriter
 from ..imagegen import FixtureImageClient, ImageClient
 from ..images import (
-    SIZES,
     STALE_RUNNING_S,
     ImageWorker,
-    NeedsPick,
-    design_slots,
-    design_text,
-    draws_for,
     image_client_from_env,
-    import_pick,
     keyframe_providers_from_env,
-    latest_images,
-    make_thumb,
-    outdated_pictures,
-    package_has_uploads,
-    plan_images,
-    plan_refresh,
-    slot_title,
-    take_draws,
 )
-from ..images import develop as develop_plan
-from ..images import edit_take as edit_take_plan
-from ..images import explore as explore_plan
-from ..images import new_take as new_take_plan
-from ..images import select as select_plan
 from ..jobqueue import InMemoryJobQueue, JobQueue
 from ..library import sync_library
 from ..llm import FixtureModelClient, ModelClient
-from ..media import MediaError, MediaStore, UploadTooLarge, media_from_env
+from ..media import MediaError, MediaStore, media_from_env
 from ..models import (
-    CastSheet,
     Job,
-    JobRequest,
-    LLMCall,
     ProductionPackage,
-    PropSheet,
-    Revision,
-    RevisionRequest,
-    SetSheet,
-    SourceAsset,
-    TraceEvent,
 )
-from ..models.design_sheets import SHEET_SCHEMAS
-from ..models.images import DesignOption, GeneratedImage
-from ..models.package import utcnow
-from ..pipeline.impact import analyze_impact
-from ..pipeline.orchestrator import Orchestrator, new_id
-from ..render import render_markdown
-from ..sheet_edit import EditError, EntryLocked, edit_entry
+from ..pipeline.orchestrator import Orchestrator
 from ..shot_frames import ShotFrameRunner
 from ..store import InMemoryRepository, Repository
-from ..worker import JobWorker, pause_job, recover, resume_job, retry_job
+from ..worker import JobWorker, recover
+from . import designs as designs_routes
+from . import experiments as experiments_routes
+from . import jobs as jobs_routes
 from . import library as library_api
+from . import packages as packages_routes
 from . import shot_frames as keyframe_api
+from .schemas import (
+    WEB_DIR,
+    Meta,
+    RevalidatingStaticFiles,
+)
 
 log = logging.getLogger(__name__)
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
-
-
-class RevalidatingStaticFiles(StaticFiles):
-    """Static files the browser must revalidate on each load (ETag makes that cheap).
-
-    Without Cache-Control, browsers cache app.js heuristically and keep running an old
-    version of the UI after an update.
-    """
-
-    async def get_response(self, path: str, scope):  # type: ignore[no-untyped-def]
-        response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache"
-        return response
-
-
-class JobCreated(BaseModel):
-    job_id: str
-    status: str
-
-
-class JobSummary(BaseModel):
-    job_id: str
-    status: str
-    created_at: datetime
-    seed: str
-    package_id: str | None
-    revision_id: str | None
-
-
-class LLMCallView(BaseModel):
-    """A model call for the live view: no request body; running calls carry an output tail."""
-
-    call: LLMCall
-    output_tail: str = ""
-
-
-class Trace(BaseModel):
-    events: list[TraceEvent]
-    calls: list[LLMCallView]
-    next_seq: int  # pass back as after_seq to get only newer events
-
-
-OUTPUT_TAIL_CHARS = 4000
-
-
-class Meta(BaseModel):
-    model_id: str  # default model
-    client: str
-    stage_models: dict[str, str] = {}  # per-step overrides of the default
-    image_model: str = ""
-    image_client: str = ""
-
-
-class ImagesView(BaseModel):
-    package_id: str
-    revision_id: str
-    image_model: str
-    images: list[GeneratedImage]
-    # Over the current (newest) version of each deliverable.
-    pending: int
-    running: int
-    done: int
-    failed: int
-    # Design exploration: the takes, the deliverables (anchor or drawn from one), and the
-    # whole queue (every draw counts).
-    options: list[DesignOption] = []
-    slots: list[dict] = []
-    queued: int = 0  # pending + running images of any version or draw
-    notes: list[str] = []
-    # Picks that are out of date (image id -> why): drawn from earlier design text, or from
-    # a picture that was replaced or is out of date itself.
-    outdated: dict[str, list[str]] = {}
-
-
-class ExploreRequest(BaseModel):
-    takes: int = Field(4, ge=1, le=6)
-    draws: int = Field(3, ge=1, le=6)
-    draft: bool = True
-    scope: list[Literal["cast", "sets", "props"]] = ["cast", "sets", "props"]
-    revision_id: str | None = None
-    job_id: str | None = None
-
-
-class ImportImageRequest(BaseModel):
-    """An Experiment image (#N in a chat) as the pick for a package deliverable."""
-
-    session_id: str
-    image: int = Field(..., ge=1)  # the image's number in the chat (#N)
-    requirement_id: str
-    deliverable_id: str | None = None  # default: the requirement's first deliverable
-    # None: as the Experiment recorded it (unknown counts as a likeness). False is for an
-    # invented person whose image inherited the mark from someone else in its source.
-    likeness: bool | None = None
-    revision_id: str | None = None
-    job_id: str | None = None
-
-
-class EntryEditRequest(BaseModel):
-    """A hand edit to one cast, set or prop entry. `sheet` holds design sheet fields
-    (lists as lists of strings); `bible` a look's or state's one-line `description`."""
-
-    revision_id: str
-    sheet: dict[str, Any] = Field(default_factory=dict)
-    bible: dict[str, Any] = Field(default_factory=dict)
-
-
-class EntryEditResult(BaseModel):
-    package_id: str
-    revision_id: str
-    entry_id: str
-    changed: list[str]
-    requirement_ids: list[str]  # requirements whose design text was rebuilt
-    # Of those, the ones whose model-written design text the rebuild replaced.
-    replaced_written: list[str]
-    drawn_before: list[str]  # board items with images drawn from the earlier text
-
-
-class DevelopRequest(BaseModel):
-    draws: int = Field(3, ge=1, le=6)
-    draft: bool = True
-    revision_id: str | None = None
-    job_id: str | None = None
-
-
-class NewTakeRequest(BaseModel):
-    requirement_id: str
-    deliverable_id: str
-    direction: str | None = Field(None, max_length=500)
-    draws: int = Field(3, ge=1, le=6)
-    draft: bool = True
-    revision_id: str | None = None
-    job_id: str | None = None
-
-
-class DrawsRequest(BaseModel):
-    draws: int = Field(3, ge=1, le=6)
-
-
-class EditTakeRequest(BaseModel):
-    prompt: str = Field(..., max_length=MAX_PROMPT_CHARS)
-    draws: int | None = Field(None, ge=1, le=6)  # default: as many as the source take has
-
-
-class ExpSessionCreate(BaseModel):
-    title: str | None = Field(None, max_length=120)
-    kind: Literal["chat", "face"] = "chat"  # face: a Face Lab study
-
-
-class FaceDescribeRequest(BaseModel):
-    asset_id: str | None = None  # a new photo; default: the study's photo again
-    hint: str = Field("", max_length=500)  # what to focus on ("the eyes", "older")
-    restrictive: bool = False
-
-
-class FaceTestRequest(BaseModel):
-    prompt: str = Field(..., max_length=EXP_MAX_PROMPT_CHARS)
-    draws: int = Field(1, ge=1, le=MAX_DRAWS)
-    seeds: list[int] | None = Field(None, max_length=MAX_DRAWS)  # fixed seeds (one per draw)
-    size: str | None = None
-    restrictive: bool = False
-
-
-class ExpSessionPatch(BaseModel):
-    title: str | None = Field(None, min_length=1, max_length=120)
-    size: str | None = None  # "auto" or one of EXP_SIZES
-    current: str | None = None  # an image of the session: "asset:<id>" or "turn:<id>:<n>"
-    clear_current: bool = False  # the next message makes a new image (text to image)
-
-
-class ExpTurnRequest(BaseModel):
-    text: str = Field("", max_length=EXP_MAX_PROMPT_CHARS)
-    attachments: list[str] = Field(default_factory=list, max_length=9)  # source asset ids
-    mode: Literal["rewrite", "exact"] = "rewrite"
-    draws: int = Field(1, ge=1, le=MAX_DRAWS)
-    size: str | None = None  # overrides the session's size for this message
-    # Restrictive mode (top-of-page switch, off by default): no real-person likeness by name
-    # or face. The content rules that protect minors and real people apply either way.
-    restrictive: bool = False
-
-
-class ExpSessionView(BaseModel):
-    session: ExpSession
-    turns: list[ExpTurn]
-    sizes: dict[str, str]  # aspect ratio -> size
-
-
-EXPORT_DIR = Path(tempfile.gettempdir()) / "drama-exports"
-EXPORT_MAX_AGE_S = 3600
-
-
-def _new_export_file() -> Path:
-    """A fresh temp file for an export zip. Zips are deleted after they are sent; one left
-    behind by a cancelled download (the cleanup task doesn't run then) is swept here once
-    it is an hour old."""
-    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    cutoff = time.time() - EXPORT_MAX_AGE_S
-    for old in EXPORT_DIR.glob("drama-export-*.zip"):
-        with contextlib.suppress(OSError):
-            if old.stat().st_mtime < cutoff:
-                old.unlink()
-    fd, path = tempfile.mkstemp(prefix="drama-export-", suffix=".zip", dir=EXPORT_DIR)
-    os.close(fd)  # build_export reopens it by path
-    return Path(path)
-
-
-def _seed_label(job: Job, assets: dict[str, dict]) -> str:
-    """Job list label: the first text, else the first uploaded file's name."""
-    sources = job.request.sources
-    text = next((s.text for s in sources if s.type in ("text", "script") and s.text), None)
-    if text:
-        return text
-    prompt = next((s.text for s in sources if s.text), None)
-    first = sources[0]
-    name = (assets.get(first.asset_id or "") or {}).get("filename") or first.asset_id or ""
-    label = f"[{first.type}] {name}"
-    return f"{label} · {prompt}" if prompt else label
 
 
 def create_app(
@@ -340,16 +79,25 @@ def create_app(
     """Build the API. `workers` in-process job workers start with the app (lifespan);
     with workers=0 jobs are only enqueued, for a separate `python -m drama_agent.worker`.
     Uploads go to `media` (default: a fresh temporary directory)."""
+
     repo = repo or InMemoryRepository()
+
     queue = queue or InMemoryJobQueue()
+
     media = media or MediaStore(tempfile.mkdtemp(prefix="drama-media-"))
+
     orchestrator = Orchestrator(
         repo, client or FixtureModelClient(), checkpoints=queue, media=media
     )
+
     images = image_client or FixtureImageClient()
+
     wakeup = asyncio.Event()
+
     image_wakeup = asyncio.Event()
+
     experiments = ExperimentRunner(repo, media, images, orchestrator.client)
+
     # Keyframes share the Experiment tab's GPU lock: one render at a time from this process.
     # Keyframes can also be drawn with other providers (e.g. Nano Banana), chosen per take.
     keyframes = ShotFrameRunner(repo, media, images, orchestrator.client, gpu=experiments._gpu,
@@ -410,9 +158,13 @@ def create_app(
                 await close()
 
     app = FastAPI(title="Drama Agent", version="0.1.0", lifespan=lifespan)
+
     app.state.repo = repo
+
     app.state.queue = queue
+
     app.state.orchestrator = orchestrator
+
     app.state.media = media
 
     @app.get("/v1/meta", response_model=Meta)
@@ -426,86 +178,11 @@ def create_app(
             image_client=type(images).__name__,
         )
 
-    # Reference images -------------------------------------------------------
-
     def _package_or_404(package_id: str, revision_id: str | None) -> ProductionPackage:
         pkg = repo.get_package(package_id, revision_id)
         if pkg is None:
             raise HTTPException(404, "package not found")
         return pkg
-
-    def _images_view(pkg: ProductionPackage, notes: list[str] | None = None) -> ImagesView:
-        imgs = repo.list_images(pkg.package_id, pkg.revision_id)
-        latest = latest_images(imgs)
-        counts = {s: 0 for s in ("pending", "running", "done", "failed")}
-        for img in latest.values():
-            counts[img.status] += 1
-        return ImagesView(
-            package_id=pkg.package_id,
-            revision_id=pkg.revision_id,
-            image_model=images.model_id,
-            images=imgs,
-            options=repo.list_options(pkg.package_id, pkg.revision_id),
-            slots=design_slots(pkg),
-            queued=sum(1 for i in imgs if i.status in ("pending", "running")),
-            notes=notes or [],
-            outdated=outdated_pictures(pkg, imgs),
-            **counts,
-        )
-
-    @app.post(
-        "/v1/drama-packages/{package_id}/images/refresh", status_code=202, response_model=ImagesView
-    )
-    async def refresh_images(
-        package_id: str,
-        revision_id: str | None = None,
-        requirement_ids: Annotated[list[str] | None, Query()] = None,
-    ) -> ImagesView:
-        """Redraw the out-of-date picks, in order: those drawn from up-to-date pictures now;
-        each takes over its pick when done, and the pictures drawn from the one it replaced
-        follow (a set's wide view, then its other states and its plan view). A hand-written
-        prompt is kept; a model-written one is rewritten when the design text changed.
-        `requirement_ids` limits it to those items' pictures (one character or set in the
-        library); the pictures drawn from them still follow."""
-        pkg = _package_or_404(package_id, revision_id)
-        _package_job(pkg.package_id, None, pkg.revision_id)
-        existing = repo.list_images(pkg.package_id, pkg.revision_id)
-        stale = outdated_pictures(pkg, existing)
-        only = set(requirement_ids) if requirement_ids else None
-        new = plan_refresh(pkg, existing, only=only)
-        _save_new([], new)
-        later = sum(
-            1 for why in stale.values() if "drawn from a picture that is out of date" in why
-        )
-        notes = [f"Redrawing {len(new)} out-of-date picture{'s' * (len(new) != 1)}."]
-        if later:
-            notes.append(f"{later} more follow once the pictures they are drawn from are redrawn.")
-        return _images_view(pkg, notes)
-
-    @app.get("/v1/drama-packages/{package_id}/images", response_model=ImagesView)
-    async def list_package_images(package_id: str, revision_id: str | None = None) -> ImagesView:
-        """Reference images of a package revision, every version (newest per deliverable
-        is the current one), with counts over the current ones."""
-        return _images_view(_package_or_404(package_id, revision_id))
-
-    @app.post("/v1/drama-packages/{package_id}/images", status_code=202, response_model=ImagesView)
-    async def generate_package_images(
-        package_id: str,
-        revision_id: str | None = None,
-        draft: bool = False,
-        job_id: str | None = None,
-    ) -> ImagesView:
-        """Queue images for every character, look, location and prop deliverable that has
-        none yet (or whose last attempt failed). draft=true makes small, fast images.
-        job_id (the job that made the package) is where the prompt writer's call is traced;
-        the web UI sends it."""
-        pkg = _package_or_404(package_id, revision_id)
-        job = _package_job(pkg.package_id, job_id)
-        existing = repo.list_images(pkg.package_id, pkg.revision_id)
-        for img in plan_images(pkg, existing, draft=draft, job_id=job and job.job_id):
-            repo.save_image(img)
-        image_wakeup.set()
-        return _images_view(pkg)
 
     def _package_job(
         package_id: str, job_id: str | None, revision_id: str | None = None
@@ -525,378 +202,6 @@ def create_app(
             raise HTTPException(409, "this story is archived")
         return job
 
-    def _save_new(opts: list[DesignOption], imgs: list[GeneratedImage]) -> None:
-        for o in opts:
-            repo.save_option(o)
-        for i in imgs:
-            repo.save_image(i)
-        image_wakeup.set()
-
-    @app.post(
-        "/v1/drama-packages/{package_id}/images/explore",
-        status_code=202,
-        response_model=ImagesView,
-    )
-    async def explore_designs(package_id: str, req: ExploreRequest) -> ImagesView:
-        """Phase 1: `takes` distinct designs x `draws` images for every anchor (each
-        character's face, each location's and prop's first state) in scope. Pick one image
-        per anchor with /select, then /develop the rest from your picks."""
-        pkg = _package_or_404(package_id, req.revision_id)
-        job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
-        opts, imgs = explore_plan(
-            pkg,
-            repo.list_options(pkg.package_id, pkg.revision_id),
-            takes=req.takes,
-            draws=req.draws,
-            draft=req.draft,
-            scope=list(req.scope),
-            job_id=job and job.job_id,
-        )
-        _save_new(opts, imgs)
-        return _images_view(pkg)
-
-    @app.post(
-        "/v1/drama-packages/{package_id}/images/develop",
-        status_code=202,
-        response_model=ImagesView,
-    )
-    async def develop_designs(package_id: str, req: DevelopRequest) -> ImagesView:
-        """Phase 2: looks, other states and plan views, drawn from the selected anchor
-        images and their takes, `draws` images each. Deliverables whose anchor has no
-        selection yet are left for later (listed in `notes`)."""
-        pkg = _package_or_404(package_id, req.revision_id)
-        job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
-        opts, imgs, waiting, left_out = develop_plan(
-            pkg,
-            repo.list_options(pkg.package_id, pkg.revision_id),
-            repo.list_images(pkg.package_id, pkg.revision_id),
-            draws=req.draws,
-            draft=req.draft,
-            job_id=job and job.job_id,
-        )
-        _save_new(opts, imgs)
-        notes = [f"Pick an image for {slot_title(pkg, k)} first." for k in waiting]
-        return _images_view(pkg, notes + left_out)
-
-    @app.post(
-        "/v1/drama-packages/{package_id}/images/import",
-        status_code=201,
-        response_model=GeneratedImage,
-    )
-    async def import_image(package_id: str, req: ImportImageRequest) -> GeneratedImage:
-        """Use an Experiment image as the pick for a deliverable (e.g. a character's face).
-        Develop then draws the dependent deliverables (the looks) from it. Its likeness mark
-        carries over: images drawn from it get the stricter rules, and a likeness face's
-        looks worn in intimate scenes are not drawn."""
-        pkg = _package_or_404(package_id, req.revision_id)
-        job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
-        session = _exp_session_or_404(req.session_id)
-        turns = _exp_turns(session.session_id)
-        ref = image_labels(turns).get(req.image)
-        if ref is None:
-            raise HTTPException(404, f"no image #{req.image} in this chat")
-        reqmt = next(
-            (r for r in pkg.asset_requirements.items if r.requirement_id == req.requirement_id),
-            None,
-        )
-        if reqmt is None or not reqmt.deliverables:
-            raise HTTPException(404, f"requirement {req.requirement_id} not found")
-        deliverable = req.deliverable_id or reqmt.deliverables[0].deliverable_id
-        path, mime = experiments.ref_file(ref, variant="full")
-        if path is None:
-            raise HTTPException(409, f"image #{req.image} is not available")
-        recorded = likeness_of(ref, turns)
-        likeness = (recorded is not False) if req.likeness is None else req.likeness
-        made = next((t for t in turns if ref.startswith(f"turn:{t.turn_id}:")), None)
-        ext = "png" if mime == "image/png" else "jpg"
-        rel = f"generated/{pkg.package_id}/import_{session.session_id}_{req.image}.{ext}"
-        data = await asyncio.to_thread(path.read_bytes)
-        dest = media.path(rel)
-        await asyncio.to_thread(dest.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(dest.write_bytes, data)
-        thumb = await asyncio.to_thread(make_thumb, media, rel)
-        try:
-            img = import_pick(
-                pkg,
-                (reqmt.requirement_id, deliverable),
-                file=rel,
-                thumb=thumb,
-                content_type=mime,
-                prompt=made.prompt if made else "",
-                likeness=likeness,
-                imported_from=f"experiment {session.session_id} #{req.image}",
-                job_id=job and job.job_id,
-            )
-        except KeyError as exc:
-            raise HTTPException(404, str(exc)) from None
-        repo.save_image(img)
-        repo.set_selected(img.image_id)
-        return repo.get_image(img.image_id)
-
-    @app.post(
-        "/v1/drama-packages/{package_id}/images/takes",
-        status_code=202,
-        response_model=list[DesignOption],
-    )
-    async def add_take(package_id: str, req: NewTakeRequest) -> list[DesignOption]:
-        """One more take on a deliverable, optionally steered (`direction`)."""
-        pkg = _package_or_404(package_id, req.revision_id)
-        job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
-        try:
-            opts, imgs = new_take_plan(
-                pkg,
-                repo.list_options(pkg.package_id, pkg.revision_id),
-                repo.list_images(pkg.package_id, pkg.revision_id),
-                (req.requirement_id, req.deliverable_id),
-                direction=(req.direction or "").strip() or None,
-                draws=req.draws,
-                draft=req.draft,
-                job_id=job and job.job_id,
-            )
-        except KeyError as exc:
-            raise HTTPException(404, str(exc)) from None
-        except NeedsPick as exc:
-            raise HTTPException(
-                409, f"Pick an image for {slot_title(pkg, exc.key)} first."
-            ) from None
-        _save_new(opts, imgs)
-        return opts
-
-    @app.post(
-        "/v1/image-options/{option_id}/draws",
-        status_code=202,
-        response_model=list[GeneratedImage],
-    )
-    async def more_draws(option_id: str, req: DrawsRequest) -> list[GeneratedImage]:
-        """More images of an existing take (new seeds, same prompt)."""
-        opt = repo.get_option(option_id)
-        if opt is None:
-            raise HTTPException(404, "take not found")
-        pkg = _package_or_404(opt.package_id, opt.revision_id)
-        _package_job(pkg.package_id, opt.job_id, pkg.revision_id)
-        mine = take_draws(repo.list_images(pkg.package_id, pkg.revision_id), option_id)
-        refs = mine[0].reference_ids if mine else []
-        first = 1 + max((i.draw for i in mine), default=0)
-        imgs = draws_for(opt, req.draws, refs, first=first)
-        _save_new([], imgs)
-        return imgs
-
-    @app.post(
-        "/v1/image-options/{option_id}/edit",
-        status_code=202,
-        response_model=DesignOption,
-    )
-    async def edit_take(option_id: str, req: EditTakeRequest) -> DesignOption:
-        """A new take with your own wording of this take's prompt, drawn with the same seeds
-        (and references) as this take's draws, so the images show what the wording changed.
-        A prompt that would break the render (cites a picture the take doesn't have) is
-        refused; other H3 rule misses are kept as `warnings` on the new take."""
-        source = repo.get_option(option_id)
-        if source is None:
-            raise HTTPException(404, "take not found")
-        if source.status == "pending":
-            raise HTTPException(409, "this take is still being written")
-        pkg = _package_or_404(source.package_id, source.revision_id)
-        _package_job(pkg.package_id, source.job_id, pkg.revision_id)
-        images = repo.list_images(pkg.package_id, pkg.revision_id)
-        mine = take_draws(images, option_id)
-        prompt = req.prompt.strip()
-        n_refs = len(mine[0].reference_ids) if mine else 0
-        found = problems(prompt, n_refs)
-        fatal = [p for p in found if p == "empty" or p.startswith("cites a picture")]
-        if fatal:
-            raise HTTPException(422, f"prompt {'; '.join(fatal)}")
-        # Hand-written prompts are screened. Pictures may come from the job's uploaded
-        # photos (character references), so they count as possibly showing real people.
-        has_uploads = package_has_uploads(repo, pkg.package_id)
-        if has_uploads and (reason := upload_guard(prompt)):
-            raise HTTPException(422, reason)
-        kind = (
-            "uploaded photo, or an image made from one (may show a real person)"
-            if has_uploads
-            else "generated image (made from text only)"
-        )
-        try:
-            await screen(
-                orchestrator.client,
-                prompt,
-                pictures=[
-                    {"picture": f"<Picture {i}>", "kind": kind} for i in range(1, n_refs + 1)
-                ],
-                # The design board's images go into the hand-off package the team shoots
-                # from, so it always uses the restrictive rules (the switch is Experiment's).
-                restrictive=True,
-            )
-        except GuardRefused as exc:
-            raise HTTPException(422, str(exc)) from exc
-        opt, imgs = edit_take_plan(
-            source,
-            repo.list_options(pkg.package_id, pkg.revision_id),
-            images,
-            prompt,
-            draws=req.draws or max(1, min(6, len(mine))),
-            warnings=found,
-            design=design_text(pkg, (source.requirement_id, source.deliverable_id)),
-        )
-        _save_new([opt], imgs)
-        return opt
-
-    @app.post(
-        "/v1/generated-images/{image_id}/select",
-        status_code=202,
-        response_model=GeneratedImage,
-    )
-    async def select_image(image_id: str) -> GeneratedImage:
-        """Choose this image for its deliverable. A draft is re-rendered at full size; the
-        full-size image takes over the selection when it's done (picking a draft whose
-        full-size render is already done picks the render, which is returned)."""
-        img = _image_or_404(image_id)
-        pkg = _package_or_404(img.package_id, img.revision_id)
-        _package_job(pkg.package_id, img.job_id, pkg.revision_id)
-        try:
-            pick, final = select_plan(repo.list_images(pkg.package_id, pkg.revision_id), image_id)
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from None
-        repo.set_selected(pick)
-        if final is not None:
-            _save_new([], [final])
-        return repo.get_image(pick)
-
-    def _image_or_404(image_id: str) -> GeneratedImage:
-        img = repo.get_image(image_id)
-        if img is None:
-            raise HTTPException(404, "image not found")
-        return img
-
-    def _delete_images(doomed: list[GeneratedImage]) -> None:
-        """Remove images (and their files) with the full-size renders made from them."""
-        ids = {i.image_id for i in doomed}
-        if not ids:
-            return
-        siblings = repo.list_images(doomed[0].package_id)
-        doomed = doomed + [i for i in siblings if i.finalizes in ids and i.image_id not in ids]
-        if any(i.status == "running" for i in doomed):
-            raise HTTPException(409, "an image is being drawn; delete it when it finishes")
-        repo.delete_images([i.image_id for i in doomed])
-        for i in doomed:
-            for rel in (i.file, i.thumb):
-                if rel:
-                    with contextlib.suppress(OSError):
-                        media.path(rel).unlink()
-
-    @app.delete("/v1/generated-images/{image_id}", status_code=204)
-    async def delete_image(image_id: str) -> None:
-        """Delete an image (e.g. an imported pick), with its full-size render. If it was
-        the pick, its item has none until you pick another."""
-        _delete_images([_image_or_404(image_id)])
-
-    @app.delete("/v1/image-options/{option_id}", status_code=204)
-    async def delete_option(option_id: str) -> None:
-        """Delete a take with all its draws (and their full-size renders), so it is no
-        longer on the board or in the export."""
-        opt = repo.get_option(option_id)
-        if opt is None:
-            raise HTTPException(404, "take not found")
-        draws = [
-            i for i in repo.list_images(opt.package_id, opt.revision_id) if i.option_id == option_id
-        ]
-        _delete_images(draws)
-        repo.delete_option(option_id)
-
-    @app.patch("/v1/drama-packages/{package_id}/entries/{entry_id}", response_model=EntryEditResult)
-    async def edit_package_entry(
-        package_id: str, entry_id: str, req: EntryEditRequest
-    ) -> EntryEditResult:
-        """Edit a character, look, location, location state, prop or prop state's design
-        text in place (no new revision). The asset requirements built from it are rebuilt,
-        so new takes and Develop use the edit; images already drawn stay as they are."""
-        pkg = _package_or_404(package_id, req.revision_id)
-        _package_job(pkg.package_id, None, pkg.revision_id)
-        if any(j.status in ("queued", "running") for j in repo.jobs_for_package(package_id)):
-            raise HTTPException(409, "a job is still working on this story; edit when it's done")
-        try:
-            edit = edit_entry(pkg, entry_id, req.sheet, req.bible)
-        except KeyError as exc:
-            raise HTTPException(404, str(exc.args[0])) from None
-        except EntryLocked as exc:
-            raise HTTPException(409, str(exc)) from None
-        except EditError as exc:
-            raise HTTPException(422, str(exc)) from None
-        if edit.changed:
-            repo.replace_package(pkg)
-        affected = set(edit.requirement_ids)
-        drawn = {
-            (i.requirement_id, i.deliverable_id)
-            for i in repo.list_images(pkg.package_id, pkg.revision_id)
-            if i.requirement_id in affected and i.status == "done"
-        }
-        return EntryEditResult(
-            package_id=pkg.package_id,
-            revision_id=pkg.revision_id,
-            entry_id=entry_id,
-            changed=edit.changed,
-            requirement_ids=edit.requirement_ids,
-            replaced_written=edit.replaced_written,
-            drawn_before=sorted({slot_title(pkg, k) for k in drawn}),
-        )
-
-    @app.post(
-        "/v1/generated-images/{image_id}/regenerate",
-        status_code=202,
-        response_model=GeneratedImage,
-    )
-    async def regenerate_image(image_id: str, draft: bool | None = None) -> GeneratedImage:
-        """A new version of this image's deliverable, with a fresh seed. References use the
-        current versions of the images it depends on."""
-        old = _image_or_404(image_id)
-        pkg = _package_or_404(old.package_id, old.revision_id)
-        _package_job(pkg.package_id, old.job_id)
-        small = draft if draft is not None else old.size in {s[1] for s in SIZES.values()}
-        [new] = plan_images(
-            pkg,
-            repo.list_images(pkg.package_id, pkg.revision_id),
-            draft=small,
-            only=(old.requirement_id, old.deliverable_id),
-            job_id=old.job_id,
-        )
-        repo.save_image(new)
-        image_wakeup.set()
-        return new
-
-    @app.post(
-        "/v1/generated-images/{image_id}/retry",
-        status_code=202,
-        response_model=GeneratedImage,
-    )
-    async def retry_image(image_id: str) -> GeneratedImage:
-        """Queue a failed image again as it was: same prompt, seed, size and references (a
-        failed draw of a take stays that draw)."""
-        img = _image_or_404(image_id)
-        pkg = _package_or_404(img.package_id, img.revision_id)
-        _package_job(pkg.package_id, img.job_id, pkg.revision_id)
-        if img.status != "failed":
-            raise HTTPException(
-                409, f"only a failed image can be retried (this one is {img.status})"
-            )
-        img.status, img.error, img.started_at, img.finished_at = "pending", None, None, None
-        repo.save_image(img)
-        image_wakeup.set()
-        return img
-
-    @app.get("/v1/generated-images/{image_id}", response_model=GeneratedImage)
-    async def get_image(image_id: str) -> GeneratedImage:
-        return _image_or_404(image_id)
-
-    @app.get("/v1/generated-images/{image_id}/{variant}", response_class=FileResponse)
-    async def image_file(image_id: str, variant: Literal["content", "thumb"]) -> FileResponse:
-        img = _image_or_404(image_id)
-        rel = img.thumb if variant == "thumb" and img.thumb else img.file
-        if rel is None:
-            raise HTTPException(404, f"image is {img.status}")
-        return _file(rel, "image/jpeg" if rel.endswith(".jpg") else img.content_type)
-
-    # Experiment: chat with the image model -------------------------------------
-
     def _exp_session_or_404(session_id: str) -> ExpSession:
         session = repo.get_exp_session(session_id)
         if session is None:
@@ -912,267 +217,6 @@ def create_app(
                 repo.save_exp_turn(t)
         return turns
 
-    def _exp_view(session: ExpSession) -> ExpSessionView:
-        turns = _exp_turns(session.session_id)
-        return ExpSessionView(session=session, turns=turns, sizes=EXP_SIZES)
-
-    @app.get("/v1/experiments", response_model=list[ExpSession])
-    async def list_experiments(
-        kind: Literal["chat", "face"] | None = None,
-    ) -> list[ExpSession]:
-        return [s for s in repo.list_exp_sessions() if kind in (None, s.kind)]
-
-    @app.post("/v1/experiments", status_code=201, response_model=ExpSession)
-    async def create_experiment(req: ExpSessionCreate) -> ExpSession:
-        session = new_study(req.title) if req.kind == "face" else new_session(req.title)
-        repo.save_exp_session(session)
-        return session
-
-    def _start_face_turn(session: ExpSession, turn: ExpTurn) -> ExpTurn:
-        if turn.attachments:
-            # The same photo described again keeps its number.
-            known = {
-                ref.removeprefix("asset:"): n
-                for n, ref in image_labels(repo.list_exp_turns(session.session_id)).items()
-                if ref.startswith("asset:")
-            }
-            new = [a for a in turn.attachments if a not in known]
-            fresh = iter(repo.allocate_exp_labels(session.session_id, len(new)) if new else [])
-            turn.attachment_labels = [known.get(a) or next(fresh) for a in turn.attachments]
-        repo.save_exp_turn(turn)
-        session.updated_at = turn.created_at
-        repo.save_exp_session(session)
-        experiments.start(turn.turn_id)
-        return turn
-
-    @app.post("/v1/experiments/{session_id}/describe", status_code=202, response_model=ExpTurn)
-    async def describe_face(session_id: str, req: FaceDescribeRequest) -> ExpTurn:
-        """Face Lab: write the most descriptive text prompt for a photo (nothing drawn)."""
-        session = _exp_session_or_404(session_id)
-        turns = _exp_turns(session_id)
-        ids = [i for i in [req.asset_id or source_photo(turns)] if i]
-        assets = repo.get_source_assets(ids)
-        try:
-            turn = plan_describe(
-                session,
-                turns,
-                assets,
-                asset_id=req.asset_id,
-                hint=req.hint,
-                restrictive=req.restrictive,
-            )
-        except ExpError as exc:
-            raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
-        if session.title == "New face study" and req.asset_id:
-            name = (assets.get(req.asset_id) or {}).get("filename") or ""
-            session.title = Path(name).stem[:60] or session.title
-        return _start_face_turn(session, turn)
-
-    @app.post("/v1/experiments/{session_id}/tests", status_code=202, response_model=ExpTurn)
-    async def test_face_prompt(session_id: str, req: FaceTestRequest) -> ExpTurn:
-        """Face Lab: render a prompt from text alone, with fixed seeds if given."""
-        session = _exp_session_or_404(session_id)
-        turns = _exp_turns(session_id)
-        try:
-            turn = plan_test(
-                session,
-                turns,
-                prompt=req.prompt,
-                draws=req.draws,
-                seeds=req.seeds,
-                size=req.size,
-                restrictive=req.restrictive,
-            )
-        except ExpError as exc:
-            raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
-        return _start_face_turn(session, turn)
-
-    @app.get("/v1/experiments/{session_id}", response_model=ExpSessionView)
-    async def get_experiment(session_id: str) -> ExpSessionView:
-        return _exp_view(_exp_session_or_404(session_id))
-
-    @app.patch("/v1/experiments/{session_id}", response_model=ExpSession)
-    async def update_experiment(session_id: str, req: ExpSessionPatch) -> ExpSession:
-        session = _exp_session_or_404(session_id)
-        if req.title is not None:
-            session.title = req.title.strip() or session.title
-        if req.size is not None:
-            if req.size != "auto" and req.size not in EXP_SIZES.values():
-                raise HTTPException(422, f"unsupported size {req.size}")
-            session.size = req.size
-        if (req.clear_current or req.current is not None) and is_busy(
-            repo.list_exp_turns(session_id)
-        ):
-            # The running message makes its result the current image when it finishes.
-            raise HTTPException(409, "Wait for the current image to finish first.")
-        if req.clear_current:
-            session.current = None
-        elif req.current is not None:
-            if req.current not in known_refs(repo.list_exp_turns(session_id)):
-                raise HTTPException(422, "that image is not part of this session")
-            session.current = req.current
-        session.updated_at = utcnow()
-        repo.save_exp_session(session)
-        return session
-
-    @app.delete("/v1/experiments/{session_id}", status_code=204)
-    async def delete_experiment(session_id: str) -> None:
-        _exp_session_or_404(session_id)
-        turns = repo.list_exp_turns(session_id)
-        if is_busy(turns):
-            raise HTTPException(409, "An image is still being made; delete when it's done.")
-        uploads = sorted({a for t in turns for a in t.attachments})
-        repo.delete_exp_session(session_id)
-        await asyncio.to_thread(experiments.delete_files, session_id, uploads)
-
-    @app.post("/v1/experiments/{session_id}/turns", status_code=202, response_model=ExpTurn)
-    async def send_experiment_turn(session_id: str, req: ExpTurnRequest) -> ExpTurn:
-        session = _exp_session_or_404(session_id)
-        if session.kind != "chat":
-            raise HTTPException(422, "This is a Face Lab study: use describe or tests.")
-        turns = _exp_turns(session_id)  # numbered, so the message can mention any image
-        # Uploads: this message's, plus the current image when it is an earlier upload
-        # (its dimensions pick the "auto" size).
-        asset_ids = list(req.attachments)
-        if session.current and session.current.startswith("asset:"):
-            asset_ids.append(session.current.removeprefix("asset:"))
-        try:
-            turn = plan_turn(
-                session,
-                turns,
-                repo.get_source_assets(asset_ids),
-                text=req.text,
-                attachments=req.attachments,
-                mode=req.mode,
-                draws=req.draws,
-                size=req.size,
-                restrictive=req.restrictive,
-            )
-        except ExpError as exc:
-            raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
-        if turn.attachments:
-            turn.attachment_labels = repo.allocate_exp_labels(session_id, len(turn.attachments))
-        repo.save_exp_turn(turn)
-        if turn.mode == "upload":
-            session.current = f"asset:{turn.attachments[0]}"
-        if session.title == "New chat" and turn.text:
-            session.title = turn.text[:60] + ("…" if len(turn.text) > 60 else "")
-        session.updated_at = turn.created_at
-        repo.save_exp_session(session)
-        if turn.status == "pending":
-            experiments.start(turn.turn_id)
-        return turn
-
-    def _exp_turn_or_404(turn_id: str) -> ExpTurn:
-        turn = repo.get_exp_turn(turn_id)
-        if turn is None:
-            raise HTTPException(404, "turn not found")
-        return turn
-
-    @app.post("/v1/experiment-turns/{turn_id}/retry", status_code=202, response_model=ExpTurn)
-    async def retry_experiment_turn(turn_id: str) -> ExpTurn:
-        """Run a failed turn again; draws already made and a prompt already written are kept.
-        A refused turn is checked again under the current rules (which may have changed)."""
-        turn = _exp_turn_or_404(turn_id)
-        if turn.status != "failed":
-            raise HTTPException(409, "only a failed message can be retried")
-        if is_busy(repo.list_exp_turns(turn.session_id)):
-            raise HTTPException(409, "Wait for the current image to finish first.")
-        turn.status, turn.error, turn.finished_at = "pending", None, None
-        turn.refused = False
-        repo.save_exp_turn(turn)
-        experiments.start(turn.turn_id)
-        return turn
-
-    @app.get("/v1/experiment-turns/{turn_id}/results/{n}/{variant}", response_class=FileResponse)
-    async def experiment_result_file(
-        turn_id: str, n: int, variant: Literal["content", "thumb"]
-    ) -> FileResponse:
-        turn = _exp_turn_or_404(turn_id)
-        if not 0 <= n < len(turn.results):
-            raise HTTPException(404, "no such image")
-        r = turn.results[n]
-        if variant == "thumb" and r.thumb:
-            return _file(r.thumb, "image/jpeg")
-        return _file(r.file, r.content_type)
-
-    @app.get("/v1/drama-jobs", response_model=list[JobSummary])
-    async def list_jobs(
-        limit: int = Query(50, ge=1, le=200), include_archived: bool = False
-    ) -> list[JobSummary]:
-        out = []
-        jobs = repo.list_jobs(limit, include_archived=include_archived)
-        # One batched lookup for the file names of media-only jobs (not one per job).
-        firsts = [j.request.sources[0].asset_id for j in jobs]
-        assets = repo.get_source_assets([a for a in firsts if a])
-        for j in jobs:
-            seed = _seed_label(j, assets)
-            out.append(
-                JobSummary(
-                    job_id=j.job_id,
-                    status=j.status,
-                    created_at=j.created_at,
-                    seed=seed[:120],
-                    package_id=j.package_id,
-                    revision_id=j.revision_id,
-                )
-            )
-        return out
-
-    @app.post("/v1/drama-jobs", status_code=202, response_model=JobCreated)
-    async def create_job(req: JobRequest) -> JobCreated:
-        if (req.options.language or "en-US").lower() not in ("en-us", "en"):
-            raise HTTPException(
-                422, "stories are written in American English: language must be en-US"
-            )
-        req.options.language = "en-US"
-        n_media = sum(1 for src in req.sources if src.type in ("image", "video"))
-        if n_media > media.limits.max_media_sources:
-            raise HTTPException(
-                422, f"at most {media.limits.max_media_sources} images and videos per job"
-            )
-        for i, src in enumerate(req.sources):
-            if not src.asset_id:
-                continue
-            raw = repo.get_source_asset(src.asset_id)
-            if raw is None:
-                raise HTTPException(422, f"unknown asset_id {src.asset_id}")
-            kind = raw.get("kind")
-            if src.type in ("image", "video") and kind != src.type:
-                raise HTTPException(
-                    422, f"sources[{i}] is type {src.type} but {src.asset_id} is a {kind}"
-                )
-        job = Job(job_id=new_id("job"), request=req)
-        repo.save_job(job)
-        queue.enqueue(job.job_id)
-        wakeup.set()
-        return JobCreated(job_id=job.job_id, status=job.status)
-
-    @app.post("/v1/source-assets", status_code=201, response_model=SourceAsset)
-    async def upload_asset(
-        request: Request,
-        filename: str = Query("upload", max_length=255),
-    ) -> SourceAsset:
-        """Upload one image or video as the raw request body (not multipart). Use the
-        returned asset_id in a job source: {"type": "image"|"video", "asset_id": ...}."""
-        declared = request.headers.get("content-length")
-        try:
-            asset = await media.save_upload(
-                request.stream(), filename, int(declared) if declared else None
-            )
-        except UploadTooLarge as exc:
-            raise HTTPException(413, str(exc)) from None
-        except MediaError as exc:
-            raise HTTPException(422, str(exc)) from None
-        repo.save_source_asset(asset.asset_id, asset.model_dump(mode="json"))
-        return asset
-
-    def _asset(asset_id: str) -> SourceAsset:
-        raw = repo.get_source_asset(asset_id)
-        if raw is None:
-            raise HTTPException(404, "asset not found")
-        return SourceAsset.model_validate(raw)
-
     def _file(rel: str, content_type: str) -> FileResponse:
         try:
             path = media.path(rel)
@@ -1186,112 +230,18 @@ def create_app(
             headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600"},
         )
 
-    @app.get("/v1/source-assets/{asset_id}", response_model=SourceAsset)
-    async def get_asset(asset_id: str) -> SourceAsset:
-        """What was extracted from an upload: size, duration, keyframes, transcript."""
-        return _asset(asset_id)
+    # What the route modules share (each takes the names it uses).
 
-    @app.get("/v1/source-assets/{asset_id}/content", response_class=FileResponse)
-    async def asset_content(asset_id: str) -> FileResponse:
-        """The uploaded file itself (supports range requests, so videos can seek)."""
-        asset = _asset(asset_id)
-        return _file(asset.file, asset.content_type)
+    ctx = SimpleNamespace(**locals())
 
-    @app.get("/v1/source-assets/{asset_id}/frames/{index}", response_class=FileResponse)
-    async def asset_frame(asset_id: str, index: int) -> FileResponse:
-        """A video keyframe exactly as the model saw it."""
-        asset = _asset(asset_id)
-        if not 0 <= index < len(asset.frames):
-            raise HTTPException(404, "frame not found")
-        return _file(asset.frames[index].file, "image/jpeg")
+    designs_routes.register(app, ctx)
 
-    @app.get("/v1/drama-jobs/{job_id}", response_model=Job)
-    async def get_job(job_id: str) -> Job:
-        job = repo.get_job(job_id)
-        if job is None:
-            raise HTTPException(404, "job not found")
-        # The pause flag lives in the queue (a running worker would overwrite it on the job).
-        job.pause_requested = job.status == "running" and queue.pause_requested(job_id)
-        return job
+    experiments_routes.register(app, ctx)
 
-    @app.post("/v1/drama-jobs/{job_id}/pause", status_code=202, response_model=Job)
-    async def pause(job_id: str, now: bool = False) -> Job:
-        """Pause a queued job now, or a running one after its current model call.
-        now=true stops a running job at once, cancelling the in-flight model call (for a
-        call that hangs); the interrupted step restarts on resume."""
-        try:
-            return pause_job(repo, queue, job_id, now=now)
-        except KeyError:
-            raise HTTPException(404, "job not found") from None
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from None
-
-    @app.post("/v1/drama-jobs/{job_id}/resume", status_code=202, response_model=Job)
-    async def resume(job_id: str) -> Job:
-        """Continue a paused job; steps that passed are kept."""
-        try:
-            job = resume_job(repo, queue, job_id)
-        except KeyError:
-            raise HTTPException(404, "job not found") from None
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from None
-        wakeup.set()
-        return job
-
-    @app.get("/v1/drama-jobs/{job_id}/trace", response_model=Trace)
-    async def trace(job_id: str, after_seq: int = Query(0, ge=0)) -> Trace:
-        """Agent steps and model calls. Poll with after_seq=next_seq for new events."""
-        if repo.get_job(job_id) is None:
-            raise HTTPException(404, "job not found")
-        events = repo.list_events(job_id, after_seq)
-        views = []
-        for call in repo.list_llm_calls(job_id):
-            tail = ""
-            if call.status == "running" and (full := repo.get_llm_call(call.call_id)):
-                tail = full.output[-OUTPUT_TAIL_CHARS:]
-            views.append(LLMCallView(call=call, output_tail=tail))
-        return Trace(
-            events=events,
-            calls=views,
-            next_seq=events[-1].seq if events else after_seq,
-        )
-
-    @app.get("/v1/llm-calls/{call_id}", response_model=LLMCall)
-    async def llm_call(call_id: str) -> LLMCall:
-        """One model call in full: request messages, commentary and the complete output."""
-        call = repo.get_llm_call(call_id)
-        if call is None:
-            raise HTTPException(404, "call not found")
-        return call
-
-    @app.post("/v1/drama-jobs/{job_id}/retry", status_code=202, response_model=Job)
-    async def retry(job_id: str) -> Job:
-        """Re-run a needs_revision or failed job from the step that didn't pass."""
-        try:
-            job = retry_job(repo, queue, job_id)
-        except KeyError:
-            raise HTTPException(404, "job not found") from None
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from None
-        wakeup.set()
-        return job
-
-    @app.get("/v1/drama-packages/{package_id}", response_model=None)
-    async def get_package(
-        package_id: str,
-        revision_id: str | None = None,
-        format: Literal["json", "markdown"] = Query("json"),
-    ) -> ProductionPackage | PlainTextResponse:
-        pkg = repo.get_package(package_id, revision_id)
-        if pkg is None:
-            raise HTTPException(404, "package not found")
-        if format == "markdown":
-            # text/plain, not text/markdown: browsers display it (and its text can be
-            # copied) instead of downloading it.
-            return PlainTextResponse(render_markdown(pkg), media_type="text/plain")
-        return pkg
+    jobs_routes.register(app, ctx)
 
     library_api.register(app, repo=repo, media=media)
+
     keyframe_api.register(
         app,
         repo=repo,
@@ -1304,95 +254,9 @@ def create_app(
         file_response=_file,
     )
 
-    @app.get("/v1/drama-packages/{package_id}/export", response_class=FileResponse)
-    async def export_package(
-        package_id: str, revision_id: str | None = None, job_id: str | None = None
-    ) -> FileResponse:
-        """Everything a production team needs, as one zip: story bible, scripts, storyboard
-        and shot list (CSV), cast/set/prop sheets, asset requirements with the generated
-        reference images, QA report, sources and the full package JSON."""
-        pkg = _package_or_404(package_id, revision_id)
-        job = _package_job(pkg.package_id, job_id, pkg.revision_id)
-        images = repo.list_images(pkg.package_id, pkg.revision_id)
-        ids = [s.asset_id for s in job.request.sources if s.asset_id] if job else []
-        assets = {k: SourceAsset.model_validate(v) for k, v in repo.get_source_assets(ids).items()}
-        tmp = _new_export_file()
-        try:
-            name = await asyncio.to_thread(
-                build_export,
-                pkg,
-                tmp,
-                job=job,
-                images=images,
-                assets=assets,
-                media=media,
-                options=repo.list_options(pkg.package_id, pkg.revision_id),
-                keyframes=repo.list_shot_takes(pkg.package_id, pkg.revision_id),
-                plans=repo.list_shot_plans(pkg.package_id, pkg.revision_id),
-                readings=repo.list_scene_readings(pkg.package_id, pkg.revision_id),
-            )
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
-        return FileResponse(
-            tmp,
-            media_type="application/zip",
-            filename=name,
-            background=BackgroundTask(tmp.unlink, missing_ok=True),
-        )
-
-    @app.get("/v1/drama-packages/{package_id}/{sheet}", response_model=None)
-    async def get_sheet(
-        package_id: str,
-        sheet: Literal["cast-sheet", "set-sheet", "prop-sheet"],
-        revision_id: str | None = None,
-    ) -> CastSheet | SetSheet | PropSheet:
-        """One design sheet as its own document (schema: /v1/schemas/{sheet}.json)."""
-        pkg = repo.get_package(package_id, revision_id)
-        if pkg is None:
-            raise HTTPException(404, "package not found")
-        doc = getattr(pkg, sheet.replace("-", "_"))
-        if doc is None:
-            raise HTTPException(404, f"this package was made before {sheet}s existed")
-        return doc
-
-    @app.get("/v1/schemas/{name}.json")
-    async def get_schema(name: str) -> dict:
-        """JSON Schema of a standalone document: cast-sheet, set-sheet or prop-sheet."""
-        model = SHEET_SCHEMAS.get(name)
-        if model is None:
-            raise HTTPException(404, f"unknown schema {name}; known: {', '.join(SHEET_SCHEMAS)}")
-        schema = model.model_json_schema()
-        schema["$id"] = f"/v1/schemas/{name}.json"
-        return schema
-
-    @app.post("/v1/drama-packages/{package_id}/revisions", status_code=202, response_model=Revision)
-    async def create_revision(package_id: str, req: RevisionRequest) -> Revision:
-        pkg = repo.get_package(package_id)
-        if pkg is None:
-            raise HTTPException(404, "package not found")
-        if req.base_revision_id != pkg.revision_id:
-            # Prevents overwriting a newer edit.
-            raise HTTPException(409, f"base_revision_id is stale; latest is {pkg.revision_id}")
-        impact = analyze_impact(pkg, req.target_ids, req.locked_ids, req.visual_change)
-        if impact.unknown_targets:
-            raise HTTPException(422, f"unknown target_ids: {impact.unknown_targets}")
-
-        rev = Revision(
-            revision_id=new_id("rev"),
-            package_id=package_id,
-            base_revision_id=pkg.revision_id,
-            request=req,
-            impacted_ids=impact.impacted_ids,
-            stale_requirement_ids=impact.stale_requirement_ids,
-            conflicts=[f"target {c} is locked" for c in impact.conflicts],
-            locked_in_scope=impact.locked_in_scope,
-            status="needs_revision" if impact.conflicts else "queued",
-        )
-        repo.save_revision(rev)
-        # TODO: run the scoped regeneration worker (re-run only impacted steps with
-        # locked_ids enforced via check_locks), then publish a new package revision.
-        return rev
+    # Last: its /v1/drama-packages/{package_id}/{sheet} route matches what the routes
+    # above don't (the keyframe and library routes under the same prefix come first).
+    packages_routes.register(app, ctx)
 
     # Web UI. Mounted last so it never shadows the /v1 API routes.
     if WEB_DIR.is_dir():

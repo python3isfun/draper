@@ -768,12 +768,26 @@ src/drama_agent/
   jobqueue.py      Durable job queue (leases, retries, checkpoints)
   media.py         Uploaded images/videos: storage, type sniffing, keyframes, audio
   imagegen.py      Image generation clients (MiniMax-H3-Image on MCPHub, offline fixture)
-  images.py        Reference image planning, prompts, references and the image worker
+  design/          Design pictures (characters, sets, props): prompts.py (planning a
+                   picture: prompt, references, brief), slots.py (anchors, parents, picks),
+                   staleness.py (out of date, redraw in order), takes.py (explore, develop,
+                   takes, picks, imports), worker.py, setup.py (thumbnails, image clients).
+                   images.py re-exports it all under the old names
+  shots/           Shot keyframes: models.py, common.py, picks.py, plans.py, approvals.py,
+                   staleness.py, references.py, takes.py, writer.py, planner.py, judge.py,
+                   runner.py (ShotFrameRunner), board.py. shot_frames.py re-exports it all
+  library/         The asset library: characters and sets across stories (models, sync,
+                   views, matching, reuse)
+  shot_reading.py  Reading a scene: each person's state per cut and the closest picture
+  shot_specs.py    The export's shot_specs.json for video production
+  sheet_edit.py    Hand edits to cast, set and prop entries
   experiment.py    Experiment tab: image chat sessions, the GPT prompt rewriter, the runner
   face_lab.py      Face Lab: photo-to-prompt descriptions and seeded prompt tests
   content_guard.py What image prompts may ask for (word lists + a model screen)
   worker.py        Job workers; `drama-worker` entry point
-  api/             FastAPI routes (spec §9) + /v1/meta, job listing
+  api/             FastAPI app (app.py builds the shared pieces and registers each group):
+                   schemas.py (request/response models), designs.py, experiments.py,
+                   jobs.py, packages.py, shot_frames.py (keyframes), library.py
   web/             Web UI (HTML/CSS/JS, served at /)
   fixtures/        Complete sample package used by the fixture client and tests
 ```
