@@ -128,3 +128,27 @@ def test_the_library_api_reads_characters_sets_and_casting(tmp_path):
         }
         assert all(c["asset_name"] for c in casting)
         assert b.http.post("/v1/library/sync").json()["stories"] == 1
+
+
+def test_a_redraw_can_be_limited_to_one_asset(tmp_path):
+    from .test_redesign import images_idle
+
+    with Board(tmp_path) as b:
+        b.design()
+        pkg = b.repo.get_package(b.pid)
+        first, second = (x.location_id for x in pkg.set_sheet.locations[:2])
+        for loc in (first, second):
+            r = b.http.patch(f"/v1/drama-packages/{b.pid}/entries/{loc}",
+                             json={"revision_id": pkg.revision_id, "sheet": {"layout": f"New {loc}"}})  # fmt: skip
+            assert r.status_code == 200, r.text
+        mine = [r.requirement_id for r in pkg.asset_requirements.items
+                if r.asset_type == "location" and r.subject_refs[0].entity_id == first]  # fmt: skip
+        q = "&".join(f"requirement_ids={x}" for x in mine)
+        r = b.http.post(f"/v1/drama-packages/{b.pid}/images/refresh?{q}")
+        assert r.status_code == 202, r.text
+        v = images_idle(b)
+        redrawn = {i["requirement_id"] for i in v["images"] if i.get("refreshes")}
+        assert redrawn and redrawn <= set(mine)
+        # The other set's pictures are still out of date, untouched.
+        theirs = {i["image_id"] for i in v["images"] if second in i["requirement_id"]}
+        assert theirs & set(v["outdated"])

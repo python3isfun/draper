@@ -705,6 +705,7 @@ def plan_refresh(
     images: list[GeneratedImage],
     *,
     drawn_from: set[tuple[str, str]] | None = None,
+    only: set[str] | None = None,
 ) -> list[GeneratedImage]:
     """Redraws of the out-of-date picks that can be redrawn now: not those drawn from a
     picture that is out of date itself (they follow once it is redrawn, see ImageWorker),
@@ -721,6 +722,8 @@ def plan_refresh(
             continue
         if drawn_from is not None and not drawn_from_any(pick, images, drawn_from):
             continue
+        if only is not None and key[0] not in only:
+            continue  # another asset's picture (the pictures drawn from these follow anyway)
         planned = plan_images(pkg, images, draft=_is_draft(pick.size), only=key,
                               job_id=pick.job_id, rewrite=TEXT_CHANGED in why)  # fmt: skip
         if not planned:

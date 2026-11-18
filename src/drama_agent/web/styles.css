@@ -642,3 +642,6 @@ td.mono { white-space: nowrap; }
 .lib-asset h3 { margin: 16px 0 4px; }
 @media (max-width: 640px) { .lib-sheet { grid-template-columns: 1fr; } .lib-pic img { height: 140px; } }
 .modes a { white-space: nowrap; }
+.lib-editor { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.lib-editor textarea { width: 100%; font: inherit; font-size: 13px; }
+.lib-sheet .chip { white-space: normal; max-width: 100%; overflow-wrap: anywhere; }

@@ -212,10 +212,15 @@ Each phase is shippable on its own, with draper and dramer working throughout.
   An asset's page has its sheet, looks or states, and items. Each part shows its pictures
   (enlarge on click; `outdated` reasons from the design-edit rules), and the stories and
   shots that use it, with links.
-- **Still to do in phase 2:**
-  - edit on these pages, still saving to the origin story for now;
-  - "Redraw out-of-date" on these pages;
-  - fold the Cast, Sets, Props and Assets tabs into them.
+- **Step 2 (built):**
+  - **Editing:** each character, look, set, state and item has an Edit button. Every sheet
+    field can be edited, plus the one-line description for looks and states. Only the fields
+    that changed are saved, to the story the asset came from (`PATCH …/entries/{id}`), and
+    the library follows.
+  - **Redraw out-of-date:** redraws only this asset's out-of-date pictures
+    (`POST …/images/refresh?requirement_ids=…`). The pictures drawn from them follow, and the
+    page reloads itself until it's done.
+- **Still to do in phase 2:** fold the Cast, Sets, Props and Assets tabs into these pages.
 
 ## Risks and open questions
 

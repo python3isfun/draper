@@ -38,6 +38,7 @@ def _pictures(repo: Any, a: LibraryAsset) -> list[dict[str, Any]]:
             "picked": pick.selected, "likeness": pick.likeness,
             "outdated": stale[(link.package_id, link.revision_id)].get(pick.image_id, []),
             "package_id": link.package_id, "revision_id": link.revision_id,
+            "requirement_id": link.requirement_id, "deliverable_id": link.deliverable_id,
             "imported_from": pick.imported_from,
             "content": f"/v1/generated-images/{pick.image_id}/content",
             "thumb": f"/v1/generated-images/{pick.image_id}/thumb",
@@ -76,8 +77,10 @@ def _entry(repo: Any, a: LibraryAsset, *, full: bool) -> dict[str, Any]:
 
 def asset_view(repo: Any, a: LibraryAsset) -> dict[str, Any]:
     """A character or a set with its looks or states and its items, each with its pictures,
-    and where each is used."""
+    and where each is used. `origin_revision_id` is the story revision its edits go to."""
     out = _entry(repo, a, full=True)
+    story = repo.get_package(a.origin_package_id)
+    out["origin_revision_id"] = story.revision_id if story is not None else None
     child = "look" if a.kind == "character" else "set_state"
     out["looks" if a.kind == "character" else "states"] = [
         _entry(repo, x, full=True) for x in repo.list_library_assets(kind=child, parent_id=a.asset_id)

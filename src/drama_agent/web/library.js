@@ -2,13 +2,16 @@
 
 /*
  * Characters and Sets: the asset library (docs/entity-reorganization.md, phase 2).
- * Read pages for now: every character or set, and one with its sheet, its looks or states,
- * its items, current pictures (click to enlarge; out-of-date ones marked) and the stories
- * and shots that use it. Editing still happens in the story (Cast / Sets / Assets tabs);
- * each page links there.
+ * Every character or set, and one with its sheet, its looks or states, its items, current
+ * pictures (click to enlarge; out-of-date ones marked) and the stories and shots that use it.
+ * Each part is edited in place: the edit is saved to the story it came from (PATCH
+ * …/entries/{id}, the same as the Cast and Sets tabs) and the library follows. "Redraw
+ * out-of-date" redraws this asset's out-of-date pictures (and what is drawn from them).
  */
 
-const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "" };
+const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "", timer: null, redrawing: "" };
+// Open editors by asset id; typed text is kept in `drafts` until saved or cancelled.
+const libEdit = { open: new Set(), drafts: {}, errors: {}, notes: {}, saving: new Set() };
 
 const LIB_KINDS = {
   character: { mode: "chars", path: "characters", plural: "Characters", child: "looks", childLabel: "Looks", one: "look", many: "looks", storyTab: "cast" },
@@ -33,9 +36,12 @@ async function libRoute(param) {
   setMode(meta.mode);
   const id = kindOfId(param || "") ? param : null;
   if (lib.kind !== kind) Object.assign(lib, { kind, list: null, filter: "" });
+  if (lib.id !== id) Object.assign(libEdit, { open: new Set(), drafts: {}, errors: {}, notes: {} });
+  clearTimeout(lib.timer);
   lib.id = id;
   lib.view = null;
   lib.error = "";
+  lib.redrawing = "";
   renderLibrary();
   if (!state.jobs.length) await loadJobs();
   try {
@@ -136,9 +142,12 @@ function libPart(part, kindLabel, ownerId) {
     h("div", { class: "section-head" },
       h("h3", {}, libVariant(part.origin_entity_id, kindLabel === "item" ? "" : ownerId), " ", h("span", { class: "muted small mono" }, part.origin_entity_id)),
       h("span", { class: "chip" }, kindLabel)),
-    part.description && h("p", {}, part.description),
+    libEdit.open.has(part.asset_id) ? libEditor(part) : [
+      part.description && h("p", {}, part.description),
+      h("details", {}, h("summary", { class: "small" }, "Sheet"), libSheet(part.sheet)),
+      libEditButton(part)],
+    libEdit.notes[part.asset_id] && h("p", { class: "small muted" }, libEdit.notes[part.asset_id]),
     libPictures(part.pictures, part.name),
-    h("details", {}, h("summary", { class: "small" }, "Sheet"), libSheet(part.sheet)),
     part.states && part.states.length > 0 && h("div", { class: "small" }, h("strong", {}, "States: "),
       h("ul", { class: "plain" }, part.states.map((s) => h("li", {}, h("span", { class: "mono" }, s.state_id), ` · ${s.description}`)))),
     h("div", { class: "small" }, h("strong", {}, "Used in"), libUsedIn(part.used_in, "keyframes")));
@@ -154,10 +163,12 @@ function renderLibAsset(a) {
         h("div", { class: "chips" },
           h("span", { class: "chip" }, a.kind === "character" ? "character" : "set"),
           origin && h("a", { class: "btn ghost small", href: `#job=${encodeURIComponent(origin.job_id)}&tab=${meta.storyTab}`,
-            title: "Editing happens in the story for now" }, "Edit in its story"))),
+            title: "Open the story this came from" }, "Open its story"))),
       a.description && h("p", { class: "muted" }, a.description),
+      libRedrawRow(a),
       a.kind === "character" && libPictures(a.pictures, a.name),
-      libSheet(a.sheet),
+      libEdit.open.has(a.asset_id) ? libEditor(a) : [libSheet(a.sheet), libEditButton(a)],
+      libEdit.notes[a.asset_id] && h("p", { class: "small muted" }, libEdit.notes[a.asset_id]),
       h("div", { class: "small" }, h("strong", {}, "Used in"), libUsedIn(a.used_in, "storyboard"))),
     h("h3", {}, `${meta.childLabel} (${a[meta.child].length})`),
     a[meta.child].length ? a[meta.child].map((x) => libPart(x, a.kind === "character" ? "look" : "state", a.origin_entity_id)) : h("p", { class: "muted" }, "None yet."),
@@ -169,3 +180,146 @@ document.addEventListener("DOMContentLoaded", () => {
   const input = $("#lib-filter");
   if (input) input.addEventListener("input", (e) => { lib.filter = e.target.value; renderLibSide(); });
 });
+
+// -- Editing (saved to the story the asset came from) --------------------------------
+
+// Fields a hand edit may change: every sheet field but ids and the name; for a look or a
+// state also its one-line story description (the story bible's).
+const libEditable = (part) => Object.keys(part.sheet || {}).filter((k) => !LIB_HIDDEN.has(k) && !k.endsWith("_id"));
+const libHasLine = (part) => part.kind === "look" || part.kind === "set_state";
+
+function libEditButton(part) {
+  if (!libEditable(part).length && !libHasLine(part)) return null;
+  return h("button", { type: "button", class: "btn ghost small", onclick: () => {
+    libEdit.open.add(part.asset_id);
+    delete libEdit.errors[part.asset_id];
+    delete libEdit.notes[part.asset_id];
+    renderLibrary();
+  } }, "Edit");
+}
+
+function libEditor(part) {
+  const id = part.asset_id;
+  const draft = (libEdit.drafts[id] ??= {});
+  const field = (key, label, value, list) => {
+    const shown = draft[key] ?? (list ? (value || []).join("\n") : value ?? "");
+    const box = h("textarea", { rows: list ? Math.max(2, (value || []).length + 1) : Math.min(8, Math.max(2, Math.ceil(String(shown).length / 90))),
+      "aria-label": label, oninput: (e) => { draft[key] = e.target.value; } });
+    box.value = shown;
+    return h("label", { class: "field" }, h("span", {}, label, list && h("span", { class: "muted small" }, " (one per line)")), box);
+  };
+  return h("div", { class: "lib-editor" },
+    libHasLine(part) && field("__line", "Story line", part.description, false),
+    libEditable(part).map((k) => field(k, libLabel(k), part.sheet[k], Array.isArray(part.sheet[k]))),
+    h("div", { class: "prompt-edit-actions" },
+      h("button", { type: "button", class: "btn small primary-outline", disabled: libEdit.saving.has(id),
+        onclick: () => libSave(part) }, libEdit.saving.has(id) ? "Saving…" : "Save"),
+      h("button", { type: "button", class: "btn ghost small", onclick: () => {
+        libEdit.open.delete(id); delete libEdit.drafts[id]; delete libEdit.errors[id]; renderLibrary();
+      } }, "Cancel"),
+      h("span", { class: "muted small" }, "Saved to the story it came from; the library follows.")),
+    libEdit.errors[id] && h("p", { class: "small warn-text", role: "alert" }, `Not saved: ${libEdit.errors[id]}`));
+}
+
+async function libSave(part) {
+  const id = part.asset_id;
+  const draft = libEdit.drafts[id] || {};
+  const sheet = {};
+  let line = null;
+  for (const [k, v] of Object.entries(draft)) {
+    if (k === "__line") { if (v.trim() !== (part.description || "").trim()) line = v; continue; }
+    const before = part.sheet[k];
+    const value = Array.isArray(before) ? v.split("\n").map((x) => x.trim()).filter(Boolean) : v;
+    if (JSON.stringify(value) !== JSON.stringify(Array.isArray(before) ? before : (before ?? ""))) sheet[k] = value;
+  }
+  if (!Object.keys(sheet).length && line == null) {
+    libEdit.open.delete(id); delete libEdit.drafts[id]; libEdit.notes[id] = "No changes."; renderLibrary(); return;
+  }
+  libEdit.saving.add(id);
+  delete libEdit.errors[id];
+  renderLibrary();
+  try {
+    const r = await api(`/v1/drama-packages/${encodeURIComponent(part.origin_package_id)}/entries/${encodeURIComponent(part.origin_entity_id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ revision_id: lib.view.origin_revision_id, sheet, bible: line == null ? {} : { description: line } }),
+    });
+    libEdit.open.delete(id);
+    delete libEdit.drafts[id];
+    libEdit.notes[id] = r.drawn_before.length
+      ? `Saved. ${r.drawn_before.length} picture${r.drawn_before.length > 1 ? "s were" : " was"} drawn from the earlier text: redraw them with "Redraw out-of-date".`
+      : "Saved.";
+    await libReload();
+  } catch (e) {
+    libEdit.errors[id] = e.message;
+  } finally {
+    libEdit.saving.delete(id);
+    renderLibrary();
+  }
+}
+
+async function libReload() {
+  const meta = LIB_KINDS[lib.kind];
+  const id = lib.id;
+  try {
+    const view = await api(`/v1/library/${meta.path}/${encodeURIComponent(id)}`);
+    if (lib.id === id) lib.view = view;
+  } catch (e) {
+    lib.error = e.message;
+  }
+}
+
+// -- Redrawing out-of-date pictures ---------------------------------------------------
+
+// Every out-of-date picture on the page (the asset's, its looks' or states', its items').
+function libOutdated(a) {
+  const meta = LIB_KINDS[a.kind];
+  return [a, ...(a[meta.child] || []), ...(a.items || [])].flatMap((x) => x.pictures.filter((p) => p.outdated.length));
+}
+
+function libRedrawRow(a) {
+  const stale = libOutdated(a);
+  if (!stale.length && !lib.redrawing) return null;
+  return h("div", { class: "banner warn compact" },
+    stale.length ? `${count(stale.length, "picture is", "pictures are")} out of date: drawn before a design change. ` : "",
+    lib.redrawing && h("span", {}, lib.redrawing, " "),
+    stale.length > 0 && h("button", { type: "button", class: "btn small", disabled: Boolean(lib.redrawing), onclick: () => libRedraw(a) },
+      "Redraw out-of-date"));
+}
+
+async function libRedraw(a) {
+  const stale = libOutdated(a);
+  const byStory = {};
+  for (const p of stale) (byStory[`${p.package_id}|${p.revision_id}`] ??= new Set()).add(p.requirement_id);
+  lib.redrawing = "Redrawing…";
+  renderLibrary();
+  try {
+    for (const [key, reqs] of Object.entries(byStory)) {
+      const [pid, rid] = key.split("|");
+      const q = new URLSearchParams({ revision_id: rid });
+      for (const r of reqs) q.append("requirement_ids", r);
+      const out = await api(`/v1/drama-packages/${encodeURIComponent(pid)}/images/refresh?${q}`, { method: "POST" });
+      lib.redrawing = (out.notes || []).join(" ") || "Redrawing…";
+    }
+  } catch (e) {
+    lib.redrawing = "";
+    lib.error = e.message;
+    return renderLibrary();
+  }
+  renderLibrary();
+  libPoll(a.asset_id, 0);
+}
+
+// While redraws run, reload the page every few seconds (until nothing is out of date, or a
+// few minutes have passed).
+function libPoll(id, n) {
+  clearTimeout(lib.timer);
+  lib.timer = setTimeout(async () => {
+    if (lib.id !== id) return;
+    if (typingIn($("#main"))) return libPoll(id, n);  // never redraw under someone typing
+    await libReload();
+    const left = lib.view ? libOutdated(lib.view).length : 0;
+    lib.redrawing = left && n < 60 ? `Redrawing… ${count(left, "picture", "pictures")} still to go.` : "";
+    renderLibrary();
+    if (left && n < 60) libPoll(id, n + 1);
+  }, 4000);
+}

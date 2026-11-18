@@ -227,8 +227,10 @@ In the app, **Characters** and **Sets** in the top bar open the library:
   current pictures (click to enlarge; out-of-date ones are marked), its one-line
   description, its sheet, and the stories and shots that use it, with links into them.
 
-Editing still happens in the story ("Edit in its story" opens its Cast or Sets tab), and the
-library follows.
+Each part has an **Edit** button. Your edit is saved to the story the asset came from (the
+same edit as the Cast and Sets tabs), and the library follows. **Redraw out-of-date** redraws
+just this character's or set's out-of-date pictures, then what is drawn from them
+(`POST …/images/refresh` takes `requirement_ids` to limit it).
 
 ### Reference images
 

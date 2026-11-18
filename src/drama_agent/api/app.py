@@ -11,7 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -456,16 +456,23 @@ def create_app(
     @app.post(
         "/v1/drama-packages/{package_id}/images/refresh", status_code=202, response_model=ImagesView
     )
-    async def refresh_images(package_id: str, revision_id: str | None = None) -> ImagesView:
+    async def refresh_images(
+        package_id: str,
+        revision_id: str | None = None,
+        requirement_ids: Annotated[list[str] | None, Query()] = None,
+    ) -> ImagesView:
         """Redraw the out-of-date picks, in order: those drawn from up-to-date pictures now;
         each takes over its pick when done, and the pictures drawn from the one it replaced
         follow (a set's wide view, then its other states and its plan view). A hand-written
-        prompt is kept; a model-written one is rewritten when the design text changed."""
+        prompt is kept; a model-written one is rewritten when the design text changed.
+        `requirement_ids` limits it to those items' pictures (one character or set in the
+        library); the pictures drawn from them still follow."""
         pkg = _package_or_404(package_id, revision_id)
         _package_job(pkg.package_id, None, pkg.revision_id)
         existing = repo.list_images(pkg.package_id, pkg.revision_id)
         stale = outdated_pictures(pkg, existing)
-        new = plan_refresh(pkg, existing)
+        only = set(requirement_ids) if requirement_ids else None
+        new = plan_refresh(pkg, existing, only=only)
         _save_new([], new)
         later = sum(
             1 for why in stale.values() if "drawn from a picture that is out of date" in why
