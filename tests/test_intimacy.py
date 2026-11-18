@@ -173,7 +173,7 @@ def test_export_has_an_intimacy_plan_only_when_needed(package, tmp_path):
         ("A mother hugging her kids in the kitchen", None),
         ("A man in a striped shirt kisses his wife goodbye", None),
         ("A 28-year-old woman in a black slip dress", None),
-        ("A casting photograph of Maya, charcoal blazer", None),
+        ("A casting photograph of Lila, charcoal blazer", None),
         ("Soft nude lipstick and a low bun.", None),
         ("Nude-colored heels with a black dress, nude tones.", None),
         ("Fully clothed, no nudity. Not naked.", None),
@@ -277,11 +277,11 @@ def test_worker_never_draws_a_refused_prompt(tmp_path):
 
 
 def test_upload_guard():
-    assert upload_guard("Maya in a black lace bra and panties") == REAL_PERSON_REASON
+    assert upload_guard("Lila in a black lace bra and panties") == REAL_PERSON_REASON
     assert upload_guard("Two people in bed, morning light") == REAL_PERSON_REASON
     assert upload_guard("A nude portrait") == NUDITY_REASON
-    assert upload_guard("Maya in a charcoal blazer, nude lipstick") is None
-    assert text_guard("Maya in a red bikini on the beach") is None  # fine without uploads
+    assert upload_guard("Lila in a charcoal blazer, nude lipstick") is None
+    assert text_guard("Lila in a red bikini on the beach") is None  # fine without uploads
 
 
 class UploadSession(Session):
@@ -527,6 +527,6 @@ def test_open_mode_allows_clothed_romance_with_a_likeness():
     assert "clothed romantic scenes (a kiss, an embrace, swimwear" in mode_rule(False)
     assert "no kiss or embrace, no swimwear" in mode_rule(True)
     assert "Never: a sexualized image of a real person's likeness" in RULES
-    assert upload_guard("Maya in a red swimsuit on a beach", restrictive=False) is None
-    assert upload_guard("Maya in a red swimsuit on a beach") == REAL_PERSON_REASON
-    assert upload_guard("Maya undressing", restrictive=False) == REAL_PERSON_REASON
+    assert upload_guard("Lila in a red swimsuit on a beach", restrictive=False) is None
+    assert upload_guard("Lila in a red swimsuit on a beach") == REAL_PERSON_REASON
+    assert upload_guard("Lila undressing", restrictive=False) == REAL_PERSON_REASON

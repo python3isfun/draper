@@ -200,7 +200,7 @@ def test_delete_session(tmp_path):
 @pytest.mark.parametrize("kind", ["memory", "sqlite"])
 def test_repository_roundtrip(tmp_path, kind):
     repo = InMemoryRepository() if kind == "memory" else SqliteRepository(tmp_path / "x.db")
-    s = new_session("Maya")
+    s = new_session("Lila")
     repo.save_exp_session(s)
     a = ExpTurn(turn_id="turn_a", session_id=s.session_id, index=1, text="a", status="done")
     b = ExpTurn(turn_id="turn_b", session_id=s.session_id, index=2, text="b", status="running")
@@ -210,7 +210,7 @@ def test_repository_roundtrip(tmp_path, kind):
     assert repo.fail_unfinished_exp_turns("restarted") == 1
     assert repo.get_exp_turn("turn_b").status == "failed"
     assert repo.get_exp_turn("turn_b").error == "restarted"
-    assert [x.title for x in repo.list_exp_sessions()] == ["Maya"]
+    assert [x.title for x in repo.list_exp_sessions()] == ["Lila"]
     repo.delete_exp_session(s.session_id)
     assert repo.get_exp_session(s.session_id) is None
     assert repo.list_exp_turns(s.session_id) == []

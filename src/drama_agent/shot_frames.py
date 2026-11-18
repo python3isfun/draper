@@ -107,7 +107,7 @@ class FrameRef(BaseModel):
     """One picture a frame is drawn from, as `<Picture N>` in its prompt."""
 
     ref_id: str  # a design image (img_...) or an approved keyframe (frame:<take>:<n>)
-    role: str  # "Maya in this shot's look, full body", "the approved keyframe of sub-shot 1"
+    role: str  # "Lila in this shot's look, full body", "the approved keyframe of sub-shot 1"
     # previous_frame: the approved keyframe of the sub-shot before ("start_frame": older
     # takes' name for it).
     kind: Literal["look", "face", "set", "prop", "previous_frame", "start_frame"]
@@ -184,7 +184,7 @@ class PromptVersion(BaseModel):
 
 
 class CheckItem(BaseModel):
-    item: str = Field(description='What was checked, e.g. "Maya: face" or "people count".')
+    item: str = Field(description='What was checked, e.g. "Lila: face" or "people count".')
     kind: CheckKind
     passed: bool
     severity: Literal["minor", "major"] = Field(
@@ -1250,7 +1250,7 @@ sub-shot.
 ## Each sub-shot
 
 - `start_s`: seconds from the start of the clip, e.g. 1.2.
-- `framing`: shot size, angle and who is where, e.g. "Close-up of Maya, frame left, \
+- `framing`: shot size, angle and who is where, e.g. "Close-up of Lila, frame left, \
 looking off frame right".
 - `camera`: still, pan, push-in, handheld...
 - `action`: what happens from this cut to the next, as visible movement, with the lines \
@@ -1309,7 +1309,7 @@ def plan_context(pkg: ProductionPackage, shot: Shot, clip: int | None = None) ->
 def _who(pkg: ProductionPackage, shot: Shot, name: str) -> str:
     """The character a planner's name means, among the shot's people: the id, the exact
     name, else the one person whose name contains it or whose first name it starts with
-    ("Maya", "Maya Chen", "Ms. Maya" for Maya). Raises when it means no one or several."""
+    ("Lila", "Lila Chen", "Ms. Lila" for Lila). Raises when it means no one or several."""
     people = [c for c in pkg.story_bible.characters if c.character_id in shot.character_ids]
     said = name.strip().casefold()
     exact = [c for c in people if said in (c.character_id.casefold(), c.name.casefold())]
@@ -1414,7 +1414,7 @@ props must match it, across the cut.
 
 - For each person in `sub_shot.people`: one item each for **identity** (face shape, features, \
 skin, age: the same person as their picture) and **wardrobe** (clothes, hair, accessories \
-as in their look picture). Name them: "Maya: face", "Maya: wardrobe".
+as in their look picture). Name them: "Lila: face", "Lila: wardrobe".
 - **count**: exactly `sub_shot.people_count` people with visible faces or bodies, no extras \
 (small background silhouettes are fine if the shot implies them).
 - **placement**: who is where (each person's `frame` side in `sub_shot.people`, \

@@ -80,8 +80,8 @@ def test_a_likeness_face_does_not_develop_its_intimate_scene_looks(package):
 
 
 def test_a_look_also_worn_outside_intimate_scenes_is_drawn(package):
-    """A look worn in an intimate scene and also elsewhere (a work outfit) is everyday
-    clothing and is drawn."""
+    """Seen live: Lila dresses for work during the morning-after scene; her work outfit is
+    everyday clothing and is drawn."""
     costume, other = costume_only_look(package)
     make_intimate(package, costume)
     pairs = frank_look_scenes(package)
