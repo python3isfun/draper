@@ -79,10 +79,11 @@ def _join(*parts: str) -> str:
     return "; ".join(p.strip() for p in parts if p and p.strip())
 
 
-def _default_brief(
+def default_design(
     unit: ReuseUnit, bible: StoryBible, sheets: DesignSheets | None = None
 ) -> Default | None:
-    """Default design text, or None when the unit names an ID missing from the bible."""
+    """Default design text, or None when the unit names an ID missing from the bible.
+    Hand edits to the sheets (sheet_edit) rebuild requirements with it too."""
     try:
         return _default_brief_or_raise(unit, bible, sheets or DesignSheets())
     except KeyError:
@@ -237,7 +238,7 @@ def aggregate_asset_requirements(
             rid = unit.requirement_id
             used = UsedBy(episode_id=shot.episode_id, scene_id=shot.scene_id, shot_id=shot.shot_id)
             if rid not in items:
-                made = _default_brief(unit, bible, sheets)
+                made = default_design(unit, bible, sheets)
                 if made is None:
                     # Unknown ID: leave it to check_references, which feeds it back to the
                     # model for repair instead of crashing the job.

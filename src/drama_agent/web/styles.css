@@ -606,3 +606,17 @@ td.mono { white-space: nowrap; }
 .lightbox-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; max-width: calc(100vw - 32px);
   padding: 6px 10px; border-radius: 8px; background: var(--surface); color: var(--text); font-size: 13px; }
 .lightbox-bar figcaption { max-width: 60ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Hand edits to sheet entries */
+.edit-entry { margin-left: auto; }
+.entry-editor { display: grid; gap: 10px; margin-top: 8px; }
+.entry-editor textarea { width: 100%; font: inherit; resize: vertical; }
+.variants-grid > .variant, .entry-editor, .entry-editor .field { min-width: 0; }
+.entry-editor-actions { display: flex; gap: 8px; align-items: center; }
+/* Long chips (must keep) wrap instead of stretching the sheet columns. */
+.sheet-kv dd { min-width: 0; }
+.sheet-kv .chip { white-space: normal; max-width: 100%; }
+.entry-editor-actions .btn { width: auto; }
+.edit-links { margin-top: 4px; }
+.linklike { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; }
+.card.entity { scroll-margin-top: 84px; }  /* clear the sticky header */

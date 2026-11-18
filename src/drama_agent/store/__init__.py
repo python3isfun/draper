@@ -24,6 +24,7 @@ class Repository(Protocol):
     def jobs_for_package(self, package_id: str) -> list[Job]: ...
     def list_active_jobs(self) -> list[Job]: ...
     def save_package(self, pkg: ProductionPackage, published: bool) -> None: ...
+    def replace_package(self, pkg: ProductionPackage) -> None: ...
     def get_package(
         self, package_id: str, revision_id: str | None = None
     ) -> ProductionPackage | None: ...
@@ -158,6 +159,13 @@ class InMemoryRepository:
         self.latest_draft[pkg.package_id] = pkg.revision_id
         if published:
             self.published[pkg.package_id] = pkg.revision_id
+
+    def replace_package(self, pkg: ProductionPackage) -> None:
+        """Overwrite a stored revision: hand edits only (revisions are otherwise immutable)."""
+        revs = self.packages.get(pkg.package_id, {})
+        if pkg.revision_id not in revs:
+            raise KeyError(pkg.revision_id)
+        revs[pkg.revision_id] = pkg.model_copy(deep=True)
 
     def get_package(
         self, package_id: str, revision_id: str | None = None

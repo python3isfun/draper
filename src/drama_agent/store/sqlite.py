@@ -303,6 +303,15 @@ class SqliteRepository:
                 f"revision {pkg.revision_id} already stored; revisions are immutable"
             ) from exc
 
+    def replace_package(self, pkg: ProductionPackage) -> None:
+        """Overwrite a stored revision: hand edits only (revisions are otherwise immutable)."""
+        cur = self._exec(
+            "UPDATE packages SET data = ? WHERE package_id = ? AND revision_id = ?",
+            (pkg.model_dump_json(), pkg.package_id, pkg.revision_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(pkg.revision_id)
+
     def get_package(
         self, package_id: str, revision_id: str | None = None
     ) -> ProductionPackage | None:

@@ -548,6 +548,7 @@ def design_slots(pkg: ProductionPackage) -> list[dict[str, Any]]:
                 "entity_id": entity,
                 "entity": names.get(entity, entity),
                 "variant": variants.get(variant or "", ""),
+                "variant_id": variant,
                 "anchor": key in anchors,
                 "anchor_key": list(root) if root else None,
                 "parent_key": list(parent) if parent else None,

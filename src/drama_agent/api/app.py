@@ -11,7 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -93,6 +93,7 @@ from ..models.package import utcnow
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import Orchestrator, new_id
 from ..render import render_markdown
+from ..sheet_edit import EditError, EntryLocked, edit_entry
 from ..shot_frames import ShotFrameRunner
 from ..store import InMemoryRepository, Repository
 from ..worker import JobWorker, pause_job, recover, resume_job, retry_job
@@ -192,6 +193,26 @@ class ImportImageRequest(BaseModel):
     likeness: bool | None = None
     revision_id: str | None = None
     job_id: str | None = None
+
+
+class EntryEditRequest(BaseModel):
+    """A hand edit to one cast, set or prop entry. `sheet` holds design sheet fields
+    (lists as lists of strings); `bible` a look's or state's one-line `description`."""
+
+    revision_id: str
+    sheet: dict[str, Any] = Field(default_factory=dict)
+    bible: dict[str, Any] = Field(default_factory=dict)
+
+
+class EntryEditResult(BaseModel):
+    package_id: str
+    revision_id: str
+    entry_id: str
+    changed: list[str]
+    requirement_ids: list[str]  # requirements whose design text was rebuilt
+    # Of those, the ones whose model-written design text the rebuild replaced.
+    replaced_written: list[str]
+    drawn_before: list[str]  # board items with images drawn from the earlier text
 
 
 class DevelopRequest(BaseModel):
@@ -736,6 +757,43 @@ def create_app(
         ]
         _delete_images(draws)
         repo.delete_option(option_id)
+
+    @app.patch("/v1/drama-packages/{package_id}/entries/{entry_id}", response_model=EntryEditResult)
+    async def edit_package_entry(
+        package_id: str, entry_id: str, req: EntryEditRequest
+    ) -> EntryEditResult:
+        """Edit a character, look, location, location state, prop or prop state's design
+        text in place (no new revision). The asset requirements built from it are rebuilt,
+        so new takes and Develop use the edit; images already drawn stay as they are."""
+        pkg = _package_or_404(package_id, req.revision_id)
+        _package_job(pkg.package_id, None, pkg.revision_id)
+        if any(j.status in ("queued", "running") for j in repo.jobs_for_package(package_id)):
+            raise HTTPException(409, "a job is still working on this story; edit when it's done")
+        try:
+            edit = edit_entry(pkg, entry_id, req.sheet, req.bible)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc.args[0])) from None
+        except EntryLocked as exc:
+            raise HTTPException(409, str(exc)) from None
+        except EditError as exc:
+            raise HTTPException(422, str(exc)) from None
+        if edit.changed:
+            repo.replace_package(pkg)
+        affected = set(edit.requirement_ids)
+        drawn = {
+            (i.requirement_id, i.deliverable_id)
+            for i in repo.list_images(pkg.package_id, pkg.revision_id)
+            if i.requirement_id in affected and i.status == "done"
+        }
+        return EntryEditResult(
+            package_id=pkg.package_id,
+            revision_id=pkg.revision_id,
+            entry_id=entry_id,
+            changed=edit.changed,
+            requirement_ids=edit.requirement_ids,
+            replaced_written=edit.replaced_written,
+            drawn_before=sorted({slot_title(pkg, k) for k in drawn}),
+        )
 
     @app.post(
         "/v1/generated-images/{image_id}/regenerate",

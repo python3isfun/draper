@@ -163,6 +163,20 @@ Every entry also lists `must_keep` (what the story depends on) and `design_freed
   ...) are kept under `legacy` on each story-bible entry: still shown in the Overview and
   used for asset briefs, but hidden from the model's schema. Completed jobs show the new steps as `skipped`. A
   retried or resumed old job runs the sheets, then re-runs storyboard and review.
+- **Editing by hand.** Each entry on the Cast, Sets and Props tabs has an **Edit**
+  button, and every item on the design board has **Edit text** links that open the
+  entries it is drawn from (the character, location or prop, and its look or state). You
+  can edit every sheet field and a look's or state's one-line story description;
+  several editors can be open at once, and typed text is kept until it is saved or
+  cancelled. `PATCH /v1/drama-packages/{id}/entries/{entry_id}` with `revision_id`,
+  `sheet` (fields; lists as lists of strings) and `bible` (`description`). The edit is
+  saved **in place** on that revision, with a `change_log` entry. The design text (brief,
+  `must_keep`, `design_freedom`) of the entry's asset requirements is rebuilt from the
+  sheets, so new takes and Develop use it. If a requirement's text had been written by the
+  model instead, the rebuild replaces it and the response says which (`replaced_written`).
+  Images already drawn stay as they are, and the response lists them (`drawn_before`).
+  IDs and names can't be edited. The edit is refused (409) if the entry, its parent, or a
+  requirement built from it is locked, or while a job is still running on the story.
 
 ### Reference images
 
@@ -697,8 +711,9 @@ src/drama_agent/
   the draft kept; it is never marked `completed`.
 - **`spoken_timing_verified` is always false** until a voice-measurement step exists; the
   hard checks reject a package that claims otherwise.
-- **Revisions are immutable.** Packages are stored per revision; a stale `base_revision_id`
-  returns 409.
+- **Revisions are immutable**, except for hand edits to sheet entries, which change a
+  revision in place. Packages are stored per revision; a stale `base_revision_id` returns
+  409.
 - `RevisionRequest.visual_change` is an addition to the spec. It says whether an edit to a
   character/location/prop changes how it looks (which invalidates art requirements) or
   only changes story facts.
