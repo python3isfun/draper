@@ -105,11 +105,15 @@ const isActive = (s) => s === "queued" || s === "running";
 // ---------------------------------------------------------------------------
 // State + routing (hash: #job=<id>&tab=<tab>)
 
-const state = { jobs: [], job: null, pkg: null, tab: "overview", pollTimer: null, assetFilter: "all", revise: null, offline: false, attachments: [], assets: {}, sourcesOpen: null, openDetails: new Set(), images: { key: null, view: null, error: "", timer: null } };
+const state = { jobs: [], job: null, pkg: null, tab: "overview", pollTimer: null, revise: null, offline: false, attachments: [], assets: {}, sourcesOpen: null, openDetails: new Set(), images: { key: null, view: null, error: "", timer: null } };
+
+// Tabs folded into Casting: their old links land there.
+const OLD_TABS = { cast: "casting", sets: "casting", props: "casting", assets: "casting" };
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  return { job: p.get("job"), tab: p.get("tab") || "overview" };
+  const tab = p.get("tab") || "overview";
+  return { job: p.get("job"), tab: OLD_TABS[tab] || tab };
 }
 
 function go(jobId, tab = "overview") {
@@ -738,10 +742,7 @@ const TABS = [
   ["overview", "Overview"],
   ["script", "Script"],
   ["storyboard", "Storyboard"],
-  ["cast", "Cast"],
-  ["sets", "Sets"],
-  ["props", "Props"],
-  ["assets", "Assets"],
+  ["casting", "Casting"],
   ["keyframes", "Keyframes"],
   ["qa", "QA"],
   ["revise", "Revise"],
@@ -763,10 +764,7 @@ function renderPackage(pkg) {
   const counts = {
     script: pkg.episodes.length,
     storyboard: pkg.shot_list.length,
-    cast: pkg.cast_sheet?.characters.length,
-    sets: pkg.set_sheet?.locations.length,
-    props: pkg.prop_sheet?.props.length,
-    assets: pkg.asset_requirements.items.length,
+    casting: pkg.story_bible.characters.length + pkg.story_bible.locations.length,
     keyframes: pkg.shot_list.length,
     qa: pkg.qa_report.hard_issues.length + pkg.qa_report.creative_issues.length,
   };
@@ -780,8 +778,9 @@ function renderPackage(pkg) {
   const L = lookups(pkg);
   const body = {
     overview: renderOverview, script: renderScript, storyboard: renderStoryboard,
-    cast: renderCast, sets: renderSets, props: renderProps,
-    assets: renderAssets, keyframes: renderKeyframes, qa: renderQA, revise: renderRevise,
+    // Cast, Sets, Props and Assets became Casting (OLD_TABS sends their old links there).
+    casting: renderCasting,
+    keyframes: renderKeyframes, qa: renderQA, revise: renderRevise,
     activity: () => activityPanel(state.job.job_id),
   }[state.tab] || renderOverview;
   return h("div", {}, tabs, h("div", { role: "tabpanel" }, body(pkg, L)));
@@ -961,242 +960,7 @@ function renderStoryboard(pkg, L) {
   });
 }
 
-// Design sheets (cast / sets / props) --------------------------------------------
-
-// Hand edits to sheet entries (in place: PATCH /entries/{id}) -------------------
-
-// The story bible's one-line field a hand edit may change: a look's or state's
-// description (part of the design text; other bible fields are story text).
-const BIBLE_LINES = [
-  ["looks", "look_id"],
-  ["location_states", "location_state_id"],
-  ["prop_states", "prop_state_id"],
-];
-// Several editors can be open at once; typed text lives in `drafts` until it is saved or
-// cancelled, so re-rendering (polling, opening another editor, a failed save) keeps it.
-const edits = { open: new Set(), drafts: {}, errors: {}, saving: new Set(), notes: {} };
-
-function bibleLine(pkg, id) {
-  for (const [list, idKey] of BIBLE_LINES) {
-    const x = pkg.story_bible[list].find((e) => e[idKey] === id);
-    if (x) return { field: "description", label: "Story line", value: x.description || "" };
-  }
-  return null;
-}
-
-function openEditor(id) {
-  edits.open.add(id);
-  delete edits.errors[id];
-}
-
-function closeEditor(id) {
-  edits.open.delete(id);
-  delete edits.drafts[id];
-  delete edits.errors[id];
-}
-
-function editButton(id) {
-  return edits.open.has(id) ? null : h("button", { type: "button", class: "btn ghost small edit-entry",
-    onclick: () => { openEditor(id); renderMain(); } }, "Edit");
-}
-
-function saveNote(r) {
-  if (!r.changed.length) return { text: "No changes." };
-  const parts = ["Saved."];
-  let warn = false;
-  if (r.replaced_written.length) {
-    warn = true;
-    parts.push(`The model-written design text of ${r.replaced_written.length} asset requirement${r.replaced_written.length > 1 ? "s" : ""} (${r.replaced_written.join(", ")}) was replaced by text built from the sheet.`);
-  }
-  if (r.drawn_before.length) {
-    warn = true;
-    parts.push(`Images already drawn from the earlier text: ${r.drawn_before.join("; ")}. Draw a new take (or Develop again) on the design board to use the edit.`);
-  } else {
-    parts.push("New takes and Develop use the edit.");
-  }
-  return { warn, text: parts.join(" ") };
-}
-
-// The entry's fields, or its editor when open; plus the note left by the last save.
-function entryBody(pkg, id, obj, fields) {
-  const note = edits.notes[id];
-  const noteEl = note && h("p", { class: `small ${note.warn ? "warn-text" : "muted"}` }, note.text);
-  if (!edits.open.has(id)) return h("div", {}, noteEl, sheetFields(obj, fields));
-  const draft = (edits.drafts[id] ||= {});
-  const line = bibleLine(pkg, id);
-  const boxes = {};
-  const box = (key, value, list) => {
-    // Grows with its text (sized once it is on the page, then on every keystroke).
-    const fit = () => { t.style.height = "auto"; t.style.height = `${t.scrollHeight + 2}px`; };
-    const t = h("textarea", { rows: 2, oninput: () => { draft[key] = t.value; fit(); } });
-    t.value = draft[key] ?? value;
-    requestAnimationFrame(fit);
-    boxes[key] = { list, value };
-    return t;
-  };
-  const rows = fields.map(([key, label]) => {
-    const v = obj[key];
-    const list = Array.isArray(v);
-    return h("label", { class: "field" },
-      h("span", {}, label, list ? h("span", { class: "muted small" }, " · one per line") : null),
-      box(`sheet.${key}`, list ? v.join("\n") : (v ?? ""), list));
-  });
-  if (line) rows.unshift(h("label", { class: "field" }, h("span", {}, line.label), box(`bible.${line.field}`, line.value, false)));
-  const saveBtn = h("button", { class: "btn primary small", type: "submit", disabled: edits.saving.has(id) }, edits.saving.has(id) ? "Saving…" : "Save");
-  const save = async (ev) => {
-    ev.preventDefault();
-    const body = { revision_id: pkg.revision_id, sheet: {}, bible: {} };
-    for (const [k, b] of Object.entries(boxes)) {
-      if (draft[k] === undefined || draft[k] === b.value) continue;
-      const [part, field] = k.split(".");
-      body[part][field] = b.list ? draft[k].split("\n") : draft[k];
-    }
-    // No re-render before the request: the form keeps showing what was typed.
-    edits.saving.add(id);
-    saveBtn.disabled = true;
-    saveBtn.textContent = "Saving…";
-    try {
-      const r = await api(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/entries/${encodeURIComponent(id)}`,
-        { method: "PATCH", body: JSON.stringify(body) });
-      state.pkg = await api(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}?${new URLSearchParams({ revision_id: pkg.revision_id })}`);
-      state.images.key = null;  // the board re-reads its items' text
-      closeEditor(id);
-      edits.notes[id] = saveNote(r);
-    } catch (e) {
-      edits.errors[id] = e.message;  // the draft is kept
-    }
-    edits.saving.delete(id);
-    renderMain();
-  };
-  return h("form", { class: "entry-editor", "data-entry": id, onsubmit: save },
-    rows,
-    h("div", { class: "entry-editor-actions" },
-      saveBtn,
-      h("button", { class: "btn ghost small", type: "button", onclick: () => { closeEditor(id); renderMain(); } }, "Cancel")),
-    edits.errors[id] && h("p", { class: "form-error" }, edits.errors[id]),
-    h("p", { class: "muted small" }, "Saved in place on this revision. The asset requirements are rebuilt from the new text; images already drawn stay as they are."));
-}
-
-// Field label + value rows; lists render as chips, empty values are left out.
-function sheetFields(obj, fields) {
-  return h("dl", { class: "kv sheet-kv" }, fields.map(([key, label]) => {
-    const v = obj[key];
-    if (v == null || v === "" || (Array.isArray(v) && !v.length)) return null;
-    const value = Array.isArray(v) ? h("div", { class: "chips" }, v.map((x) => h("span", { class: `chip ${key === "must_keep" ? "warn" : ""}` }, x))) : v;
-    return kv(label, value);
-  }));
-}
-
-function sheetHeader(pkg, key, title, blurb) {
-  const sheet = pkg[key.replace("-", "_")];
-  const q = new URLSearchParams({ revision_id: pkg.revision_id });
-  return h("section", { class: "card sheet-head" },
-    h("div", {},
-      h("h2", {}, title),
-      h("p", { class: "muted small" }, blurb),
-    ),
-    h("div", { class: "job-actions" },
-      sheet && h("span", { class: "chip mono" }, `schema ${sheet.schema_version}`),
-      sheet && h("a", { class: "btn small", href: `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/${key}?${q}`, download: `${pkg.package_id}-${key}.json` }, "JSON"),
-      h("a", { class: "btn ghost small", href: `/v1/schemas/${key}.json`, target: "_blank", rel: "noopener" }, "Schema"),
-    ),
-  );
-}
-
-const noSheet = (what) => h("div", { class: "card placeholder" }, h("p", {}, `This package was made before ${what} sheets existed. Retry or create a new job to get one.`));
-
-function variantCard(pkg, id, parentName, obj, fields) {
-  const line = bibleLine(pkg, id);
-  return h("div", { class: "card entity variant" },
-    h("h3", {}, parentName, h("code", { class: "muted" }, id), editButton(id)),
-    line && line.value && !edits.open.has(id) && h("p", { class: "small" }, line.value),
-    entryBody(pkg, id, obj, fields));
-}
-
-const CAST_FIELDS = [
-  ["age_range", "Age"], ["gender_presentation", "Gender"], ["build_and_height", "Build"],
-  ["face", "Face"], ["hair", "Hair"], ["distinguishing_features", "Distinguishing"],
-  ["default_wardrobe", "Wardrobe"], ["wardrobe_palette", "Palette"],
-  ["posture_and_mannerisms", "Mannerisms"], ["voice", "Voice"],
-  ["must_keep", "Must keep"], ["design_freedom", "Free to design"],
-];
-const LOOK_FIELDS = [
-  ["wardrobe", "Wardrobe"], ["hair_and_makeup", "Hair & makeup"], ["condition", "Condition"],
-  ["changes_from_base", "Changes"], ["must_keep", "Must keep"],
-];
-
-function renderCast(pkg, L) {
-  const sheet = pkg.cast_sheet;
-  const head = sheetHeader(pkg, "cast-sheet", "Cast sheet", "How each character looks and sounds, for character design and casting. Story roles and goals are in the Overview.");
-  if (!sheet) return h("div", {}, head, noSheet("cast"));
-  const looksBy = groupBy(sheet.looks, "character_id");
-  return h("div", {}, head,
-    sheet.characters.map((c) =>
-      h("section", { class: "card entity sheet-entry" },
-        h("h3", {}, c.name || L.name[c.character_id] || c.character_id, h("code", { class: "muted" }, c.character_id),
-          !c.on_screen && h("span", { class: "chip" }, "not seen on screen"), editButton(c.character_id)),
-        entryBody(pkg, c.character_id, c, CAST_FIELDS),
-        (looksBy[c.character_id] || []).length > 0 && h("div", { class: "grid variants-grid" },
-          looksBy[c.character_id].map((lk) => variantCard(pkg, lk.look_id, "Look", lk, LOOK_FIELDS))),
-      )),
-  );
-}
-
-const SET_FIELDS = [
-  ["era_and_region", "Era & region"], ["layout", "Layout"], ["key_furnishings", "Furnishings"],
-  ["materials_and_textures", "Materials"], ["color_palette", "Palette"], ["lighting", "Lighting"],
-  ["entrances_and_blocking", "Entrances & blocking"], ["ambient_sound", "Ambient sound"],
-  ["must_keep", "Must keep"], ["design_freedom", "Free to design"],
-];
-const SET_STATE_FIELDS = [
-  ["time_of_day", "Time"], ["lighting", "Lighting"], ["dressing_changes", "Dressing"],
-  ["condition", "Condition"], ["changes_from_base", "Changes"], ["must_keep", "Must keep"],
-];
-
-function renderSets(pkg, L) {
-  const sheet = pkg.set_sheet;
-  const head = sheetHeader(pkg, "set-sheet", "Set sheet", "How each location looks, for production design. Layout and entrances support the script's blocking.");
-  if (!sheet) return h("div", {}, head, noSheet("set"));
-  const statesBy = groupBy(sheet.states, "location_id");
-  return h("div", {}, head,
-    sheet.locations.map((loc) =>
-      h("section", { class: "card entity sheet-entry" },
-        h("h3", {}, loc.name || L.name[loc.location_id] || loc.location_id, h("code", { class: "muted" }, loc.location_id),
-          h("span", { class: "chip" }, loc.interior_exterior), editButton(loc.location_id)),
-        entryBody(pkg, loc.location_id, loc, SET_FIELDS),
-        (statesBy[loc.location_id] || []).length > 0 && h("div", { class: "grid variants-grid" },
-          statesBy[loc.location_id].map((st) => variantCard(pkg, st.location_state_id, "State", st, SET_STATE_FIELDS))),
-      )),
-  );
-}
-
-const PROP_FIELDS = [
-  ["size_and_scale", "Size"], ["materials", "Materials"], ["color_and_finish", "Color & finish"],
-  ["condition_and_wear", "Condition"], ["distinguishing_marks", "Distinguishing"],
-  ["handling", "Handling"], ["must_keep", "Must keep"], ["design_freedom", "Free to design"],
-];
-const PROP_STATE_FIELDS = [["condition", "Condition"], ["changes_from_base", "Changes"], ["must_keep", "Must keep"]];
-
-function renderProps(pkg, L) {
-  const sheet = pkg.prop_sheet;
-  const head = sheetHeader(pkg, "prop-sheet", "Prop sheet", "How each plot-relevant prop looks and is handled, for prop making.");
-  if (!sheet) return h("div", {}, head, noSheet("prop"));
-  if (!sheet.props.length) return h("div", {}, head, h("div", { class: "card placeholder" }, h("p", {}, "This story registers no key props.")));
-  const statesBy = groupBy(sheet.states, "prop_id");
-  return h("div", {}, head,
-    sheet.props.map((p) =>
-      h("section", { class: "card entity sheet-entry" },
-        h("h3", {}, p.name || L.name[p.prop_id] || p.prop_id, h("code", { class: "muted" }, p.prop_id), editButton(p.prop_id)),
-        entryBody(pkg, p.prop_id, p, PROP_FIELDS),
-        (statesBy[p.prop_id] || []).length > 0 && h("div", { class: "grid variants-grid" },
-          statesBy[p.prop_id].map((st) => variantCard(pkg, st.prop_state_id, "State", st, PROP_STATE_FIELDS))),
-      )),
-  );
-}
-
-// Assets --------------------------------------------------------------------
-
-const ASSET_TYPES = ["character_identity", "character_look", "location", "prop", "shot_reference"];
+// Design pictures (shown on the Casting tab and on each character's and set's page) ------
 
 // Reference images (generated on demand) ----------------------------------------
 
@@ -1205,10 +969,26 @@ const IMAGE_TYPES = new Set(["character_identity", "character_look", "location",
 
 // Loads the package's images; polls while any are waiting or generating, as long as the
 // Assets tab of this package stays open.
+// Where the design pictures are shown: the story's Casting tab, or a character's or set's
+// library page (library.js). Each action and poll redraws whichever is open.
+function designOpen(key) {
+  const mode = document.body.dataset.mode;
+  if (mode === "chars" || mode === "sets") return typeof libDesignKey === "function" && libDesignKey() === key;
+  return state.tab === "casting" && state.pkg && imagesKey(state.pkg) === key;
+}
+
+function designRefresh() {
+  const mode = document.body.dataset.mode;
+  // A library page also reloads the asset, so its current pictures follow a pick or a draw.
+  if (mode === "chars" || mode === "sets") libAfterDesign();
+  else renderWhenNotSelecting();
+}
+
 async function loadImages(pkg) {
   const key = imagesKey(pkg);
   const im = state.images;
   if (im.key !== key) Object.assign(im, { key, view: null, error: "" });
+  im.pkg = { package_id: pkg.package_id, revision_id: pkg.revision_id };
   clearTimeout(im.timer);
   im.timer = null;
   im.loading = true;
@@ -1219,17 +999,17 @@ async function loadImages(pkg) {
     const changed = JSON.stringify(view) !== JSON.stringify(im.view);
     im.view = view;
     im.error = "";
-    if (changed && state.tab === "assets") renderWhenNotSelecting();
+    if (changed && designOpen(key)) designRefresh();
   } catch (e) {
     if (state.images.key !== key) return;
     im.error = e.message;
-    if (state.tab === "assets") renderWhenNotSelecting();  // otherwise "Loading…" forever
+    if (designOpen(key)) designRefresh();  // otherwise "Loading…" forever
   } finally {
     im.loading = false;
   }
   const busy = im.view && im.view.queued > 0;
-  if (busy && state.tab === "assets" && state.pkg && imagesKey(state.pkg) === key) {
-    im.timer = setTimeout(() => loadImages(state.pkg), 2000);
+  if (busy && designOpen(key)) {
+    im.timer = setTimeout(() => loadImages(pkg), 2000);
   }
 }
 
@@ -1244,10 +1024,10 @@ async function imageAction(url, button, body) {
   } catch (e) {
     failed = e.message;
   }
-  await loadImages(state.pkg);
+  await loadImages(state.images.pkg || state.pkg);
   // The action's own error wins: reloading the images succeeds and would clear it.
   if (failed) state.images.error = failed;
-  renderMain();
+  designRefresh();
 }
 
 // Design board: takes x draws per anchor (faces, first location/prop states), pick one,
@@ -1374,7 +1154,7 @@ function renderPromptEditor(v, o, draws) {
   const drawBtn = h("button", { type: "button", class: "btn small", onclick: (e) => {
     const prompt = box.value;
     imageAction(`/v1/image-options/${encodeURIComponent(id)}/edit`, e.currentTarget, { prompt, draws: Math.min(6, n) })
-      .then(() => { if (!state.images.error) delete design.edits[id]; renderMain(); });
+      .then(() => { if (!state.images.error) delete design.edits[id]; designRefresh(); });
   } }, `Draw edited take (${Math.min(6, n)})`);
   const resetBtn = h("button", { type: "button", class: "btn ghost small",
     onclick: () => { delete design.edits[id]; box.value = o.prompt; sync(); } }, "Reset");
@@ -1394,32 +1174,7 @@ function renderPromptEditor(v, o, draws) {
     h("p", { class: "muted small" }, "Drawing an edit adds a new take with the same seeds as this one, so you can compare the images draw for draw."));
 }
 
-// Calls `then` with the element once `selector` is on the page (the tab renders after
-// the route changes), giving up after a few seconds.
-function whenShown(selector, then, until = Date.now() + 5000) {
-  const el = document.querySelector(selector);
-  if (el) then(el);
-  else if (Date.now() < until) requestAnimationFrame(() => whenShown(selector, then, until));
-}
-
-// "Edit text": open the entries this item is drawn from in their sheet tab: the base
-// (character, location, prop) and, for a look or state, the variant too.
-function editTextLinks(slot) {
-  const tab = slot.asset_type.startsWith("character") ? "cast" : slot.asset_type === "location" ? "sets" : "props";
-  const variant = { character_look: "look", location: "state", prop: "state" }[slot.asset_type];
-  const targets = [[slot.entity_id, slot.entity]];
-  if (slot.variant_id) targets.push([slot.variant_id, variant]);
-  const open = (id) => {
-    openEditor(id);
-    go(state.job.job_id, tab);
-    whenShown(`.entry-editor[data-entry="${CSS.escape(id)}"]`, (el) => el.closest(".card").scrollIntoView({ block: "start" }));
-  };
-  return h("div", { class: "edit-links small muted" }, "Edit text: ",
-    targets.map(([id, label], i) => [i ? " · " : null,
-      h("button", { type: "button", class: "linklike", title: `Edit the description of ${id}`, onclick: () => open(id) }, label)]));
-}
-
-function renderNewTake(pkg, slot) {
+function renderNewTake(pkg, slot, { jobId = state.job?.job_id } = {}) {
   const key = keyOf(slot);
   const input = h("input", { type: "text", placeholder: slot.asset_type === "character_identity" ? "Direction for a new take, e.g. older, kinder eyes" : "Direction for a new take (optional)",
     oninput: (e) => { design.directions[key] = e.target.value; } });
@@ -1428,106 +1183,82 @@ function renderNewTake(pkg, slot) {
   return h("div", {}, h("div", { class: "new-take" }, input,
     h("button", { type: "button", class: "btn small", onclick: (e) => {
       const direction = (design.directions[key] || "").trim();
-      imageAction(base, e.currentTarget, { requirement_id: slot.requirement_id, deliverable_id: slot.deliverable_id, direction: direction || null, draws: design.draws, draft: design.draft, revision_id: pkg.revision_id, job_id: state.job.job_id })
-        .then(() => { if (!state.images.error) { design.directions[key] = ""; renderMain(); } });  // keep it if the request failed
-    } }, "New take")),
-    editTextLinks(slot));
+      imageAction(base, e.currentTarget, { requirement_id: slot.requirement_id, deliverable_id: slot.deliverable_id, direction: direction || null, draws: design.draws, draft: design.draft, revision_id: pkg.revision_id, job_id: jobId })
+        .then(() => { if (!state.images.error) { design.directions[key] = ""; designRefresh(); } });  // keep it if the request failed
+    } }, "New take")));
 }
 
-function renderDesignBoard(pkg) {
-  const im = state.images;
-  if (im.key !== imagesKey(pkg)) loadImages(pkg);
-  const v = im.key === imagesKey(pkg) ? im.view : null;
-  const stale = v && v.queued && !im.timer && !im.loading;
-  if (stale) loadImages(pkg);  // resume polling after coming back to the tab
-  const pickedKeys = new Set(!v ? [] : v.images.filter((i) => i.selected && i.status === "done").map(keyOf));
-  const titleOf = (k) => { const x = v.slots.find((s) => keyOf(s) === k); return x ? `${x.entity}${x.variant ? ` (${x.variant})` : ""}, ${x.view}` : k; };
-  const renderDependent = (d) => {
-    const parent = d.parent_key && `${d.parent_key[0]}|${d.parent_key[1]}`;
-    const blocked = parent && !pickedKeys.has(parent);
-    return h("div", { class: "dependent" },
-      h("div", { class: "small" }, h("strong", {}, d.variant || d.view), h("span", { class: "muted" }, ` · ${d.view}`), " ", outdatedChip(v, keyOf(d))),
-      renderTakeRows(v, d),
-      blocked ? h("p", { class: "muted small" }, `Drawn from ${titleOf(parent)}: pick an image for it first.`) : renderNewTake(pkg, d));
+// Casting ---------------------------------------------------------------------
+// The story's characters, sets and props as library assets (each opens its Characters or
+// Sets page, where its sheet is edited and its pictures are drawn), with the story-wide
+// Explore / Develop controls and the style brief.
+
+const castingCache = { key: null, data: null, error: "", loading: false };
+
+async function loadCasting(pkg) {
+  const key = imagesKey(pkg);
+  if (castingCache.loading && castingCache.key === key) return;
+  Object.assign(castingCache, { key, loading: true, error: "" });
+  try {
+    const [rows, chars, sets] = await Promise.all([
+      api(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/casting`),
+      api("/v1/library/characters"),
+      api("/v1/library/sets"),
+    ]);
+    if (castingCache.key !== key) return;
+    const assets = Object.fromEntries([...chars, ...sets].map((a) => [a.asset_id, a]));
+    castingCache.data = { rows, assets };
+  } catch (e) {
+    castingCache.error = e.message;
+  } finally {
+    castingCache.loading = false;
+  }
+  if (state.tab === "casting") renderWhenNotSelecting();
+}
+
+function renderCasting(pkg) {
+  const key = imagesKey(pkg);
+  if (castingCache.key !== key || (!castingCache.data && !castingCache.loading && !castingCache.error)) loadCasting(pkg);
+  if (state.images.key !== key) loadImages(pkg);
+  const v = state.images.key === key ? state.images.view : null;
+  const c = castingCache.key === key ? castingCache.data : null;
+  const sb = pkg.asset_requirements.style_brief;
+  const byStory = c ? Object.fromEntries(c.rows.map((r) => [r.story_id, r])) : {};
+  const card = (storyId, label, kindLabel) => {
+    const row = byStory[storyId];
+    const a = row && c.assets[row.asset_id];
+    if (!a) return h("div", { class: "card lib-card" }, h("div", { class: "lib-noimg big" }, "not in the library yet"), h("strong", {}, label));
+    const sub = kindLabel === "character" ? `${a.children} look${a.children === 1 ? "" : "s"}` : `${a.children} state${a.children === 1 ? "" : "s"}`;
+    return h("a", { href: `#lib=${a.asset_id}`, class: "card lib-card", title: `Open ${a.name}: sheet, pictures, takes` },
+      a.cover ? h("img", { src: a.cover.thumb, alt: a.name, loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
+      h("strong", {}, a.name), h("span", { class: "muted small" }, `${sub} · ${a.items} item${a.items === 1 ? "" : "s"}`));
   };
-  // Items with no anchor to be drawn from (e.g. a look of a character with no face image).
-  const others = !v ? [] : v.slots.filter((s) => !s.anchor && !s.anchor_key);
-  const otherCard = others.length > 0 && h("section", { class: "card design-card" },
-    h("div", { class: "design-card-head" }, h("h3", {}, "Other items")),
-    others.map((d) => h("div", { class: "dependent" },
-      h("div", { class: "small" }, h("strong", {}, d.entity), h("span", { class: "muted" }, ` · ${d.variant ? `${d.variant}, ` : ""}${d.view}`)),
-      renderTakeRows(v, d), renderNewTake(pkg, d))));
-  const cards = !v ? [] : v.slots.filter((s) => s.anchor).map((anchor) => {
-    const chosen = chosenImage(v.images, keyOf(anchor));
-    const opt = chosen && v.options.find((o) => o.option_id === chosen.option_id);
-    const deps = v.slots.filter((s) => s.anchor_key && `${s.anchor_key[0]}|${s.anchor_key[1]}` === keyOf(anchor));
-    return h("section", { class: "card design-card" },
-      h("div", { class: "design-card-head" },
-        h("h3", {}, anchor.entity, h("span", { class: "muted small" }, ` · ${anchor.variant ? `${anchor.variant}, ` : ""}${anchor.view}`)),
-        chosen && chosen.selected
-          ? h("span", { class: "chip ok" }, opt ? `Selected: take ${opt.index}, draw ${chosen.draw}` : "Selected")
-          : h("span", { class: "chip warn" }, "Pick one"),
-        outdatedChip(v, keyOf(anchor)),
-      ),
-      renderTakeRows(v, anchor),
-      renderNewTake(pkg, anchor),
-      deps.length > 0 && h("div", { class: "dependents" },
-        h("h4", {}, "Drawn from the pick"),
-        deps.map(renderDependent)),
-    );
-  });
-  return h("div", {}, renderDesignControls(pkg, v), cards, otherCard);
-}
-
-function renderReqImages(r) {
-  // On a requirement card: the chosen image of each deliverable (selected, else newest).
-  const v = state.images.view;
-  if (!v || !IMAGE_TYPES.has(r.asset_type)) return null;
-  const shown = r.deliverables.map((d) => [d, chosenImage(v.images, `${r.requirement_id}|${d.deliverable_id}`)]).filter(([, img]) => img);
-  if (!shown.length) return null;
-  return h("div", { class: "req-images" }, shown.map(([d, img]) =>
-    h("figure", { class: "req-image done" },
-      h("a", { href: thumbUrl(img, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
-        h("img", { src: thumbUrl(img), alt: `${r.requirement_id} ${d.view}`, loading: "lazy" })),
-      h("figcaption", {}, h("span", {}, d.view, img.selected ? " · selected" : "")))));
-}
-
-function renderAssets(pkg) {
-  const ar = pkg.asset_requirements;
-  const items = state.assetFilter === "all" ? ar.items : ar.items.filter((r) => r.asset_type === state.assetFilter);
-  const count = (t) => ar.items.filter((r) => r.asset_type === t).length;
-  const sb = ar.style_brief;
+  const bible = pkg.story_bible;
   return h("div", {},
-    renderDesignBoard(pkg),
+    renderDesignControls(pkg, v),
+    castingCache.error && h("p", { class: "form-error" }, castingCache.error),
+    h("section", { class: "card", style: "margin-top:12px" },
+      h("div", { class: "section-head" }, h("h3", {}, `Characters (${bible.characters.length})`),
+        h("span", { class: "muted small" }, "Open one to edit its sheet and draw its face, looks and the items it carries.")),
+      h("div", { class: "lib-grid" }, bible.characters.map((x) => card(x.character_id, x.name, "character")))),
+    h("section", { class: "card", style: "margin-top:12px" },
+      h("div", { class: "section-head" }, h("h3", {}, `Sets (${bible.locations.length})`),
+        h("span", { class: "muted small" }, "Open one to edit its sheet and draw its states, views and dressing.")),
+      h("div", { class: "lib-grid" }, bible.locations.map((x) => card(x.location_id, x.name, "set")))),
+    bible.props.length > 0 && h("section", { class: "card", style: "margin-top:12px" },
+      h("h3", {}, `Props (${bible.props.length})`),
+      h("p", { class: "muted small" }, "A prop belongs to the character who carries it, else to the set it dresses: edit and draw it there."),
+      h("ul", { class: "plain small" }, bible.props.map((p) => {
+        const holder = p.owner_character_id ? bible.characters.find((x) => x.character_id === p.owner_character_id)
+          : null;
+        const where = holder ? byStory[holder.character_id] : null;
+        return h("li", {}, h("strong", {}, p.name), p.story_function ? ` · ${p.story_function}` : "",
+          where ? [" · carried by ", h("a", { href: `#lib=${where.asset_id}` }, holder.name)] : h("span", { class: "muted" }, " · set dressing"));
+      }))),
     h("section", { class: "card", style: "margin-top:12px" },
       h("h3", {}, "Style brief"),
       h("dl", { class: "kv", style: "margin-top:8px" },
-        kv("Medium", sb.medium), kv("Era / region", sb.era_region), kv("Color & light", sb.color_and_light), kv("Aspect ratio", sb.aspect_ratio)),
-    ),
-    h("div", { class: "filters", style: "margin-top:16px" },
-      [["all", `All ${ar.items.length}`], ...ASSET_TYPES.map((t) => [t, `${t.replace("_", " ")} ${count(t)}`])].map(([id, label]) =>
-        h("button", { class: "filter", type: "button", "aria-pressed": String(state.assetFilter === id), onclick: () => { state.assetFilter = id; renderMain(); } }, label)),
-    ),
-    h("div", { class: "grid" },
-      items.map((r) =>
-        h("div", { class: "card req" },
-          h("h3", {}, r.requirement_id),
-          h("div", { class: "chips", style: "margin-top:6px" },
-            h("span", { class: "chip info" }, r.asset_type), statusChip(r.requirement_status),
-            h("span", { class: "chip" }, r.priority),
-            h("span", { class: "chip", title: r.used_by.map((u) => u.shot_id).join(", ") }, `${r.used_by.length} shots`)),
-          renderReqImages(r),
-          h("p", { class: "brief small" }, r.design_brief),
-          h("div", { class: "lists" },
-            h("div", {}, h("h4", {}, "Must keep"), bullet(r.must_keep)),
-            h("div", {}, h("h4", {}, "Design freedom"), bullet(r.design_freedom)),
-            h("div", {}, h("h4", {}, "Deliverables"), bullet(r.deliverables.map((d) => `${d.view} — ${d.purpose}${d.required ? "" : " (optional)"}`))),
-            h("div", {}, h("h4", {}, "Depends on"), bullet(r.depends_on, true)),
-          ),
-        ),
-      ),
-    ),
-  );
+        kv("Medium", sb.medium), kv("Era / region", sb.era_region), kv("Color & light", sb.color_and_light), kv("Aspect ratio", sb.aspect_ratio))));
 }
 
 const bullet = (items, mono = false) =>

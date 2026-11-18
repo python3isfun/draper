@@ -645,3 +645,5 @@ td.mono { white-space: nowrap; }
 .lib-editor { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
 .lib-editor textarea { width: 100%; font: inherit; font-size: 13px; }
 .lib-sheet .chip { white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
+.lib-asset .take-head .chip { white-space: normal; overflow-wrap: anywhere; }
+.lib-asset details.frames { margin-top: 6px; }

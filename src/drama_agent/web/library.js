@@ -14,8 +14,8 @@ const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "
 const libEdit = { open: new Set(), drafts: {}, errors: {}, notes: {}, saving: new Set() };
 
 const LIB_KINDS = {
-  character: { mode: "chars", path: "characters", plural: "Characters", child: "looks", childLabel: "Looks", one: "look", many: "looks", storyTab: "cast" },
-  set: { mode: "sets", path: "sets", plural: "Sets", child: "states", childLabel: "States", one: "state", many: "states", storyTab: "sets" },
+  character: { mode: "chars", path: "characters", plural: "Characters", child: "looks", childLabel: "Looks", one: "look", many: "looks", storyTab: "casting" },
+  set: { mode: "sets", path: "sets", plural: "Sets", child: "states", childLabel: "States", one: "state", many: "states", storyTab: "casting" },
 };
 // Sheet fields shown as lists of chips, and fields never shown (ids, names, versions).
 const LIB_LISTS = new Set(["must_keep", "design_freedom"]);
@@ -46,7 +46,10 @@ async function libRoute(param) {
   if (!state.jobs.length) await loadJobs();
   try {
     lib.list = await api(`/v1/library/${meta.path}`);
-    if (id) lib.view = await api(`/v1/library/${meta.path}/${encodeURIComponent(id)}`);
+    if (id) {
+      lib.view = await api(`/v1/library/${meta.path}/${encodeURIComponent(id)}`);
+      libLoadDesign();
+    }
   } catch (e) {
     lib.error = e.message;
   }
@@ -148,6 +151,7 @@ function libPart(part, kindLabel, ownerId) {
       libEditButton(part)],
     libEdit.notes[part.asset_id] && h("p", { class: "small muted" }, libEdit.notes[part.asset_id]),
     libPictures(part.pictures, part.name),
+    libDesign(part),
     part.states && part.states.length > 0 && h("div", { class: "small" }, h("strong", {}, "States: "),
       h("ul", { class: "plain" }, part.states.map((s) => h("li", {}, h("span", { class: "mono" }, s.state_id), ` · ${s.description}`)))),
     h("div", { class: "small" }, h("strong", {}, "Used in"), libUsedIn(part.used_in, "keyframes")));
@@ -166,7 +170,9 @@ function renderLibAsset(a) {
             title: "Open the story this came from" }, "Open its story"))),
       a.description && h("p", { class: "muted" }, a.description),
       libRedrawRow(a),
+      libDesignControls(),
       a.kind === "character" && libPictures(a.pictures, a.name),
+      a.kind === "character" && libDesign(a),
       libEdit.open.has(a.asset_id) ? libEditor(a) : [libSheet(a.sheet), libEditButton(a)],
       libEdit.notes[a.asset_id] && h("p", { class: "small muted" }, libEdit.notes[a.asset_id]),
       h("div", { class: "small" }, h("strong", {}, "Used in"), libUsedIn(a.used_in, "storyboard"))),
@@ -262,7 +268,10 @@ async function libReload() {
   const id = lib.id;
   try {
     const view = await api(`/v1/library/${meta.path}/${encodeURIComponent(id)}`);
-    if (lib.id === id) lib.view = view;
+    if (lib.id === id) {
+      lib.view = view;
+      libLoadDesign();
+    }
   } catch (e) {
     lib.error = e.message;
   }
@@ -322,4 +331,85 @@ function libPoll(id, n) {
     renderLibrary();
     if (left && n < 60) libPoll(id, n + 1);
   }, 4000);
+}
+
+// -- Takes and draws (the design board, per asset) -------------------------------------
+
+// The story revision whose design pictures this page shows (app.js loadImages / imagesKey).
+const libPkgRef = () => lib.view && lib.view.origin_revision_id
+  ? { package_id: lib.view.origin_package_id, revision_id: lib.view.origin_revision_id } : null;
+function libDesignKey() {
+  const ref = libPkgRef();
+  return ref ? imagesKey(ref) : null;
+}
+
+// After a design action or a poll: reload the asset (its picks may have changed), then
+// redraw, never under someone typing.
+let libAfterDesignBusy = false;
+async function libAfterDesign() {
+  if (libAfterDesignBusy) return;
+  libAfterDesignBusy = true;
+  try {
+    const meta = LIB_KINDS[lib.kind];
+    const id = lib.id;
+    if (id) {
+      const view = await api(`/v1/library/${meta.path}/${encodeURIComponent(id)}`).catch(() => null);
+      if (view && lib.id === id) lib.view = view;
+    }
+  } finally {
+    libAfterDesignBusy = false;
+  }
+  if (!typingIn($("#main"))) renderLibrary();
+}
+
+function libLoadDesign() {
+  const ref = libPkgRef();
+  if (ref) loadImages(ref);
+}
+
+// The design slots (deliverables) that show this part: a character's face, a look, a set
+// state's views, an item's states.
+function libSlots(part, v) {
+  if (!v) return [];
+  const id = part.origin_entity_id;
+  return v.slots.filter((s) =>
+    (part.kind === "character" && s.asset_type === "character_identity" && s.entity_id === id)
+    || (part.kind === "look" && s.asset_type === "character_look" && s.variant_id === id)
+    || (part.kind === "set_state" && s.asset_type === "location" && s.variant_id === id)
+    || (part.kind === "item" && s.asset_type === "prop" && s.entity_id === id));
+}
+
+function libDesign(part) {
+  const ref = libPkgRef();
+  const v = ref && state.images.key === imagesKey(ref) ? state.images.view : null;
+  if (!v) return h("p", { class: "muted small" }, state.images.error || "Loading takes…");
+  const slots = libSlots(part, v);
+  if (!slots.length) return null;
+  const job = jobOf(part.origin_package_id);
+  const picked = new Set(v.images.filter((i) => i.selected && i.status === "done").map(keyOf));
+  return slots.map((slot) => {
+    const parent = slot.parent_key && `${slot.parent_key[0]}|${slot.parent_key[1]}`;
+    const from = parent && v.slots.find((x) => keyOf(x) === parent);
+    const blocked = parent && !picked.has(parent);
+    const takes = v.options.filter((o) => keyOf(o) === keyOf(slot)).length;
+    return stickyDetails(`lib:${keyOf(slot)}`, `Takes and draws · ${slot.view} · ${count(takes, "take", "takes")}`,
+      renderTakeRows(v, slot),
+      blocked
+        ? h("p", { class: "muted small" }, `Drawn from ${from ? `${from.entity}${from.variant ? ` (${from.variant})` : ""}, ${from.view}` : "another picture"}: pick an image for it first.`)
+        : renderNewTake(ref, slot, { jobId: job && job.job_id }));
+  });
+}
+
+// Draws per new take, and draft or full size (shared with the Casting tab's controls).
+function libDesignControls() {
+  const ref = libPkgRef();
+  const v = ref && state.images.key === imagesKey(ref) ? state.images.view : null;
+  return h("div", { class: "design-row small" },
+    h("span", { class: "muted" }, "New takes:"),
+    h("span", { class: "muted" }, "draws"), numberSelect(design.draws, 6, (x) => { design.draws = x; renderLibrary(); }, "Draws per take"),
+    h("select", { "aria-label": "Size", onchange: (e) => { design.draft = e.target.value === "draft"; renderLibrary(); } },
+      h("option", { value: "draft", selected: design.draft }, "Draft (fast)"), h("option", { value: "full", selected: !design.draft }, "Full size")),
+    v && v.queued > 0 && h("span", { class: "chip info" }, `${v.queued} drawing…`),
+    state.images.error && h("span", { class: "warn-text" }, state.images.error),
+    (state.images.notes || []).length > 0 && h("span", { class: "muted" }, state.images.notes.join(" ")));
 }

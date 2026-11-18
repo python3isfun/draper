@@ -220,7 +220,17 @@ Each phase is shippable on its own, with draper and dramer working throughout.
   - **Redraw out-of-date:** redraws only this asset's out-of-date pictures
     (`POST …/images/refresh?requirement_ids=…`). The pictures drawn from them follow, and the
     page reloads itself until it's done.
-- **Still to do in phase 2:** fold the Cast, Sets, Props and Assets tabs into these pages.
+- **Step 3 (built):**
+  - **Casting tab:** the story's Cast, Sets, Props and Assets tabs became one **Casting** tab.
+    It has the story-wide Explore and Develop controls, the style brief, and the story's
+    characters and sets as cards (cover, counts) linking to their library pages. Props
+    show who carries them. Old `tab=cast|sets|props|assets` links land on Casting.
+  - **Design board per asset:** each face, look, state and item on a library page has
+    **Takes and draws**, using the board's own functions (`renderTakeRows`, `renderNewTake`).
+    The board's loading, actions and polling now redraw whichever is open (`designOpen`,
+    `designRefresh`), and a library page reloads its asset after each action.
+  - **Removed:** the old tabs' code (the sheet tabs and their editor, `renderAssets`,
+    `renderDesignBoard`, `editTextLinks`), about 300 lines.
 
 ## Risks and open questions
 

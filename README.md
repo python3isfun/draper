@@ -163,9 +163,9 @@ Every entry also lists `must_keep` (what the story depends on) and `design_freed
   ...) are kept under `legacy` on each story-bible entry: still shown in the Overview and
   used for asset briefs, but hidden from the model's schema. Completed jobs show the new steps as `skipped`. A
   retried or resumed old job runs the sheets, then re-runs storyboard and review.
-- **Editing by hand.** Each entry on the Cast, Sets and Props tabs has an **Edit**
-  button, and every item on the design board has **Edit text** links that open the
-  entries it is drawn from (the character, location or prop, and its look or state). You
+- **Editing by hand.** Each character, look, set, state and item on the **Characters** and
+  **Sets** pages has an **Edit** button (the story's Cast, Sets and Props tabs were folded
+  into those pages; see "The asset library" below). You
   can edit every sheet field and a look's or state's one-line story description;
   several editors can be open at once, and typed text is kept until it is saved or
   cancelled. `PATCH /v1/drama-packages/{id}/entries/{entry_id}` with `revision_id`,
@@ -181,7 +181,7 @@ Every entry also lists `must_keep` (what the story depends on) and `design_freed
   date when the design text it was drawn from changed (it records that text in its `brief`),
   or a picture it was drawn from was replaced or is out of date itself (a set's other
   states and plan views are drawn from its first wide view; a look from the face). The
-  Assets tab marks each one ("Out of date: …", `outdated` on `GET …/images`) and **Redraw
+  Characters and Sets pages mark each one ("out of date", `outdated` on `GET …/images`) and **Redraw
   out-of-date images** (`POST /v1/drama-packages/{id}/images/refresh`) redraws those whose
   pictures are up to date; each redraw replaces its pick when done, and the images drawn
   from it are redrawn next, so a redesigned set goes wide view, then its other states and
@@ -227,14 +227,20 @@ In the app, **Characters** and **Sets** in the top bar open the library:
   current pictures (click to enlarge; out-of-date ones are marked), its one-line
   description, its sheet, and the stories and shots that use it, with links into them.
 
+Each face, look, state and item also has **Takes and draws**: its takes and draws (pick
+one), a new take with a direction, and each take's prompt to edit and draw again. The
+story's **Casting** tab replaced its Cast, Sets, Props and Assets tabs: it holds the
+story-wide Explore and Develop controls, the style brief, and the story's characters, sets
+and props, each linking to its library page (old links to those tabs land on Casting).
+
 Each part has an **Edit** button. Your edit is saved to the story the asset came from (the
-same edit as the Cast and Sets tabs), and the library follows. **Redraw out-of-date** redraws
+same edit the story's sheets take), and the library follows. **Redraw out-of-date** redraws
 just this character's or set's out-of-date pictures, then what is drawn from them
 (`POST …/images/refresh` takes `requirement_ids` to limit it).
 
 ### Reference images
 
-On a finished package, **Generate images** (Assets tab, or `POST
+On a finished package, **Generate images** (Casting tab, or `POST
 /v1/drama-packages/{id}/images`) makes reference images with **MiniMax-H3-Image** on
 MCPHub's GPU route, using the same `MCPHUB_KEY`:
 
@@ -270,7 +276,7 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
 - **Running it:** images are generated in the background one at a time, as the GPU server
   works, at about 4 MP (1728x2304 faces, 1536x2720 looks, 2304x1728 sets, 2048x2048 plans
   and props; images made before keep their size). `draft=true` makes
-  about 1024 px images, much faster. Progress is live in the Assets tab; interrupted images
+  about 1024 px images, much faster. Progress is live on the Casting tab and the Characters and Sets pages; interrupted images
   resume after a restart. Images never block or fail a job.
 - **Versions:** Regenerate (`POST /v1/generated-images/{id}/regenerate`) makes a new
   version with a fresh seed and keeps the old one. A failed image is retried by the next
@@ -294,7 +300,9 @@ The image route needs an MCPHub key from a `newsbreak.com` account; it is sent a
 
 ### Casting & design: takes, draws and picks
 
-The Assets tab's **Casting & design** board explores several designs per item before
+The story's **Casting** tab (Explore and Develop, story-wide) and each character's and set's
+library page (**Takes and draws** per face, look, state and item: its takes, draws, picks
+and new takes) together make the **Casting & design** board, which explores several designs per item before
 anything else is drawn, so the team chooses from options instead of accepting one image:
 
 1. **Explore** (`POST /v1/drama-packages/{id}/images/explore`, default 4 takes x 3 draws,
