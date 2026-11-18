@@ -49,6 +49,7 @@ from drama_agent.shot_frames import (
     single_plan,
     spread,
     stale_approvals,
+    sub_shot_references,
     template_prompt,
     writer_instructions,
 )
@@ -350,10 +351,11 @@ def test_a_sub_shot_needs_only_its_own_peoples_picks(package):
     with pytest.raises(NotReady, match="first: "):
         plan_take(package, images, [], plan)  # sub-shot 1 has both people
     one = finished(plan_take(package, done_images(package), [], plan))
-    two = plan_take(package, images, [one], plan, sub_shot=2)  # not blocked by the other
-    assert {r.entity_id for r in two.references if r.kind in ("look", "face")} == {
-        shot.character_ids[0]
-    }
+    # Sub-shot 2 is not blocked by the other person's missing pictures. (Drawing it would be:
+    # the keyframe it continues from was drawn from pictures this list no longer has.)
+    refs, missing = sub_shot_references(package, images, [one], shot, plan.sub(2))
+    assert missing == []
+    assert {r.entity_id for r in refs if r.kind in ("look", "face")} == {shot.character_ids[0]}
 
 
 def test_the_nine_picture_cap_is_applied_per_sub_shot():

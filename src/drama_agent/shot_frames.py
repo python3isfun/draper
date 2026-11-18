@@ -166,6 +166,9 @@ class ShotPlan(BaseModel):
     model: str | None = None
     error: str | None = None
     updated_at: datetime = Field(default_factory=utcnow)
+    # The design text it was planned against (design_print); None for plans from before it
+    # was recorded (judged by the hand edits made to the shot's set, looks and props).
+    design_print: str | None = None
 
     @property
     def busy(self) -> bool:
@@ -839,31 +842,58 @@ def design_print(pkg: ProductionPackage, shot: Shot) -> str:
         if sheet is not None:
             entries |= sheet.entries()
     bible = pkg.story_bible
+    ids = design_ids(shot)
     lines = {x.look_id: x.description for x in bible.looks}
     lines |= {x.location_state_id: x.description for x in bible.location_states}
     lines |= {x.prop_state_id: x.description for x in bible.prop_states}
-    ids = [*shot.character_ids, *(r.look_id for r in shot.character_look_refs),
-           shot.location_id, shot.location_state_id,
-           *(x for r in shot.prop_state_refs for x in (r.prop_id, r.prop_state_id))]  # fmt: skip
     data = {i: [e.model_dump() if (e := entries.get(i)) is not None else None, lines.get(i)]
             for i in ids}  # fmt: skip
     return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
-def outdated_keyframes(
-    pkg: ProductionPackage,
-    images: list[GeneratedImage],
-    takes: list[ShotTake],
-    plans: list[ShotPlan],
-) -> dict[str, list[str]]:
-    """Each approved keyframe (of the plans as they are) that is out of date, by take id,
-    with why: the design text it was written against changed, a design picture it was
-    drawn from was replaced or is out of date (see images.outdated_pictures), or the
-    keyframe it continues from (the cut before, or the previous shot's) changed or is out
-    of date itself."""
+def design_ids(shot: Shot) -> list[str]:
+    """The cast, set and prop entries a shot is designed from."""
+    return [*shot.character_ids, *(r.look_id for r in shot.character_look_refs),
+            shot.location_id, shot.location_state_id,
+            *(x for r in shot.prop_state_refs for x in (r.prop_id, r.prop_state_id))]  # fmt: skip
+
+
+def edited_since(pkg: ProductionPackage, shot: Shot, when: datetime) -> bool:
+    """Whether a hand edit (sheet_edit) to the shot's set, looks or props was made after
+    `when`. An edit from before edits recorded their time counts as after: this is only
+    asked of work that predates design prints too."""
+    ids = set(design_ids(shot))
+    return any(
+        e.note.startswith("Edited by hand") and ids & set(e.target_ids)
+        and (e.at is None or e.at > when)
+        for e in pkg.change_log
+    )  # fmt: skip
+
+
+PLAN_TEXT_CHANGED = (
+    "before the set, look or prop text changed: its framing may describe the old design; "
+    "plan the cuts again"
+)
+
+
+def plan_outdated(pkg: ProductionPackage, shot: Shot, plan: ShotPlan | None) -> str | None:
+    """Why a stored cut plan may describe an earlier design, or None."""
+    if plan is None or plan.source == "single" or plan.status != "done":
+        return None
+    if plan.design_print is not None:
+        return PLAN_TEXT_CHANGED if plan.design_print != design_print(pkg, shot) else None
+    return PLAN_TEXT_CHANGED if edited_since(pkg, shot, plan.updated_at) else None
+
+
+def keyframe_judge(
+    pkg: ProductionPackage, images: list[GeneratedImage], takes: list[ShotTake]
+) -> Any:
+    """A function telling why a keyframe take is out of date (empty when it isn't): the
+    design text it was written against changed, a design picture it was drawn from was
+    replaced or is out of date (see images.outdated_pictures), or the keyframe it continues
+    from (the cut before, or the previous shot's) changed or is out of date itself."""
     from .images import PICTURE_OUTDATED, PICTURE_REPLACED, is_current, outdated_pictures
 
-    stored = {p.shot_id: p for p in plans}
     shots = {s.shot_id: s for s in pkg.shot_list}
     stale_pictures = outdated_pictures(pkg, images)
     prints: dict[str, str] = {}
@@ -880,6 +910,8 @@ def outdated_keyframes(
                 prints[t.shot_id] = design_print(pkg, shot)
             if t.design_print != prints[t.shot_id]:
                 out.append(KF_TEXT_CHANGED)
+        elif edited_since(pkg, shot, t.created_at):
+            out.append(KF_TEXT_CHANGED)
         for r in t.references:
             if r.kind in ("previous_frame", "start_frame", "previous_shot"):
                 now = (previous_shot_frame(pkg, takes, shot) if r.kind == "previous_shot"
@@ -900,6 +932,21 @@ def outdated_keyframes(
         memo[t.take_id] = list(dict.fromkeys(out))
         return memo[t.take_id]
 
+    return reasons
+
+
+def outdated_keyframes(
+    pkg: ProductionPackage,
+    images: list[GeneratedImage],
+    takes: list[ShotTake],
+    plans: list[ShotPlan],
+    judge: Any = None,
+) -> dict[str, list[str]]:
+    """Each approved keyframe (of the plans as they are) that is out of date, by take id,
+    with why (keyframe_judge)."""
+    reasons = judge or keyframe_judge(pkg, images, takes)
+    stored = {p.shot_id: p for p in plans}
+    shots = {s.shot_id: s for s in pkg.shot_list}
     out: dict[str, list[str]] = {}
     for t in takes:
         if t.approved is None or t.sub_shot < 1 or t.shot_id not in shots:
@@ -920,6 +967,7 @@ def sub_shot_references(
     sub: SubShot,
     picks: ShotPicks | None = None,
     reading: SceneReading | None = None,
+    judge: Any = None,
 ) -> tuple[list[FrameRef], list[str]]:
     """(the pictures a sub-shot's keyframe is drawn from, what is missing): for each person
     in this sub-shot, the picture a fresh `reading` of the scene chose (with their state at
@@ -927,7 +975,9 @@ def sub_shot_references(
     approved keyframe of the sub-shot before it (sub-shot 2 on; it must be approved), or for
     sub-shot 1, of the previous shot of the scene when it has one (light, set dressing and
     everyone's state carry over the cut; not waited for). Chosen per sub-shot, then capped at
-    nine, so a close-up keeps its person's face however crowded the shot is."""
+    nine, so a close-up keeps its person's face however crowded the shot is. With `judge`
+    (keyframe_judge), a keyframe that is out of date is never drawn from: the cut before
+    must be redrawn first, and the previous shot's is left out until it is."""
     picks = picks or shot_picks(pkg, images, shot)
     people = set(sub.people)
     chosen = chosen_pictures(pkg, shot, sub, reading)
@@ -938,12 +988,20 @@ def sub_shot_references(
         prev = approved_take(takes, shot.shot_id, sub.index - 1)
         if prev is None:
             missing.append(f"an approved keyframe for sub-shot {sub.index - 1}")
+        elif judge is not None and judge(prev):
+            missing.append(f"a new keyframe for sub-shot {sub.index - 1} (the approved one "
+                           "is out of date)")  # fmt: skip
         else:
             previous = FrameRef(ref_id=frame_ref(prev), kind="previous_frame",
                                 role=f"the approved keyframe of sub-shot {sub.index - 1}, "
                                 "just before this cut", likeness=prev.likeness)  # fmt: skip
     else:
         previous_shot = previous_shot_frame(pkg, takes, shot)
+        if previous_shot is not None and judge is not None:
+            before = next((t for t in takes if t.take_id == previous_shot.ref_id.split(":")[1]),
+                          None)  # fmt: skip
+            if before is not None and judge(before):
+                previous_shot = None  # it shows an earlier design
     return picks.refs(people, previous, chosen, previous_shot), missing
 
 
@@ -1011,7 +1069,8 @@ def sub_shot_for(
     sub = plan.sub(sub_shot)
     if sub is None:
         raise NotReady(f"{shot.shot_id} has no sub-shot {sub_shot}")
-    refs, missing = sub_shot_references(pkg, images, takes, shot, sub, reading=reading)
+    refs, missing = sub_shot_references(pkg, images, takes, shot, sub, reading=reading,
+                                        judge=keyframe_judge(pkg, images, takes))  # fmt: skip
     if missing:
         raise NotReady("first: " + "; ".join(missing))
     if not refs:
@@ -1186,7 +1245,12 @@ picture of a real person). From sub-shot 2 on, \
 before the cut.
 - `shot`: the whole shot from the storyboard (framing, camera, action, continuity, notes, \
 dialogue with its timing), for context.
-- `scene`: where and when; `style`: medium, era, color and light; `aspect`: the canvas.
+- `scene`: where and when; `scene.set`: the set sheet, where things are in the room \
+(`layout`: which wall the bed, the windows and the doors are on), its furnishings, \
+materials, light and dressing at this moment. The set picture shows one view; from any \
+other camera direction, put behind each person what `layout` says is on that side \
+(e.g. the wall and the canvas behind the headboard, the windows to the side), never what \
+an older plan or keyframe says. `style`: medium, era, color and light; `aspect`: the canvas.
 - `previous_prompt` and `fixes`: the last version's prompt and what was wrong with it (the \
 quality check's findings on its best draw, or the rule check's). Keep what worked and fix \
 every finding.
@@ -1294,6 +1358,21 @@ def shot_context(pkg: ProductionPackage, shot: Shot) -> dict[str, Any]:
         "place": names.get(shot.location_id, shot.location_id),
         "state": state.description if state else "",
     }
+    # Where things are in the room (the set sheet), so every camera direction puts the right
+    # wall, window or door behind whom; and the state's light and dressing.
+    sheet = pkg.set_sheet
+    loc = next((x for x in (sheet.locations if sheet else []) if x.location_id == shot.location_id),
+               None)  # fmt: skip
+    st = next((x for x in (sheet.states if sheet else [])
+               if x.location_state_id == shot.location_state_id), None)  # fmt: skip
+    if loc is not None or st is not None:
+        scene["set"] = {k: v for k, v in {
+            "layout": getattr(loc, "layout", ""),
+            "furnishings": getattr(loc, "key_furnishings", ""),
+            "materials": getattr(loc, "materials_and_textures", ""),
+            "lighting": getattr(st, "lighting", "") or getattr(loc, "lighting", ""),
+            "dressing": getattr(st, "dressing_changes", ""),
+        }.items() if v}  # fmt: skip
     if sc is not None:
         scene |= {"int_ext": sc.int_ext, "time_of_day": sc.time_of_day}
         if sc.intimacy is not None and sc.intimacy.level != "none":
@@ -1551,7 +1630,9 @@ PLAN_GUIDE = """\
 `shot`: the storyboard shot (framing, camera, action, continuity, notes, its `people` and \
 props) and `clip_s`, the clip's length in seconds. `lines`: each line of dialogue with its \
 speaker and when it starts and ends in the clip (`start_s`, `end_s`); a speaker who isn't \
-one of `shot.people` is a voice from outside the shot. `scene`: where and when. `problems`: \
+one of `shot.people` is a voice from outside the shot. `scene`: where and when, and \
+`scene.set.layout`, where things are in the room: write each framing's background from it \
+(what wall, window or door is behind whom). `problems`: \
 what was wrong with your last plan, if any; fix every one.
 
 Your plan is the spec video production renders from: its prompt follows your cuts, \
@@ -1760,7 +1841,9 @@ foreground/background) and looking toward the off-screen people's side, as the f
 and action say.
 - **framing**: the shot size and camera angle.
 - **action**: the pose and the moment match the sub-shot's action as it begins.
-- **set**: the place matches the set picture (layout, materials, palette).
+- **set**: the place matches the set picture (layout, materials, palette), and what is \
+behind each person matches `scene.set.layout` for this camera direction (e.g. a window \
+behind a headboard that stands against a solid wall is a major fail).
 - **prop**: one item per listed prop: present and as in its picture.
 - **defects**: hands, fingers, limbs, merged bodies, warped faces, broken perspective.
 - **text**: no stray letters, captions or watermarks (lettering the scene needs is fine).
@@ -1963,13 +2046,16 @@ class ShotFrameRunner:
         reading = await self.ensure_reading(pkg, shot.scene_id)
         if reading is None:
             return
+        images = self.repo.list_images(pkg.package_id, pkg.revision_id)
+        takes = self.repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         refs, missing = sub_shot_references(
             pkg,
-            self.repo.list_images(pkg.package_id, pkg.revision_id),
-            self.repo.list_shot_takes(pkg.package_id, pkg.revision_id),
+            images,
+            takes,
             shot,
             take_sub(pkg, shot, take),
             reading=reading,
+            judge=keyframe_judge(pkg, images, takes),
         )
         if not missing and refs:
             take.references, take.likeness = refs, any(r.likeness for r in refs)
@@ -2046,6 +2132,8 @@ class ShotFrameRunner:
                 context = context | {"previous_plan": out.model_dump(), "problems": fixable}
             plan.notes, plan.source = out.notes.strip(), "model"
             plan.model = request.model or getattr(self.text, "model_id", None)
+            if pkg is not None:
+                plan.design_print = design_print(pkg, shot_of(pkg, plan.shot_id))
             plan.status, plan.error = "done", None
         except Exception as exc:  # the previous plan (if any) stays; the user can plan again
             log.warning("sub-shot plan failed for %s", plan.shot_id, exc_info=True)
@@ -2376,7 +2464,8 @@ def shot_board(
     versions, its takes and its approved keyframe."""
     names = _names(pkg)
     stored = {p.shot_id: p for p in plans}
-    stale = outdated_keyframes(pkg, images, takes, plans)
+    judge = keyframe_judge(pkg, images, takes)
+    stale = outdated_keyframes(pkg, images, takes, plans, judge)
     by_scene = {r.scene_id: r for r in readings or []}
     fresh_of: dict[str, SceneReading | None] = {}
     for scene_id in {s.scene_id for s in pkg.shot_list}:
@@ -2394,7 +2483,8 @@ def shot_board(
         subs = []
         for sub in plan.sub_shots:
             # Every take: the previous shot's keyframe is among them.
-            refs, missing = sub_shot_references(pkg, images, takes, shot, sub, picks, reading)
+            refs, missing = sub_shot_references(pkg, images, takes, shot, sub, picks, reading,
+                                                judge)  # fmt: skip
             choices = []
             for who in sub.people:
                 c = reading.choice(shot.shot_id, sub.index, who) if reading else None
@@ -2460,6 +2550,8 @@ def shot_board(
                 "source": plan.source,
                 # Where the plan isn't a clean spec for video production yet.
                 "problems": plan_problems(pkg, shot, plan),
+                # A stored plan written before a design edit (its framing may describe it).
+                "outdated": plan_outdated(pkg, shot, own),
                 "notes": own.notes if own else "",
                 "error": own.error if own else None,
             },

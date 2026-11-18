@@ -19,6 +19,7 @@ from ..models.package import utcnow
 from ..models.storyboard import Shot
 from ..shot_frames import (
     DEFAULT_DRAWS,
+    KF_BEFORE_OUTDATED,
     MAX_CLIP_S,
     MAX_DRAWS,
     MAX_ROUNDS,
@@ -32,6 +33,7 @@ from ..shot_frames import (
     ShotTake,
     approved_take,
     current_sub,
+    design_print,
     frame_ref,
     is_busy,
     is_hard,
@@ -39,6 +41,7 @@ from ..shot_frames import (
     outdated_keyframes,
     plan_of,
     plan_take,
+    previous_shot_frame,
     prompt_findings,
     shot_board,
     shot_of,
@@ -296,6 +299,7 @@ def register(
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         plan.source, plan.updated_at = "user", utcnow()
+        plan.design_print = design_print(pkg, shot)
         repo.save_shot_plan(plan)
         for t in stale_approvals(pkg, shot, takes, plan):
             repo.approve_shot_draw(t.take_id, None)
@@ -534,6 +538,13 @@ def register(
             if any(w.startswith(PICTURE_OUTDATED) for w in stale[first.take_id]):
                 skipped.append({"shot_id": shot.shot_id, "reason": "redraw the out-of-date "
                                 "design pictures first (Assets)"})  # fmt: skip
+                continue
+            if KF_BEFORE_OUTDATED in stale[first.take_id]:
+                # Its continuity reference shows the earlier design: wait for that one.
+                before = previous_shot_frame(pkg, takes, shot) if first.sub_shot == 1 else None
+                which = before.role.split("(")[1].split(",")[0] if before else "the cut before"
+                skipped.append({"shot_id": shot.shot_id, "reason": f"redraw and approve {which} "
+                                "first: the keyframe it continues from is out of date"})  # fmt: skip
                 continue
             if shot.scene_id not in scene_reading:
                 scene_reading[shot.scene_id] = _reading(pkg, shot)

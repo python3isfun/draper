@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from .models.package import ChangeLogEntry, ProductionPackage
+from .models.package import ChangeLogEntry, ProductionPackage, utcnow
 from .pipeline.asset_aggregation import DesignSheets, ReuseUnit, default_design
 
 # Sheet list name -> the ID field of its entries.
@@ -185,6 +185,7 @@ def edit_entry(
             target_ids=[entry_id],
             changed_ids=[entry_id, *edit.requirement_ids],
             note="Edited by hand: " + ", ".join(edit.changed),
+            at=utcnow(),
         )
     )
     return edit

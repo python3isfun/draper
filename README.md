@@ -194,6 +194,17 @@ Every entry also lists `must_keep` (what the story depends on) and `design_freed
   cut once its design pictures are redrawn, and approving it starts the next cut. Until then
   the export's `shot_specs.json` lists the shot as not ready ("[Shot N]'s keyframe is out of
   date: …"). A look edit also makes the scene's reading stale, so it is read again.
+  An out-of-date keyframe is never drawn from: a cut whose cut before is out of date waits
+  for it, the previous shot's keyframe is left out of a new take until it is redrawn, and
+  the batch skips such a shot, naming the one to redraw and approve first. A **cut plan**
+  records the design text it was planned against: after an edit, the Keyframes tab says
+  "This plan was written before the set, look or prop text changed" (`plan.outdated`
+  on the board), since its framing may describe the old design (e.g. "the window behind
+  them"); plan the cuts again if it does. Plans and keyframes from before this was recorded
+  count as out of date when a hand edit touched their set, looks or props. The keyframe
+  writer, its judge and the cut planner read the set sheet (`scene.set`: layout,
+  furnishings, materials, the state's light and dressing), so each camera direction puts
+  the right wall, window or door behind each person, and the judge fails one that doesn't.
 
 ### Reference images
 

@@ -349,6 +349,7 @@ function renderPlan(pkg, shot) {
           renderMain();
         } }, "Edit"))),
     p.error && h("p", { class: "small warn-text" }, p.error),
+    p.outdated && h("p", { class: "small warn-text" }, `This plan was written ${p.outdated}.`),
     p.problems && p.problems.length > 0 && h("div", { class: "small warn-text" },
       h("strong", {}, "Not a clean spec for video yet:"),
       h("ul", { class: "plain" }, p.problems.map((x) => h("li", {}, x)))),

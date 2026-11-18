@@ -202,3 +202,92 @@ def test_a_cache_never_outlives_a_hand_edit(package):
     package.change_log.append(ChangeLogEntry(revision_id=package.revision_id, target_ids=["x"],
                                              changed_ids=["x"], note="edit"))  # fmt: skip
     assert first == "before" and _cached(package, "probe", lambda: "after") == "after"
+
+
+def two_shots_in_a_scene(b: Board) -> tuple[str, str]:
+    shots = b.board()["shots"]
+    a = shots[0]
+    nxt = next(s for s in shots[1:] if s["scene_id"] == a["scene_id"])
+    return a["shot_id"], nxt["shot_id"]
+
+
+def approve_first(b: Board, sid: str) -> dict:
+    r = b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+    assert r.status_code == 202, r.text
+    b.wait()
+    take = next(t for t in b.takes(sid) if t["take_id"] == r.json()["take_id"])
+    b.http.post(f"/v1/shot-takes/{take['take_id']}/approve", json={"n": 0, "next": False})
+    return take
+
+
+def test_an_out_of_date_keyframe_is_never_drawn_from(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        a, nxt = two_shots_in_a_scene(b)
+        approve_first(b, a)
+        second = approve_first(b, nxt)
+        assert any(r["kind"] == "previous_shot" for r in second["references"])
+        edit_set(b, location_of(b, a))
+        b.http.post(f"/v1/drama-packages/{b.pid}/images/refresh")
+        images_idle(b)
+        # The batch redraws the first shot and waits on the next, naming the one to redraw.
+        r = b.http.post(b.base, json={"outdated": True, "draws": 1}).json()
+        started = {t["shot_id"] for s in b.board()["shots"] for x in s["sub_shots"]
+                   for t in x["takes"] if t["take_id"] in r["started"]}  # fmt: skip
+        assert a in started and nxt not in started
+        wait = next(x for x in r["skipped"] if x["shot_id"] == nxt)
+        assert a in wait["reason"] and "continues from is out of date" in wait["reason"]
+        b.wait()
+        # Drawn by hand meanwhile, the next shot leaves the earlier design's keyframe out.
+        take = b.http.post(f"{b.base}/{nxt}", json={"draws": 1}).json()
+        assert not any(x["kind"] == "previous_shot" for x in take["references"])
+        b.wait()
+
+
+def test_a_plan_written_before_a_design_edit_is_flagged(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        shot = b.busiest()
+        sid = shot["shot_id"]
+        assert b.http.post(f"{b.base}/{sid}/plan", json=b.two_cuts(shot)).status_code in (200, 202)
+        assert b.shot(sid)["plan"]["outdated"] is None
+        edit_set(b, location_of(b, sid))
+        assert "plan the cuts again" in b.shot(sid)["plan"]["outdated"]
+        # Planned again after the edit: up to date.
+        b.http.post(f"{b.base}/{sid}/plan", json=b.two_cuts(shot))
+        assert b.shot(sid)["plan"]["outdated"] is None
+
+
+def test_a_plan_from_before_design_prints_is_judged_by_the_edits(package):
+    from datetime import timedelta
+
+    from drama_agent.models.package import utcnow
+    from drama_agent.sheet_edit import edit_entry
+    from drama_agent.shot_frames import plan_outdated
+
+    from .test_shot_frames import busiest, two_cuts
+
+    shot = busiest(package)
+    old = two_cuts(package, shot).model_copy(update={"source": "model",
+                                                     "updated_at": utcnow() - timedelta(days=1)})  # fmt: skip
+    assert old.design_print is None and plan_outdated(package, shot, old) is None
+    edit_entry(package, shot.location_id, sheet={"layout": "A different room"})
+    assert plan_outdated(package, shot, old) is not None
+    newer = old.model_copy(update={"updated_at": utcnow() + timedelta(seconds=1)})
+    assert plan_outdated(package, shot, newer) is None
+
+
+def test_the_writer_and_the_judge_read_the_sets_layout(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = b.board()["shots"][0]["shot_id"]
+        edit_set(b, location_of(b, sid), "The bed stands against the left wall under a canvas")
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        from drama_agent.shot_frames import CHECK_STAGE, WRITE_STAGE
+
+        for stage in (WRITE_STAGE, CHECK_STAGE):
+            calls = b.calls(stage)
+            assert calls, stage
+            scene = calls[-1].context["scene"]
+            assert "set" in scene and any("canvas" in v for v in scene["set"].values()), stage

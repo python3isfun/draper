@@ -75,6 +75,9 @@ class ChangeLogEntry(BaseModel):
     target_ids: list[str]
     changed_ids: list[str]
     note: str
+    # When a hand edit was made (None for entries from before this was recorded, and for
+    # the pipeline's own entries).
+    at: datetime | None = None
 
 
 class ProductionPackage(BaseModel):
