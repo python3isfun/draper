@@ -5,7 +5,13 @@
   reference images, which the prompt calls <Picture 1>, <Picture 2>, ... in order. The
   server works on one image at a time and queues the rest, so callers send one request at
   a time. Auth is the MCPHub key in X-API-Key (Bearer is refused on this route).
+- GeminiImageClient: Google's Gemini image models (Nano Banana 2.1 by default) over the
+  Gemini API's generateContent, or a gateway serving the same API. Up to eight reference
+  images, each sent as a part introduced by "Picture N:"; the prompt's <Picture N> labels
+  become "Picture N". The same request shape as dramer's gemini adapter.
 - FixtureImageClient: draws a small solid-color PNG locally, for tests and offline mode.
+
+Every client has a `model_id` and `max_references` (the most reference images it takes).
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import re
 import struct
 import zlib
 from dataclasses import dataclass
@@ -44,6 +51,7 @@ class ImageResult:
 
 class ImageClient(Protocol):
     model_id: str
+    max_references: int
 
     async def generate(
         self, prompt: str, size: str, seed: int, references: list[Reference]
@@ -65,6 +73,7 @@ class MiniMaxImageClient:
         if not api_key:
             raise ValueError("MCPHub API key is empty")
         self.model_id = model
+        self.max_references = MAX_REFERENCES
         self.max_retries = max_retries
         self.backoff_s = backoff_s
         self._http = httpx.AsyncClient(
@@ -117,12 +126,164 @@ class MiniMaxImageClient:
         raise ImageGenError(f"image generation failed: {last}")
 
 
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_MODEL = "gemini-nano-banana-2.1"
+GEMINI_MAX_REFERENCES = 8
+GEMINI_MAX_INLINE_BYTES = 20 * 1024 * 1024  # base64 included
+# imageConfig.aspectRatio values the models take.
+GEMINI_ASPECTS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
+# Finish reasons that are the model declining, not a fault here.
+GEMINI_REFUSED = {"SAFETY", "IMAGE_SAFETY", "PROHIBITED_CONTENT", "IMAGE_PROHIBITED_CONTENT",
+                  "BLOCKLIST", "SPII", "RECITATION", "IMAGE_RECITATION"}  # fmt: skip
+PICTURE = re.compile(r"<\s*Picture\s+(\d+)\s*>", re.IGNORECASE)
+
+
+def gemini_aspect(size: str) -> str:
+    """The aspect ratio the Gemini models take that is nearest to a "WxH" size."""
+    w, h = (int(x) for x in size.lower().split("x"))
+
+    def ratio(a: str) -> float:
+        x, y = a.split(":")
+        return int(x) / int(y)
+
+    return min(GEMINI_ASPECTS, key=lambda a: abs(ratio(a) - w / h))
+
+
+def gemini_size(size: str) -> str:
+    """imageConfig.imageSize for a "WxH" size: the tier whose long edge covers it (1K is
+    about 1024 px on the long edge, 2K about 2048-2752, 4K above)."""
+    long_edge = max(int(x) for x in size.lower().split("x"))
+    return "1K" if long_edge <= 1408 else "2K" if long_edge <= 2816 else "4K"
+
+
+class GeminiImageError(ImageGenError):
+    """Gemini answered without an image; `refused` when the model declined it."""
+
+    def __init__(self, message: str, refused: bool = False) -> None:
+        super().__init__(message)
+        self.refused = refused
+
+
+class GeminiImageClient:
+    """Nano Banana (Gemini image models) over generateContent; one image per request."""
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = GEMINI_URL,
+        model: str = GEMINI_MODEL,
+        *,
+        timeout_s: float = 300.0,
+        max_retries: int = 2,
+        backoff_s: float = 5.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        if not api_key:
+            raise ValueError("Gemini API key is empty")
+        self.model_id = model
+        self.max_references = GEMINI_MAX_REFERENCES
+        self.max_retries = max_retries
+        self.backoff_s = backoff_s
+        self._http = httpx.AsyncClient(
+            base_url=base_url.rstrip("/"),
+            headers={"x-goog-api-key": api_key},
+            timeout=timeout_s,
+            transport=transport,
+        )
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    def body(self, prompt: str, size: str, seed: int, references: list[Reference]) -> dict:
+        """The request body (pure, so the exact request is testable)."""
+        parts: list[dict] = []
+        for i, r in enumerate(references, 1):
+            parts.append({"text": f"Picture {i}:"})
+            parts.append({"inlineData": {"mimeType": r.mime,
+                                         "data": base64.b64encode(r.data).decode()}})  # fmt: skip
+        parts.append({"text": PICTURE.sub(lambda m: f"Picture {m.group(1)}", prompt)})
+        return {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"],
+                "imageConfig": {"aspectRatio": gemini_aspect(size), "imageSize": gemini_size(size)},
+                "seed": seed,
+            },
+        }
+
+    async def generate(
+        self, prompt: str, size: str, seed: int, references: list[Reference]
+    ) -> ImageResult:
+        if len(references) > self.max_references:
+            raise ImageGenError(f"at most {self.max_references} reference images")
+        body = self.body(prompt, size, seed, references)
+        inline = sum(len(p["inlineData"]["data"]) for p in body["contents"][0]["parts"]
+                     if "inlineData" in p)  # fmt: skip
+        if inline > GEMINI_MAX_INLINE_BYTES:
+            raise ImageGenError("reference images exceed 20 MB in one request")
+        last = ""
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = await self._http.post(f"/models/{self.model_id}:generateContent", json=body)
+            except httpx.TimeoutException as exc:
+                raise ImageGenError(f"image request timed out ({exc!r})") from exc
+            except httpx.TransportError as exc:
+                last = f"transport error: {exc!r}"
+            else:
+                if resp.status_code == 200:
+                    return gemini_image(resp.json())
+                last = f"HTTP {resp.status_code}: {_gemini_error(resp.text)}"
+                if resp.status_code not in RETRYABLE_STATUS:
+                    raise ImageGenError(f"image generation failed: {last}")
+            if attempt < self.max_retries:
+                await asyncio.sleep(self.backoff_s * 2**attempt)
+        raise ImageGenError(f"image generation failed: {last}")
+
+
+def gemini_image(res: dict) -> ImageResult:
+    """The image of a generateContent response, or the reason there is none."""
+    if block := (res.get("promptFeedback") or {}).get("blockReason"):
+        raise GeminiImageError(f"the request was blocked: {block}", refused=True)
+    candidate = (res.get("candidates") or [{}])[0] or {}
+    parts = (candidate.get("content") or {}).get("parts") or []
+    for p in parts:
+        data = (p.get("inlineData") or {}).get("data")
+        if data:
+            return ImageResult(base64.b64decode(data), p["inlineData"].get("mimeType", "image/png"))
+    reason = candidate.get("finishReason")
+    said = " ".join(p.get("text", "") for p in parts).strip()[:300]
+    detail = f" ({reason})" if reason else ""
+    detail += f": {said}" if said else ""
+    if reason in GEMINI_REFUSED:
+        raise GeminiImageError(f"the model declined this image{detail}", refused=True)
+    raise GeminiImageError(f"the model returned no image{detail}")
+
+
+def _gemini_error(text: str) -> str:
+    """The provider's own words out of an error body ({error: {status, message}})."""
+    try:
+        err = (httpx.Response(200, content=text).json() or {}).get("error") or {}
+    except ValueError:
+        return text[:300]
+    return f"{err.get('status', '')} {err.get('message', '')}".strip()[:300] or text[:300]
+
+
 class FixtureImageClient:
     """Offline stand-in: a small PNG whose color derives from the prompt and seed."""
 
     model_id = "fixture-image-v1"
+    max_references = MAX_REFERENCES
 
-    def __init__(self, delay_s: float = 0.0) -> None:
+    def __init__(
+        self,
+        delay_s: float = 0.0,
+        model_id: str | None = None,
+        max_references: int | None = None,
+    ) -> None:
+        if model_id:
+            self.model_id = model_id
+        if max_references:
+            self.max_references = max_references
         self.delay_s = delay_s
         self.calls: list[tuple[str, str, int, list[str]]] = []
 

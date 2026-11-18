@@ -1214,11 +1214,7 @@ def image_client_from_env() -> ImageClient:
 
     from .imagegen import FixtureImageClient, MiniMaxImageClient
 
-    kind = os.environ.get("DRAMA_IMAGE_CLIENT") or (
-        "minimax"
-        if os.environ.get("DRAMA_MODEL_CLIENT", "fixture").lower() == "mcphub"
-        else "fixture"
-    )
+    kind = _image_kind()
     if kind == "fixture":
         return FixtureImageClient(delay_s=float(os.environ.get("DRAMA_FIXTURE_DELAY_S", "0")))
     if kind == "minimax":
@@ -1228,3 +1224,39 @@ def image_client_from_env() -> ImageClient:
             model=os.environ.get("MCPHUB_IMAGE_MODEL", "minimax-h3-image"),
         )
     raise RuntimeError(f"unknown DRAMA_IMAGE_CLIENT={kind!r}")
+
+
+def _image_kind() -> str:
+    """DRAMA_IMAGE_CLIENT, else minimax with the real text model, else fixture."""
+    import os
+
+    return os.environ.get("DRAMA_IMAGE_CLIENT") or (
+        "minimax"
+        if os.environ.get("DRAMA_MODEL_CLIENT", "fixture").lower() == "mcphub"
+        else "fixture"
+    )
+
+
+def keyframe_providers_from_env() -> dict[str, ImageClient]:
+    """Keyframe providers besides H3, by name: "nano-banana" (Gemini's image models) when
+    GEMINI_API_KEY is set (GEMINI_URL for a gateway, GEMINI_IMAGE_MODEL for the model,
+    default gemini-nano-banana-2.1). With fixture images, a local stand-in, so the choice
+    can be tried offline."""
+    import os
+
+    from .imagegen import (
+        GEMINI_MAX_REFERENCES,
+        GEMINI_MODEL,
+        GEMINI_URL,
+        FixtureImageClient,
+        GeminiImageClient,
+    )
+
+    model = os.environ.get("GEMINI_IMAGE_MODEL", GEMINI_MODEL)
+    if key := os.environ.get("GEMINI_API_KEY"):
+        return {"nano-banana": GeminiImageClient(
+            api_key=key, base_url=os.environ.get("GEMINI_URL", GEMINI_URL), model=model)}  # fmt: skip
+    if _image_kind() == "fixture":
+        return {"nano-banana": FixtureImageClient(model_id=f"fixture-{model}",
+                                                  max_references=GEMINI_MAX_REFERENCES)}  # fmt: skip
+    return {}

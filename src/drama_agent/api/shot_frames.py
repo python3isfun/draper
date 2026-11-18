@@ -59,6 +59,8 @@ class KeyframeRequest(BaseModel):
     note: str = Field("", max_length=500)  # with `prompt`: what was changed
     auto: bool = True
     max_rounds: int = Field(MAX_ROUNDS, ge=1, le=MAX_ROUNDS)
+    # The image provider ("h3" or "nano-banana"); None: the default (the board lists them).
+    provider: str | None = Field(None, max_length=40)
 
 
 class PromptRequest(BaseModel):
@@ -77,6 +79,7 @@ class KeyframeBatchRequest(BaseModel):
     max_rounds: int = Field(MAX_ROUNDS, ge=1, le=MAX_ROUNDS)
     # Plan the sub-shots of shots that have no plan first (the text model), then draw.
     plan: bool = True
+    provider: str | None = Field(None, max_length=40)
 
 
 class SubShotIn(BaseModel):
@@ -119,6 +122,9 @@ class KeyframeBoard(BaseModel):
     package_id: str
     revision_id: str
     image_model: str
+    # The providers a keyframe can be drawn with (name -> model), and the default.
+    providers: dict[str, str] = Field(default_factory=dict)
+    default_provider: str = "h3"
     busy: int
     shots: list[dict[str, Any]]
 
@@ -150,6 +156,8 @@ def register(
             + sum(1 for p in plans if p.busy)
             + sum(1 for r in readings if r.busy),
             shots=shots,
+            providers={name: c.model_id for name, c in runner.providers.items()},
+            default_provider=runner.default_provider,
         )
 
     def _take_or_404(take_id: str) -> ShotTake:
@@ -361,12 +369,16 @@ def register(
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         images = repo.list_images(pkg.package_id, pkg.revision_id)
         reading = _reading(pkg, shot)  # once per request
+        try:
+            options = runner.take_options(req.provider)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
         if req.prompt is not None:
             # Check the draw can start before the prompt is saved, so a refused draw
             # leaves no version behind.
             try:
                 plan_take(pkg, images, takes, plan, sub_shot=req.sub_shot, draws=req.draws,
-                          reading=reading)  # fmt: skip
+                          reading=reading, **options)  # fmt: skip
             except NotReady as exc:
                 raise HTTPException(409, str(exc)) from None
             version = await _save_version(
@@ -397,6 +409,7 @@ def register(
                 auto=req.auto,
                 max_rounds=req.max_rounds,
                 reading=reading,
+                **options,
             )
         except NotReady as exc:
             raise HTTPException(409, str(exc)) from None
@@ -425,7 +438,11 @@ def register(
                 and not (s.shot_id in plans and plans[s.shot_id].busy)
             ]
         )
-        options = {"sub_shot": 1, "draws": req.draws, "max_rounds": req.max_rounds}
+        try:
+            drawn_with = runner.take_options(req.provider)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        options = {"sub_shot": 1, "draws": req.draws, "max_rounds": req.max_rounds, **drawn_with}
         started, planning, skipped = [], [], []
         scene_reading: dict[str, SceneReading | None] = {}
         for shot_id in ids:
@@ -509,6 +526,7 @@ def register(
                         draws=take.draws,
                         max_rounds=take.max_rounds,
                         reading=_reading(pkg, shot),
+                        **runner.take_options(take.provider),  # the same provider
                     )
                 )
         return out

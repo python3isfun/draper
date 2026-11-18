@@ -412,11 +412,13 @@ class Board:
     def __init__(self, tmp_path, text=None):
         self.text = text or FixtureModelClient()
         self.images = FixtureImageClient()
+        # The second keyframe provider: a stand-in for Nano Banana (eight pictures at most).
+        self.banana = FixtureImageClient(model_id="fixture-nano-banana", max_references=8)
         self.media = MediaStore(tmp_path)
         self.repo = InMemoryRepository()
         self.app = create_app(
             repo=self.repo, client=self.text, image_client=self.images, media=self.media,
-            poll_s=0.01,
+            poll_s=0.01, keyframe_providers={"nano-banana": self.banana},
         )  # fmt: skip
 
     def __enter__(self):
@@ -1660,3 +1662,209 @@ def test_a_reading_for_a_cut_or_person_that_isnt_there_is_refused(package):
     ])  # fmt: skip
     with pytest.raises(ValueError, match="has no sub-shot 3"):
         read_output(package, shot.scene_id, {}, pool, out)
+
+
+def _specs(package, plans=(), keyframes=None, images=None, readings=None):
+    from drama_agent.export import Names, fresh_readings
+    from drama_agent.shot_specs import shot_specs
+
+    images = images if images is not None else done_images(package)
+    stored = {p.shot_id: p for p in plans}
+    exported = {i.image_id: f"{i.requirement_id}.jpg" for i in images}
+    fresh = fresh_readings(package, stored, readings or [], images)
+    return shot_specs(package, stored, keyframes or {}, Names(package), fresh, images, exported)
+
+
+def test_shot_specs_are_complete_for_video_production(package):
+    shot = busiest(package)
+    plan = two_cuts(package, shot)
+    frames = {(shot.shot_id, 1): "a_s1.jpg", (shot.shot_id, 2): "a_s2.jpg"}
+    out = _specs(package, [plan], frames)
+    assert out["spec_version"] == 2 and out["max_references"] == 9
+    assert [s["shot_id"] for s in out["shots"]] == [s.shot_id for s in package.shot_list]
+    mine = next(s for s in out["shots"] if s["shot_id"] == shot.shot_id)
+    assert mine["ready"] and mine["not_ready"] == [] and mine["keyframe_first"]
+    spec = mine["spec"]
+    assert spec["action"] == shot.visual_action and spec["camera"]["shot_size"] == shot.framing
+    assert spec["target_duration_ms"] == plan.sub_shots[-1].end_ms
+    assert [s["keyframe"] for s in spec["sub_shots"]] == [
+        "05_assets/shot_keyframes/a_s1.jpg", "05_assets/shot_keyframes/a_s2.jpg"]  # fmt: skip
+    # Keyframe-first: the keyframes, then the faces, then everything else.
+    kinds = [r["kind"] for r in mine["references"]]
+    assert kinds[:2] == ["keyframe", "keyframe"] and kinds[2] == "face"
+    assert [r["sub_shots"] for r in mine["references"][:2]] == [[1], [2]]
+    assert kinds.index("set") == len(kinds) - 1
+    assert all(r["file"].startswith("05_assets/") for r in mine["references"])
+    assert len({r["file"] for r in mine["references"]}) == len(kinds)
+    people = [c for c in mine["cast"] if c["kind"] == "character"]
+    assert {c["entity_id"] for c in people} == set(shot.character_ids)
+    assert any(c["kind"] == "location" for c in mine["cast"])
+
+
+def test_a_shot_without_its_keyframes_is_not_ready(package):
+    shot = busiest(package)
+    out = _specs(package, [two_cuts(package, shot)], {(shot.shot_id, 1): "a_s1.jpg"})
+    mine = next(s for s in out["shots"] if s["shot_id"] == shot.shot_id)
+    assert not mine["ready"] and not mine["keyframe_first"]
+    assert mine["not_ready"] == ["[Shot 2] has no approved keyframe"]
+    # The keyframe it has, then each person's picture, the set, the props, the faces.
+    kinds = [r["kind"] for r in mine["references"]]
+    assert kinds[0] == "keyframe" and kinds[1] in ("look", "face")
+    faces = [i for i, k in enumerate(kinds) if k == "face" and i > 1]
+    assert faces and kinds.index("set") < faces[0]
+
+
+def test_an_unplanned_shot_keeps_the_storyboard_length(package):
+    out = _specs(package)
+    shot = package.shot_list[0]
+    mine = out["shots"][0]
+    assert mine["spec"]["sub_shots"] is None
+    assert mine["spec"]["target_duration_ms"] == shot.duration_ms
+    assert not mine["ready"] and mine["planned_by"] == "single"
+    assert not any(r["kind"] == "keyframe" for r in mine["references"])
+
+
+def test_a_line_over_a_cut_is_spoken_once(package):
+    shot_ids = [s.shot_id for s in package.shot_list]
+    first = next(s for s in package.shot_list if s.dialogue_cues)
+    nxt = next(s for s in package.shot_list if s.episode_id == first.episode_id
+               and s.start_ms > first.start_ms)  # fmt: skip
+    nxt.dialogue_cues = [first.dialogue_cues[-1], *nxt.dialogue_cues]
+    out = {s["shot_id"]: s for s in _specs(package)["shots"]}
+    assert len(out) == len(shot_ids)
+    cue = first.dialogue_cues[-1].dialogue_id
+    assert any(d["id"] == cue for d in out[first.shot_id]["spec"]["dialogue"])
+    assert all(d["id"] != cue for d in out[nxt.shot_id]["spec"]["dialogue"])
+    assert "over the cut" in out[nxt.shot_id]["spec"]["continuity_notes"]
+    assert [c["id"] for c in out[nxt.shot_id]["spec"]["carried"]] == [cue]
+
+
+def test_shot_specs_use_the_readings_pictures_and_notes(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        sid = first_shot(b)
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        [take] = b.wait() and b.takes(sid)
+        b.http.post(f"/v1/shot-takes/{take['take_id']}/approve", json={"n": 0})
+        z = b.zip()
+        specs = json.loads(member(z, "03_storyboard/shot_specs.json"))
+        mine = next(s for s in specs["shots"] if s["shot_id"] == sid)
+        names = set(z.namelist())
+        root = next(iter(names)).split("/")[0]
+        # Every file it names is in the export.
+        assert all(f"{root}/{r['file']}" in names for r in mine["references"])
+        assert mine["references"][0]["kind"] == "keyframe"
+        assert any(r["kind"] == "chosen" for r in mine["references"])
+        notes = [c["note"] for c in mine["cast"] if c["kind"] == "character"]
+        assert notes and all(n.startswith("Wearing:") or not n for n in notes)
+        assert mine["spec"]["sub_shots"][0]["now"]
+
+
+def test_keyframes_are_drawn_at_about_four_megapixels(package):
+    from drama_agent.shot_frames import frame_size
+
+    assert frame_size(package) == "1536x2720"
+    take = plan_take(package, done_images(package), [], single_plan(package, busiest(package)))
+    assert take.size == "1536x2720" and take.provider == "h3"
+    w, h = (int(x) for x in take.size.split("x"))
+    assert w % 32 == 0 and h % 32 == 0
+
+
+def test_a_take_can_be_drawn_with_nano_banana(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        board = b.board()
+        assert board["providers"] == {
+            "h3": "fixture-image-v1",
+            "nano-banana": "fixture-nano-banana",
+        }
+        assert board["default_provider"] == "h3"
+        sid = first_shot(b)
+        before = len(b.images.calls)  # the design pictures
+        r = b.http.post(f"{b.base}/{sid}", json={"draws": 1, "provider": "nano-banana"})
+        assert r.status_code == 202, r.text
+        assert r.json()["provider"] == "nano-banana" and len(r.json()["references"]) <= 8
+        [take] = b.wait() and b.takes(sid)
+        assert take["results"][0]["model"] == "fixture-nano-banana"
+        assert b.banana.calls and len(b.images.calls) == before
+        # A provider the server doesn't have is refused, naming the ones it has.
+        r = b.http.post(f"{b.base}/{sid}", json={"draws": 1, "provider": "dall-e"})
+        assert r.status_code == 422 and "nano-banana" in r.json()["detail"]
+
+
+def test_nano_banana_takes_eight_pictures(package):
+    shot = busiest(package)
+    many = plan_take(package, done_images(package), [], single_plan(package, shot))
+    eight = plan_take(package, done_images(package), [], single_plan(package, shot),
+                      provider="nano-banana", max_references=2)  # fmt: skip
+    assert len(eight.references) == 2 and eight.references == many.references[:2]
+
+
+def test_the_gemini_request_and_its_answers():
+    import base64
+
+    import httpx
+
+    from drama_agent.imagegen import (
+        GeminiImageClient,
+        GeminiImageError,
+        Reference,
+        gemini_aspect,
+        gemini_image,
+        gemini_size,
+    )
+
+    assert gemini_aspect("1536x2720") == "9:16" and gemini_size("1536x2720") == "2K"
+    assert gemini_aspect("2048x2048") == "1:1" and gemini_size("1024x1024") == "1K"
+    sent = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent["url"] = str(request.url)
+        sent["key"] = request.headers["x-goog-api-key"]
+        sent["body"] = json.loads(request.content)
+        png = base64.b64encode(b"\x89PNG fake").decode()
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [
+            {"inlineData": {"mimeType": "image/png", "data": png}}]}}]})  # fmt: skip
+
+    client = GeminiImageClient("k", transport=httpx.MockTransport(handler))
+    refs = [Reference("a.jpg", b"aaa"), Reference("b.png", b"bbb", "image/png")]
+    out = asyncio.run(client.generate("<Picture 2> is <Subject 1>. <picture 1> stays.",
+                                      "1536x2720", 7, refs))  # fmt: skip
+    assert out.content_type == "image/png" and out.data == b"\x89PNG fake"
+    assert sent["url"].endswith("/models/gemini-nano-banana-2.1:generateContent")
+    assert sent["key"] == "k"
+    parts = sent["body"]["contents"][0]["parts"]
+    assert [p.get("text") for p in parts[::2][:2]] == ["Picture 1:", "Picture 2:"]
+    assert parts[3]["inlineData"]["mimeType"] == "image/png"
+    assert parts[-1]["text"] == "Picture 2 is <Subject 1>. Picture 1 stays."
+    config = sent["body"]["generationConfig"]
+    assert config["imageConfig"] == {"aspectRatio": "9:16", "imageSize": "2K"}
+    assert config["seed"] == 7 and config["responseModalities"] == ["IMAGE"]
+    with pytest.raises(Exception, match="at most 8"):
+        asyncio.run(
+            client.generate("x", "1536x2720", 1, [Reference(str(i), b"x") for i in range(9)])
+        )
+    # A refusal says so; an empty answer gives the model's reason.
+    with pytest.raises(GeminiImageError) as e:
+        gemini_image({"candidates": [{"finishReason": "IMAGE_SAFETY", "content": {"parts": []}}]})
+    assert e.value.refused and "IMAGE_SAFETY" in str(e.value)
+    with pytest.raises(GeminiImageError) as e:
+        gemini_image({"candidates": [{"finishReason": "STOP",
+                                      "content": {"parts": [{"text": "I can't"}]}}]})  # fmt: skip
+    assert not e.value.refused and "I can't" in str(e.value)
+    with pytest.raises(GeminiImageError, match="blocked"):
+        gemini_image({"promptFeedback": {"blockReason": "OTHER"}})
+
+
+def test_a_missing_script_line_keeps_the_shot_from_ready(package):
+    shot = busiest(package)
+    from drama_agent.models.storyboard import DialogueCue
+
+    cue = shot.dialogue_cues[0] if shot.dialogue_cues else None
+    shot.dialogue_cues = [*shot.dialogue_cues, DialogueCue(
+        dialogue_id="dl_gone", start_ms=shot.start_ms, end_ms=shot.start_ms + 500)]  # fmt: skip
+    frames = {(shot.shot_id, 1): "a_s1.jpg"}
+    out = _specs(package, [single_plan(package, shot)], frames)
+    mine = next(s for s in out["shots"] if s["shot_id"] == shot.shot_id)
+    assert not mine["ready"] and "dialogue dl_gone is not in the script" in mine["not_ready"]
+    assert cue is None or any(d["id"] == cue.dialogue_id for d in mine["spec"]["dialogue"])

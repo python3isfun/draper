@@ -8,7 +8,7 @@
  */
 
 const frames = { key: null, view: null, error: "", notes: [], timer: null, loading: false,
-  draws: 2, rounds: 3, directions: {}, prompts: {}, plans: {}, episode: "all",
+  draws: 2, rounds: 3, provider: null, directions: {}, prompts: {}, plans: {}, episode: "all",
   sel: {}, notes2: {}, compare: {}, diffs: new Map() };
 
 const framesKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
@@ -113,6 +113,7 @@ function renderFrameTake(take, takes = []) {
         : h("span", { class: "chip warn" }, "no draw passed: your call")),
       take.direction && h("span", { class: "chip" }, `“${take.direction}”`),
       take.prompt_version && h("span", { class: "chip", title: "The prompt version this take draws" }, `prompt v${take.prompt_version}`),
+      take.provider && take.provider !== "h3" && h("span", { class: "chip", title: "The image provider that drew this take" }, providerName(take.provider)),
       take.prompt_source === "user" && h("span", { class: "chip" }, "your prompt"),
       take.warnings && take.warnings.length > 0 && h("span", { class: "chip warn", title: take.warnings.join("\n") }, `${take.warnings.length} rule finding${take.warnings.length > 1 ? "s" : ""}`),
       take.prompt_source === "template" && h("span", { class: "chip warn" }, "template prompt"),
@@ -136,6 +137,9 @@ function renderFrameTake(take, takes = []) {
 }
 
 // Word-level diff of two prompts (longest common subsequence) as [kind, text] parts, kind
+/** A provider's name as shown. */
+const providerName = (name) => ({ h3: "MiniMax H3", "nano-banana": "Nano Banana" })[name] || name;
+
 // "=", "-" or "+". Cached per pair of texts: the board redraws every 2 s while busy.
 function wordDiff(a, b) {
   const key = `${a}\u0000${b}`;
@@ -188,7 +192,7 @@ function renderPromptVersions(pkg, shot, sub) {
     if (out && !frames.error) { delete frames.prompts[key]; delete frames.notes2[key]; frames.sel[key] = out.v; renderMain(); }
   } }, `Save as v${nextV}`);
   const drawBtn = h("button", { type: "button", class: "btn small", onclick: async (e) => {
-    const body = { revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws };
+    const body = { revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws, provider: frames.provider };
     if (edited()) Object.assign(body, { prompt: box.value, based_on: sel ? sel.v : null, note: frames.notes2[key] || "" });
     else body.prompt_version = sel.v;
     await frameAction(url, e.currentTarget, body);
@@ -238,7 +242,7 @@ function renderNewFrameTake(pkg, shot, sub) {
     h("div", { class: "new-take" }, input,
       h("button", { type: "button", class: "btn small", title: "The model writes a new prompt version and draws it", onclick: async (e) => {
         const direction = (frames.directions[key] || "").trim();
-        await frameAction(url, e.currentTarget, { revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws, max_rounds: frames.rounds, direction: direction || null });
+        await frameAction(url, e.currentTarget, { revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws, max_rounds: frames.rounds, direction: direction || null, provider: frames.provider });
         if (!frames.error) { frames.directions[key] = ""; renderMain(); }
       } }, "New take")),
   );
@@ -449,8 +453,13 @@ function renderKeyframes(pkg) {
     h("div", { class: "design-row" },
       h("label", {}, "Draws ", numberSelect(frames.draws, 4, (n) => { frames.draws = n; }, "Draws per round")),
       h("label", {}, " Rounds ", numberSelect(frames.rounds, 3, (n) => { frames.rounds = n; }, "Automatic rounds")),
+      // Another image provider for keyframes (e.g. Nano Banana), when the server has one.
+      v && Object.keys(v.providers || {}).length > 1 && h("label", {}, " Drawn with ",
+        h("select", { "aria-label": "Image provider", title: "The image model that draws new keyframe takes", onchange: (e) => { frames.provider = e.target.value; } },
+          Object.entries(v.providers).map(([name, model]) =>
+            h("option", { value: name, title: model, selected: (frames.provider || v.default_provider) === name }, providerName(name))))),
       h("button", { type: "button", class: "btn", onclick: async (e) => {
-        const out = await frameAction(framesBase(pkg), e.currentTarget, { revision_id: pkg.revision_id, draws: frames.draws, max_rounds: frames.rounds, plan: true });
+        const out = await frameAction(framesBase(pkg), e.currentTarget, { revision_id: pkg.revision_id, draws: frames.draws, max_rounds: frames.rounds, plan: true, provider: frames.provider });
         if (out) frames.notes = out.skipped.map((s) => `${s.shot_id}: ${s.reason}`);
         renderMain();
       } }, "Plan cuts and draw first keyframes for every shot"),

@@ -216,6 +216,9 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
 | `DRAMA_IMAGE_CLIENT` | follows `DRAMA_MODEL_CLIENT` | `minimax` (real) or `fixture` (local placeholder images) |
 | `MCPHUB_IMAGE_URL` | `https://api.mcphub.com/api/v3/gpu-images` | image route (note: not under `/v1`) |
 | `MCPHUB_IMAGE_MODEL` | `minimax-h3-image` | image model |
+| `GEMINI_API_KEY` / `GEMINI_URL` | — / `https://generativelanguage.googleapis.com/v1beta` | enables Nano Banana as a second keyframe provider (`nano-banana`); a gateway serving the Gemini API can stand in for the URL. With fixture images, a local stand-in is offered instead |
+| `GEMINI_IMAGE_MODEL` | `gemini-nano-banana-2.1` | the Gemini image model for keyframes |
+| `DRAMA_KEYFRAME_PROVIDER` | `h3` | the keyframe provider when a request names none (`h3` or `nano-banana`) |
 
 The image route needs an MCPHub key from a `newsbreak.com` account; it is sent as
 `X-API-Key`.
@@ -293,7 +296,11 @@ picture per cut, so characters stay consistent and each cut starts as planned:
    nine pictures allow. From sub-shot 2 on, `<Picture 1>` is the approved keyframe of the
    sub-shot before, so light, wardrobe state and set dressing carry across the cut.
 3. **Write, draw, check**: the text model writes an H3 edit prompt for the sub-shot's
-   first frame; 1 to 4 draws at the video's aspect ratio (~16 MP); a vision judge checks
+   first frame; 1 to 4 draws at the video's aspect ratio at about 4 MP (1536x2720 for 9:16:
+   several times the video's resolution, and light enough that nine pictures fit one
+   request), with MiniMax H3 or, chosen per take ("Drawn with" on the board, `provider` in
+   the API), Nano Banana (Gemini's image models, at most eight pictures: the last are
+   dropped); a vision judge checks
    each draw item by item: each person's face and wardrobe, people count, placement,
    framing, action, set, props, defects, stray text, style. Each failed item costs points
    (major 25, minor 8); a draw passes with no failed major item and a score of 80 or more.
@@ -355,7 +362,34 @@ the shot before it in the scene, when there is one, so light, set dressing and e
 carry across the cut. Each prompt version keeps the pictures it was written for. The export's
 `sub_shots.json` gives each cut's `now`: every person's state and their chosen picture.
 
-**The sub-shot spec is the contract for video production.** Draper runs first: its plan
+**The shot specs are the contract for video production.**
+`03_storyboard/shot_specs.json` (`spec_version` 2) gives, per shot, everything dramer makes
+the clip from, so dramer stores and sends it instead of working it out again:
+
+- `spec`, in dramer's shape: `summary`, `action`, `camera`, `lighting` (from the set sheet),
+  `target_duration_ms` (the plan's clip, or the storyboard's length for an unplanned shot),
+  `dialogue` (each line once: a line that runs over a cut is spoken in the shot it starts in,
+  and the next shot's `continuity_notes` says it carries over), `sound_notes`,
+  `continuity_notes`, and `sub_shots` (the cuts below, each `keyframe` a path, each `now` the
+  people's states; null for a shot nobody planned that has no keyframe);
+- `references`: the pictures to send, in priority order, each with `file` (a path from the
+  export's root), `kind` (keyframe, chosen, look, face, set, prop), `entity_id`, `name`,
+  `sub_shots` (the cuts a keyframe or a chosen picture is for) and `likeness`. A shot whose
+  every cut has an approved keyframe is `keyframe_first`: its keyframes, then the faces (to
+  hold each likeness), the props, each person's picture and the set. Any other shot: its
+  keyframes, each person's picture (the reading's choice, else the storyboard look), the set,
+  the props, the pictures chosen for later cuts, then the faces. Keyframes are references the
+  video matches, not start frames. A consumer with a smaller limit than `max_references`
+  drops from the end;
+- `cast`: each person, the place and each prop with a note (a person as the reading found
+  them in their first cut, else their storyboard look);
+- `ready`, and `not_ready` saying why not: the plan's problems, each cut with no approved
+  keyframe, and any line the shot list cues that the script no longer has;
+- `spec.carried`: the lines spoken in the shot before that run over the cut into this one
+  (also noted in `continuity_notes`).
+
+**The sub-shot spec** (`05_assets/shot_keyframes/sub_shots.json`, `spec_version` 1) is the
+earlier form, kept for older importers. Draper runs first: its plan
 says how each shot is cut, and video production (dramer) writes its prompt from it rather
 than re-timing the shot. `05_assets/shot_keyframes/sub_shots.json` (`spec_version` 1) gives,
 per shot, `clip_ms` (render exactly this long: H3 takes whole seconds from 4 to 15; the
@@ -365,7 +399,8 @@ default is the storyboard's duration rounded up), `clean` and `problems`, and pe
 (speaker, line, start and end in the clip, and `where`: on screen, off screen left/right,
 or voice) and `keyframe` (the approved first frame, or null). The video prompt then has one
 `[Shot N]` per sub-shot at its timecode, with that sub-shot's framing, positions, action and
-lines, and cites its keyframe as the first frame of `[Shot N]`. A clean spec:
+lines, and cites its keyframe as the reference frame of `[Shot N]` (a picture the cut
+matches, not a start frame). A clean spec:
 
 - the clip is whole seconds from 4 to 15, and every line lies wholly inside it (a
   storyboard shot longer than 15 s is flagged: split it in the storyboard);
@@ -400,7 +435,7 @@ team one file to produce and shoot from. Inside a folder named after the title a
 | `00_README.md` | Title, logline, counts, hard-check status, and a guide to the folders |
 | `01_story/` | Story bible: synopsis, characters (goals, relationships, arcs), locations, props, episode outline |
 | `02_script/` | One screenplay-style script per episode (scene headings, action, CHARACTER cues, V.O.) + JSON |
-| `03_storyboard/` | `shot_list.csv` (one row per shot: timing, framing, camera, who and what is on screen, dialogue with times, sound, continuity, asset IDs), `storyboard.md`, `dialogue_schedule.csv`, JSON |
+| `03_storyboard/` | `shot_list.csv` (one row per shot: timing, framing, camera, who and what is on screen, dialogue with times, sound, continuity, asset IDs), `storyboard.md`, `dialogue_schedule.csv`, JSON, and `shot_specs.json` (per shot, its complete spec for video production with its references in order) |
 | `04_design/` | Cast, set and prop sheets (Markdown + JSON) |
 | `05_assets/` | Asset requirements (CSV + JSON) and the newest finished reference image per deliverable, with `index.csv` (prompt, seed, size, model, `likeness`, and `source`: generated or imported); `shot_keyframes/`: the approved keyframe of each sub-shot (cut) of each shot, with `index.csv` (timecode, framing, action, references, seed, check result, score, failed items, likeness, motion, prompt) and `sub_shots.json` (every shot's cut plan) |
 | `06_qa/` | Hard checks and creative review |

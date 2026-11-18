@@ -50,6 +50,7 @@ from .shot_frames import (
 from .shot_reading import SceneReading
 from .shot_reading import fingerprint as reading_fingerprint
 from .shot_reading import fresh as fresh_reading
+from .shot_specs import SHOT_SPECS_PATH, shot_specs
 
 MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".webm"}
 
@@ -694,11 +695,16 @@ def build_export(
         if frame_rows:
             text("05_assets/shot_keyframes/index.csv", _csv(frame_rows, KEYFRAME_COLUMNS))
         stored = {p.shot_id: p for p in plans or []}
+        # Each scene's reading, where it is fresh: worked out once for both files.
+        fresh = fresh_readings(pkg, stored, readings or [], images)
         if keyframes or plans:
             text(
                 "05_assets/shot_keyframes/sub_shots.json",
-                _json(sub_shot_spec(pkg, stored, files, n, readings or [], images, exported)),
-            )
+                _json(sub_shot_spec(pkg, stored, files, n, readings or [], images, exported,
+                                    fresh)),
+            )  # fmt: skip
+        # Each shot's complete spec for video production, with its references in order.
+        text(SHOT_SPECS_PATH, _json(shot_specs(pkg, stored, files, n, fresh, images, exported)))
 
         # Design takes: the chosen take per deliverable, and every other option
         slot_names = {
@@ -857,6 +863,7 @@ def sub_shot_spec(
     readings: list[SceneReading] | None = None,
     images: list[GeneratedImage] | None = None,
     exported: dict[str, str] | None = None,
+    fresh: dict[str, SceneReading | None] | None = None,
 ) -> dict[str, Any]:
     """The sub-shot spec of every shot: the contract video production writes its prompt
     from. Per shot, the clip's length (render exactly this), and per sub-shot (`[Shot N]`
@@ -866,13 +873,9 @@ def sub_shot_spec(
     says whether the plan passes every rule of check_plan; `problems` lists what doesn't.
     Where the scene has a fresh reading (shot_reading.py), each sub-shot's `now` gives each
     person on screen their state at that moment and the design picture chosen for it."""
-    by_scene = {r.scene_id: r for r in readings or []}
-    fresh_of = {
-        scene_id: fresh_reading(
-            by_scene.get(scene_id), reading_fingerprint(pkg, scene_id, stored, images or [])
-        )
-        for scene_id in {s.scene_id for s in pkg.shot_list}
-    }
+    fresh_of = (
+        fresh if fresh is not None else fresh_readings(pkg, stored, readings or [], images or [])
+    )
 
     def now(shot_id: str, scene_id: str, sub: SubShot) -> dict[str, Any]:
         reading = fresh_of.get(scene_id)
@@ -921,6 +924,22 @@ def sub_shot_spec(
             ],
         })  # fmt: skip
     return {"spec_version": SPEC_VERSION, "shots": shots}
+
+
+def fresh_readings(
+    pkg: ProductionPackage,
+    stored: dict[str, ShotPlan],
+    readings: list[SceneReading],
+    images: list[GeneratedImage],
+) -> dict[str, SceneReading | None]:
+    """Each scene's reading where it is fresh (the plans and picks it read are unchanged)."""
+    by_scene = {r.scene_id: r for r in readings}
+    return {
+        scene_id: fresh_reading(
+            by_scene.get(scene_id), reading_fingerprint(pkg, scene_id, stored, images)
+        )
+        for scene_id in {s.scene_id for s in pkg.shot_list}
+    }
 
 
 def _ref_name(ref_id: str, exported: dict[str, str], by_ref: dict[str, str]) -> str:
@@ -976,7 +995,9 @@ def readme_md(
                 "| `03_storyboard/` | director, DP, editor | `shot_list.csv` (one row per shot: "
                 "timing, framing, camera, who and what is on screen, dialogue, sound, continuity), "
                 "`storyboard.md` (the same, readable), `dialogue_schedule.csv` (every line with "
-                "its start and end time) |"
+                "its start and end time), `shot_specs.json` (for video production: each shot's "
+                "complete spec, its reference pictures in order, its cast notes, and whether it "
+                "is ready) |"
             ),
             (
                 "| `04_design/` | casting, wardrobe, production design, props | Cast, set and prop "

@@ -58,6 +58,7 @@ from ..images import (
     draws_for,
     image_client_from_env,
     import_pick,
+    keyframe_providers_from_env,
     latest_images,
     make_thumb,
     package_has_uploads,
@@ -304,6 +305,8 @@ def create_app(
     retry_base_s: float = 5.0,
     media: MediaStore | None = None,
     image_client: ImageClient | None = None,
+    keyframe_providers: dict[str, ImageClient] | None = None,
+    keyframe_provider: str = "h3",
 ) -> FastAPI:
     """Build the API. `workers` in-process job workers start with the app (lifespan);
     with workers=0 jobs are only enqueued, for a separate `python -m drama_agent.worker`.
@@ -319,7 +322,9 @@ def create_app(
     image_wakeup = asyncio.Event()
     experiments = ExperimentRunner(repo, media, images, orchestrator.client)
     # Keyframes share the Experiment tab's GPU lock: one render at a time from this process.
-    keyframes = ShotFrameRunner(repo, media, images, orchestrator.client, gpu=experiments._gpu)
+    # Keyframes can also be drawn with other providers (e.g. Nano Banana), chosen per take.
+    keyframes = ShotFrameRunner(repo, media, images, orchestrator.client, gpu=experiments._gpu,
+                                providers=keyframe_providers, default_provider=keyframe_provider)  # fmt: skip
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -1305,6 +1310,8 @@ def create_app_from_env() -> FastAPI:
         lease_s=float(settings["lease_s"]),
         media=media_from_env(),
         image_client=image_client_from_env(),
+        keyframe_providers=keyframe_providers_from_env(),
+        keyframe_provider=os.environ.get("DRAMA_KEYFRAME_PROVIDER", "h3"),
     )
 
 

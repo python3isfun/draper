@@ -39,6 +39,7 @@ shows a real person's likeness (content rule 3).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import logging
 import random
@@ -82,6 +83,7 @@ OffSide = Literal["left", "right"]
 MAX_ROUNDS = 3  # automatic rounds before a person decides
 MAX_DRAWS = 4
 DEFAULT_DRAWS = 2
+DEFAULT_PROVIDER = "h3"  # MiniMax H3 on MCPHub's GPU route; "nano-banana" when configured
 PASS_SCORE = 80
 MAJOR_PENALTY = 25
 MINOR_PENALTY = 8
@@ -254,6 +256,8 @@ class ShotTake(BaseModel):
     warnings: list[str] = Field(default_factory=list)  # H3 rule findings on its prompt
     references: list[FrameRef] = Field(default_factory=list)
     size: str
+    # The image provider that draws it: "h3" (MiniMax H3) or "nano-banana" (Gemini).
+    provider: str = DEFAULT_PROVIDER
     draws: int = DEFAULT_DRAWS
     seeds: list[int] = Field(default_factory=list)
     results: list[FrameDraw] = Field(default_factory=list)
@@ -363,10 +367,26 @@ def intimate_scene(pkg: ProductionPackage, shot: Shot) -> str | None:
     return level if level in ("implied", "simulated") else None
 
 
+# Keyframes are drawn at about 4 MP, both sides multiples of 32: several times the video's
+# resolution (512-768 px short edge), and a quarter of H3's 16 MP, so nine of them stay well
+# under the 24 MiB a request takes and each draw is quicker.
+KEYFRAME_SIZES: dict[str, str] = {
+    "9:16": "1536x2720",
+    "16:9": "2720x1536",
+    "1:1": "2048x2048",
+    "3:4": "1728x2304",
+    "4:3": "2304x1728",
+    "2:3": "1664x2496",
+    "3:2": "2496x1664",
+    "21:9": "3136x1344",
+}
+
+
 def frame_size(pkg: ProductionPackage) -> str:
-    """The video's aspect ratio at H3's ~16 MP (vertical 9:16 unless the brief says else)."""
+    """The keyframe size: the video's aspect ratio at about 4 MP (vertical 9:16 unless the
+    brief says else)."""
     m = re.search(r"(\d+)\s*:\s*(\d+)", pkg.asset_requirements.style_brief.aspect_ratio or "")
-    return SIZES.get(f"{m.group(1)}:{m.group(2)}" if m else "", SIZES["9:16"])
+    return KEYFRAME_SIZES.get(f"{m.group(1)}:{m.group(2)}" if m else "", KEYFRAME_SIZES["9:16"])
 
 
 @dataclass
@@ -412,7 +432,8 @@ class ShotPicks:
 
 def shot_picks(pkg: ProductionPackage, images: list[GeneratedImage], shot: Shot) -> ShotPicks:
     names = _names(pkg)
-    reqs = {r.requirement_id: r for r in pkg.asset_requirements.items}
+    reqs = _cached(pkg, "requirements",
+                   lambda: {r.requirement_id: r for r in pkg.asset_requirements.items})  # fmt: skip
     wanted = [reqs[r] for r in shot.asset_requirement_ids if r in reqs]
     missing: list[tuple[str | None, str]] = []
 
@@ -917,11 +938,14 @@ def plan_take(
     auto: bool = True,
     max_rounds: int = MAX_ROUNDS,
     reading: SceneReading | None = None,
+    provider: str = DEFAULT_PROVIDER,
+    max_references: int = MAX_REFERENCES,
 ) -> ShotTake:
     """A new take on a sub-shot's keyframe: written by the model (steered by `direction`,
     and building on the newest take's prompt and check), or drawn from a prompt `version`
     as it is. Without `seeds`, a version is drawn with the newest take's seeds, so the two
-    compare draw for draw."""
+    compare draw for draw. `provider` draws it, taking at most `max_references` pictures:
+    a written take drops the last (the faces come last); a version citing more is refused."""
     shot = shot_of(pkg, plan.shot_id)
     shot_id = shot.shot_id
     if is_busy(takes, shot_id, sub_shot):
@@ -948,6 +972,11 @@ def plan_take(
             elif r.ref_id not in done:
                 raise NotReady(f"prompt v{version.v} names a picture that is gone ({r.role})")
             refs.append(r)
+    if len(refs) > max_references:
+        if version is not None:
+            raise NotReady(f"prompt v{version.v} cites {len(refs)} pictures; {provider} takes "
+                           f"{max_references}")  # fmt: skip
+        refs = refs[:max_references]
     if version is not None and (version.sub_shot, version.spec) != (sub_shot, sub):
         raise NotReady(f"prompt v{version.v} was written for an older plan of this sub-shot")
     draws = max(1, min(draws, MAX_DRAWS))
@@ -974,6 +1003,7 @@ def plan_take(
         warnings=list(version.findings) if version else [],
         references=refs,
         size=frame_size(pkg),
+        provider=provider,
         draws=draws,
         seeds=_seeds(seeds, draws),
         direction=(direction or "").strip() or None,
@@ -1694,15 +1724,34 @@ class ShotFrameRunner:
         images: ImageClient,
         text_client: Any,
         gpu: asyncio.Lock | None = None,
+        providers: dict[str, ImageClient] | None = None,
+        default_provider: str = DEFAULT_PROVIDER,
     ) -> None:
         self.repo = repo
         self.media = media
         self.images = images
+        # Every provider a keyframe can be drawn with: H3 always, others when configured.
+        self.providers: dict[str, ImageClient] = {DEFAULT_PROVIDER: images, **(providers or {})}
+        self.default_provider = (
+            default_provider if default_provider in self.providers else DEFAULT_PROVIDER
+        )
         self.text = text_client
         self._gpu = gpu or asyncio.Lock()
         self._planning = asyncio.Semaphore(4)  # sub-shot plans written at once
         self._reading_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+
+    def provider(self, name: str | None) -> tuple[str, ImageClient]:
+        """A provider by name (None: the default), or ValueError naming the ones there are."""
+        name = name or self.default_provider
+        if name not in self.providers:
+            raise ValueError(f"no image provider {name!r}; there are: {', '.join(self.providers)}")
+        return name, self.providers[name]
+
+    def take_options(self, name: str | None) -> dict[str, Any]:
+        """plan_take's provider arguments for a provider by name."""
+        name, client = self.provider(name)
+        return {"provider": name, "max_references": client.max_references}
 
     def recover(self) -> int:
         error = "Interrupted by a server restart. Retry to run it again."
@@ -1986,7 +2035,9 @@ class ShotFrameRunner:
             ),
             "pictures": pictures,
             **shot_context(pkg, shot),
-            "aspect": next((k for k, v in SIZES.items() if v == take.size), take.size),
+            "aspect": next(
+                (k for k, v in {**SIZES, **KEYFRAME_SIZES}.items() if v == take.size), take.size
+            ),
             "previous_prompt": take.previous_prompt,
             "fixes": take.fixes,
             "direction": take.direction,
@@ -2110,9 +2161,15 @@ class ShotFrameRunner:
 
     async def _draw(self, take: ShotTake, n: int, refs: list[Reference]) -> FrameDraw:
         seed = take.seeds[n] if n < len(take.seeds) else random.randint(1, 2**31 - 1)
+        client = self.providers.get(take.provider)
+        if client is None:
+            return FrameDraw(n=n, seed=seed, status="failed",
+                             error=f"the image provider {take.provider!r} isn't configured")  # fmt: skip
         try:
-            async with self._gpu:
-                result = await self.images.generate(take.prompt, take.size, seed, refs)
+            # The GPU lock is H3's (shared with the Experiment tab); a remote API needs none.
+            lock = self._gpu if take.provider == DEFAULT_PROVIDER else contextlib.nullcontext()
+            async with lock:
+                result = await client.generate(take.prompt, take.size, seed, refs)
         except Exception as exc:
             log.warning("shot draw %s/%d failed", take.take_id, n, exc_info=True)
             return FrameDraw(n=n, seed=seed, status="failed", error=str(exc)[:300])
@@ -2122,7 +2179,7 @@ class ShotFrameRunner:
         thumb = await asyncio.to_thread(make_thumb, self.media, rel)
         view = await asyncio.to_thread(judge_view, self.media, rel)
         return FrameDraw(n=n, seed=seed, file=rel, thumb=thumb, view=view,
-                         content_type=result.content_type, model=self.images.model_id)  # fmt: skip
+                         content_type=result.content_type, model=client.model_id)  # fmt: skip
 
     def _write_file(self, rel: str, data: bytes) -> None:
         path = self.media.path(rel)
