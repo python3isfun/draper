@@ -200,7 +200,8 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
   template. Regenerate reuses the written prompt with a new seed. Each image shows its prompt
   and who wrote it, and the writer's call appears in the job's Activity view.
 - **Running it:** images are generated in the background one at a time, as the GPU server
-  works, at about 16 MP (about 10 s each when nobody else is queued). `draft=true` makes
+  works, at about 4 MP (1728x2304 faces, 1536x2720 looks, 2304x1728 sets, 2048x2048 plans
+  and props; images made before keep their size). `draft=true` makes
   about 1024 px images, much faster. Progress is live in the Assets tab; interrupted images
   resume after a restart. Images never block or fail a job.
 - **Versions:** Regenerate (`POST /v1/generated-images/{id}/regenerate`) makes a new
@@ -235,7 +236,7 @@ anything else is drawn, so the team chooses from options instead of accepting on
    sheets leave open; they never change stated facts, must-keep items, or any age,
    gender or heritage the story gives. Each take is drawn N times (different seeds).
 2. **Pick** (`POST /v1/generated-images/{id}/select`): one image per item. A draft pick
-   is re-rendered at full size (~16 MP) as an *edit of the draft* ("fully preserved"),
+   is re-rendered at full size (~4 MP) as an *edit of the draft* ("fully preserved"),
    which keeps the face; re-running the prompt at a new size drew a different person. The
    full-size image takes over the pick when it's done (if you haven't picked another
    image meanwhile). Picking that draft again later picks its full-size render; if the

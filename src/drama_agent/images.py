@@ -39,15 +39,18 @@ log = logging.getLogger(__name__)
 
 GENERATED_TYPES = ("character_identity", "character_look", "location", "prop")
 
-# Deliverable view -> (full size, draft size). The model is tuned for ~16 MP images.
+# Deliverable view -> (full size, draft size). Full size is about 4 MP (both sides multiples
+# of 32), as for keyframes: H3 is tuned for ~16 MP, but 4 MP is several times what the video
+# needs, draws faster, and keeps nine reference pictures well under 24 MiB a request.
+# Drafts are about 1 MP.
 SIZES: dict[str, tuple[str, str]] = {
-    "front face": ("3552x4736", "768x1024"),
-    "full body": ("3072x5472", "576x1024"),
-    "wide": ("4736x3552", "1024x768"),
-    "top-down": ("4096x4096", "1024x1024"),
-    "detail": ("4096x4096", "1024x1024"),
+    "front face": ("1728x2304", "768x1024"),
+    "full body": ("1536x2720", "576x1024"),
+    "wide": ("2304x1728", "1024x768"),
+    "top-down": ("2048x2048", "1024x1024"),
+    "detail": ("2048x2048", "1024x1024"),
 }
-DEFAULT_SIZE = ("4096x4096", "1024x1024")
+DEFAULT_SIZE = ("2048x2048", "1024x1024")
 
 ASPECTS = {
     "front face": "3:4 portrait",
@@ -1187,7 +1190,7 @@ def make_thumb(
     media: MediaStore, rel: str, *, px: int = 512, suffix: str = "_thumb", quality: int = 4
 ) -> str | None:
     """A JPEG with a `px` long edge next to a stored image (default: the UI's 512 px
-    thumbnail; full-size images are ~16 MP). Blocking (runs ffmpeg); None without ffmpeg or
+    thumbnail; full-size images are ~4 MP). Blocking (runs ffmpeg); None without ffmpeg or
     when the image can't be read."""
     if not ffmpeg_available():
         return None

@@ -137,7 +137,7 @@ def test_references_keep_people_places_and_props_consistent(package):
 
     props = [i for k, i in p.items() if k.startswith("ar_prop_prop_photo")]
     assert props[0].reference_ids == [] and props[1].reference_ids == [props[0].image_id]
-    assert face.size == "3552x4736" and look.size == "3072x5472"  # official 16 MP sizes
+    assert face.size == "1728x2304" and look.size == "1536x2720"  # about 4 MP
     assert plan_images(package, [], draft=True)[0].size == "768x1024"
 
 

@@ -96,14 +96,14 @@ def test_picking_a_draft_renders_it_full_size_and_moves_the_selection(tmp_path):
         v = s.wait()
         frank = [i for i in v["images"] if key(i) == FRANK_FACE]
         final = next(i for i in frank if i["finalizes"] == draft["image_id"])
-        assert final["size"] == "3552x4736" and final["seed"] == draft["seed"]
+        assert final["size"] == "1728x2304" and final["seed"] == draft["seed"]
         # An edit of the picked draft (keeps the face), not a re-render of its prompt.
         assert final["status"] == "done" and final["reference_ids"] == [draft["image_id"]]
         assert final["prompt"].startswith(
             "The front face photograph in <Picture 1> is <Subject 1>."
         )
         assert "<Subject 1> is fully preserved." in final["prompt"]
-        call = next(c for c in s.images.calls if c[1] == "3552x4736")
+        call = next(c for c in s.images.calls if c[1] == "1728x2304")
         assert call[3] == [f"{draft['image_id']}.png"]  # the draft was sent as the reference
         assert [i["image_id"] for i in frank if i["selected"]] == [final["image_id"]]
         # Selecting again doesn't render it twice; only one image per deliverable selected.

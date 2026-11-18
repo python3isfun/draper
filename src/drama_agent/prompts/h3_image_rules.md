@@ -73,13 +73,13 @@ turns each image's brief into a prompt (`src/drama_agent/image_prompts.py`).
 
 | Image | Task | Size | Prompt shape |
 | --- | --- | --- | --- |
-| Character identity (front face) | text-to-image | `3552x4736` | casting photograph; head and shoulders; front-facing; plain backdrop; light source; identifying features; no-text sentence |
-| Look (full body) | edit, `<Picture 1>` = face | `3072x5472` | define the person in `<Picture 1>` as `<Subject 1>`, partially preserved (face, age, build, identifying marks stay; wardrobe, hair, condition, pose change); full-length, head to shoes |
-| Set, first state (wide) | text-to-image | `4736x3552` | production design photograph of the empty set; eye-level wide; layout, materials, palette, entrances; light source |
-| Set, other state (wide) | edit, `<Picture 1>` = first state | `4736x3552` | the set is `<Subject 1>`, partially preserved: layout, furniture, materials and camera stay; time of day, light, dressing, condition change |
-| Set plan (top-down) | edit, `<Picture 1>` = wide | `4096x4096` | same inventory and coordinate frame as the wide view; overhead plan-view; every opening and piece of furniture |
-| Prop, first state (detail) | text-to-image | `4096x4096` | product photograph; close-up; materials, wear, distinguishing marks; for a picture inside the prop, who is in it, exact count and positions |
-| Prop, other state | edit, `<Picture 1>` = first state | `4096x4096` | the prop is `<Subject 1>`, partially preserved; only the state changes |
+| Character identity (front face) | text-to-image | `1728x2304` | casting photograph; head and shoulders; front-facing; plain backdrop; light source; identifying features; no-text sentence |
+| Look (full body) | edit, `<Picture 1>` = face | `1536x2720` | define the person in `<Picture 1>` as `<Subject 1>`, partially preserved (face, age, build, identifying marks stay; wardrobe, hair, condition, pose change); full-length, head to shoes |
+| Set, first state (wide) | text-to-image | `2304x1728` | production design photograph of the empty set; eye-level wide; layout, materials, palette, entrances; light source |
+| Set, other state (wide) | edit, `<Picture 1>` = first state | `2304x1728` | the set is `<Subject 1>`, partially preserved: layout, furniture, materials and camera stay; time of day, light, dressing, condition change |
+| Set plan (top-down) | edit, `<Picture 1>` = wide | `2048x2048` | same inventory and coordinate frame as the wide view; overhead plan-view; every opening and piece of furniture |
+| Prop, first state (detail) | text-to-image | `2048x2048` | product photograph; close-up; materials, wear, distinguishing marks; for a picture inside the prop, who is in it, exact count and positions |
+| Prop, other state | edit, `<Picture 1>` = first state | `2048x2048` | the prop is `<Subject 1>`, partially preserved; only the state changes |
 
 Must-keep items from the design sheets must be **visible** in the image (e.g. the scar on the
 back of the right hand: frame so the hand shows). Facts come from the cast/set/prop sheets; turn them into concrete visual English and keep
@@ -93,5 +93,5 @@ character and place names as written.
 - Each reference picture has a `<Subject N>` definition and exactly one relationship; nothing cites
   a picture that was not supplied.
 - What is preserved is named; edits narrate the finished image.
-- The size matches the deliverable's aspect ratio at about 16 MP.
+- The size matches the deliverable's aspect ratio at about 4 MP.
 - No vague quality word remains where a visible detail can say it.

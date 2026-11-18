@@ -6,7 +6,7 @@ image is first, layout, visible style, light by its direction, exact counts, quo
 the no-text sentence, and for edits the definitions → target → relationships → changes
 paragraph.
 
-## Character identity: text-to-image, 3552x4736 (3:4)
+## Character identity: text-to-image, 1728x2304 (3:4)
 
 Brief: Frank Collins, about sixty, hollow cheeks, deep lines, short unkempt gray hair, eyes that
 avoid yours; a faded brown canvas work jacket. Must keep: the old burn scar on the back of his
@@ -24,7 +24,7 @@ him. Soft light from the front left models his face, with gentle fill from the r
 skin texture. The image contains no text, letters or numbers.
 ```
 
-## Look: edit, 3072x5472 (9:16), `<Picture 1>` = the identity image
+## Look: edit, 1536x2720 (9:16), `<Picture 1>` = the identity image
 
 ```text
 The man in <Picture 1> is <Subject 1>. The target image is a full-length costume photograph of
@@ -39,7 +39,7 @@ scar clearly visible. Warm light from the front left catches the wet fabric; coo
 right suggests the rainy street outside. No other lettering is added.
 ```
 
-## Set, other state: edit, 4736x3552 (4:3), `<Picture 1>` = the daytime wide view
+## Set, other state: edit, 2304x1728 (4:3), `<Picture 1>` = the daytime wide view
 
 ```text
 The narrow bookstore interior in <Picture 1> is <Subject 1>. The sign reading "OPEN" on the
@@ -54,7 +54,7 @@ the wet street reflects cool blue-gray light; a roller blind is pulled halfway d
 No other lettering is added.
 ```
 
-## Set plan: edit, 4096x4096 (1:1), `<Picture 1>` = the wide view
+## Set plan: edit, 2048x2048 (1:1), `<Picture 1>` = the wide view
 
 ```text
 The bookstore set in <Picture 1> is <Subject 1>. The target image is an overhead plan-view
@@ -67,7 +67,7 @@ the hardwood floor and the clear walking path from the door to the counter. No o
 is added.
 ```
 
-## Prop with a picture inside: text-to-image, 4096x4096 (1:1)
+## Prop with a picture inside: text-to-image, 2048x2048 (1:1)
 
 ```text
 A product photograph of an old framed family photo lying on a neutral gray countertop, seen
@@ -81,7 +81,7 @@ from the upper left with gentle fill from the right. The image contains no text,
 numbers.
 ```
 
-## Prop, other state: edit, 4096x4096 (1:1), `<Picture 1>` = the intact photo
+## Prop, other state: edit, 2048x2048 (1:1), `<Picture 1>` = the intact photo
 
 ```text
 The framed family photo in <Picture 1> is <Subject 1>. The target image shows <Subject 1> with its
