@@ -22,6 +22,7 @@ from ..experiment import (
 from ..experiment import MAX_PROMPT_CHARS as EXP_MAX_PROMPT_CHARS
 from ..image_prompts import MAX_PROMPT_CHARS
 from ..models import (
+    ContentRating,
     Job,
     LLMCall,
     TraceEvent,
@@ -178,8 +179,9 @@ class ExpSessionCreate(BaseModel):
     # The design picture it is for (docs/workbench.md); a chat starts from its pick.
     target: ExpTarget | None = None
     start_from_pick: bool = True
-    # Open the picture's untouched chat (no message yet, started from its current pick)
-    # instead of starting another one: "Develop in a chat" clicked again.
+    # Open the picture's untouched chat (no message yet, started from its current pick) or
+    # face study (nothing in it yet) instead of starting another one: "Develop in a chat"
+    # or "Create from text" clicked again.
     reuse_empty: bool = False
 
 
@@ -204,6 +206,12 @@ class FaceTestRequest(BaseModel):
     seeds: list[int] | None = Field(None, max_length=MAX_DRAWS)  # fixed seeds (one per draw)
     size: str | None = None
     restrictive: bool = False
+    # The image provider: "h3" (default) or another the study lists (e.g. "local").
+    provider: str | None = Field(None, max_length=40)
+
+
+class RatingBody(BaseModel):
+    rating: ContentRating  # an MPA film rating: G, PG, PG-13 or R
 
 
 class ExpSessionPatch(BaseModel):
@@ -238,6 +246,8 @@ class ExpSessionView(BaseModel):
     session: ExpSession
     turns: list[ExpTurn]
     sizes: dict[str, str]  # aspect ratio -> size
+    # Image providers a Face Lab test can be drawn with (name -> model), H3 first.
+    providers: dict[str, str] = Field(default_factory=dict)
 
 
 EXPORT_DIR = Path(tempfile.gettempdir()) / "drama-exports"
@@ -270,3 +280,45 @@ def _seed_label(job: Job, assets: dict[str, dict]) -> str:
     name = (assets.get(first.asset_id or "") or {}).get("filename") or first.asset_id or ""
     label = f"[{first.type}] {name}"
     return f"{label} · {prompt}" if prompt else label
+
+
+class AddVariantRequest(BaseModel):
+    """A new look for a character, or a new state for a location, added by hand.
+    `sheet` holds design sheet fields (a look's wardrobe, hair_and_makeup, condition; a
+    state's time_of_day, lighting, dressing_changes, condition)."""
+
+    parent_id: str  # the story's character_id or location_id
+    description: str = Field(..., min_length=1, max_length=500)
+    sheet: dict[str, Any] = Field(default_factory=dict)
+    revision_id: str | None = None
+
+
+class AddVariantResult(BaseModel):
+    package_id: str
+    revision_id: str
+    entry_id: str  # the new look_id or location_state_id
+    requirement_id: str
+    deliverable_ids: list[str]
+    # Its Characters or Sets page: the character or set (`lib`) and the look or state (`part`).
+    lib_asset_id: str | None = None
+    part_asset_id: str | None = None
+
+
+class DesignTarget(BaseModel):
+    """A design picture a keyframe draw can be sent to as a take: a look the shot's
+    characters wear, or the set state it is in."""
+
+    requirement_id: str
+    deliverable_id: str
+    kind: Literal["look", "set"]
+    label: str  # "Lila Montgomery, evening torn look, full body"
+    sent_image_id: str | None = None  # already sent: the design image it became
+    picked: bool = False  # ... and that image is the pick
+    lib_asset_id: str | None = None  # its Characters or Sets page
+    part_asset_id: str | None = None
+
+
+class ToDesignRequest(BaseModel):
+    requirement_id: str
+    deliverable_id: str
+    pick: bool = False  # also make it the picture's pick

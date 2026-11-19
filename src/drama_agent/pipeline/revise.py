@@ -377,6 +377,12 @@ class ReviseRunner:
             f"{', '.join(req.target_ids)}.")  # fmt: skip
 
         state = _state_from(base, rev.revision_id)
+        # The story's rating as it is now: it may have been changed on its Overview.
+        from ..design.setup import story_rating
+
+        state.request.options.content_rating = story_rating(  # type: ignore[assignment]
+            self.repo, rev.package_id
+        )
         content_ran = False
         for name in rev.steps:
             step = _STEPS[name]

@@ -9,14 +9,15 @@ is implemented; section 9 tracks the proposals and which have since been built.
 
 ## 1. Summary
 
-- Intimate scenes are **written as staging for the crew; the app never draws them**.
-- A job's **content rating** caps how intimate a scene may be. Hard checks enforce it, and
-  the hand-off zip includes an **intimacy plan** for the intimacy coordinator.
+- A story's **rating** follows the MPA film ratings (G, PG, PG-13, R). It caps how intimate
+  a scene may be (hard checks enforce it; the hand-off zip includes an **intimacy plan** for
+  the intimacy coordinator) and what every image of the story may show (section 3.1). It
+  can be changed on the story's Overview.
 - **Adults only:** anyone in an implied or simulated scene must have a stated adult age. A
   character who reads as under 18 blocks the job, and the fix is in the script, never in the
   stated age.
-- The **content guard** never lets the image model draw, in any mode:
-  - nudity or sexual acts;
+- The **content guard** never lets the image model draw, at any rating or mode:
+  - sex acts shown explicitly, genitals or pornography (nudity only at R);
   - romantic, sexualized or revealing images of minors;
   - sexualized images of a real person's likeness (from a photo, or a named real person).
 - **Real people's likeness:** the Experiment tab tracks whether each image shows a real
@@ -31,13 +32,19 @@ is implemented; section 9 tracks the proposals and which have since been built.
 
 ### 2.1 Content rating (job option `content_rating`)
 
-| Rating | Highest scene level | Nudity |
-| --- | --- | --- |
-| `general` | kiss or embrace | none |
-| `teen` (default) | implied: the scene cuts away before anything sexual | none |
-| `mature` | simulated intimacy on screen | partial at most (bare back, shoulders), on a closed set |
+The MPA film ratings. NC-17 is not offered.
 
-The web UI shows it under **Options** on the new-job form.
+| Rating | Highest scene level | Nudity in the script |
+| --- | --- | --- |
+| `G`, `PG` | kiss or embrace | none |
+| `PG-13` (default) | implied: the scene cuts away before anything sexual | none |
+| `R` | simulated intimacy on screen | partial at most (bare back, shoulders), on a closed set |
+
+The web UI shows it under **Options** on the new-job form, and on the story's Overview,
+where it can be changed (`PUT /v1/drama-packages/{id}/rating`, kept in `story_ratings`
+apart from the jobs, which a running pipeline saves from its own copy). The change holds
+for the story's images and for revisions of its script; written scenes are not changed. Jobs stored before the MPA ratings read `general`,
+`teen` and `mature` as PG, PG-13 and R.
 
 ### 2.2 The scene `intimacy` block
 
@@ -92,9 +99,20 @@ The scene headings in the episode scripts point to the plan.
 
 ### 3.1 Rules
 
-1. **Never** nudity, sexual acts, or sexually explicit imagery.
+1. **By the story's rating** (PG-13 for a picture outside any story, e.g. a scratch chat):
+
+   | Image | G, PG | PG-13 | R |
+   | --- | --- | --- | --- |
+   | Clothed romance, swimwear | yes | yes | yes |
+   | Suggestive: lingerie, undressing, a covered bed scene | no | yes | yes |
+   | Nudity of adults, as in an R-rated film (bare breasts or buttocks, a love scene under sheets) | no | no | yes |
+   | Sex acts shown explicitly, genitals, pornography | no | no | no |
+
+   Every image check follows it: chats and face studies (each message records the rating
+   it was held to; a retry uses the current one), design pictures and keyframes, in both
+   layers (the word lists and the model screen, whose rules say the rating).
 2. **Never** romantic, sexualized or revealing imagery of anyone who is, or looks, under 18.
-3. **Never** a **sexualized** image of a **real person's likeness**: lingerie or underwear,
+3. **Never, at any rating,** a **sexualized** image of a **real person's likeness**: nudity, lingerie or underwear,
    undressing, bed scenes or bedroom intimacy, suggestive poses, degrading situations.
    A real person's likeness is:
    - an identifiable person from an uploaded photo (anyone whose face is visible counts);

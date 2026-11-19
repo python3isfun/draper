@@ -185,3 +185,96 @@ def test_tests_keep_the_likeness_of_any_described_photo(tmp_path):
         assert c.wait()["turns"][-1]["likeness"] is False
         c.test(prompt=first["prompt"])  # the first photo's description, loaded back
         assert c.wait()["turns"][-1]["likeness"] is True
+
+
+def test_a_test_can_be_drawn_by_the_local_image_server(tmp_path):
+    """ "Drawn with": a test names its provider; H3 stays the default."""
+    local = FixtureImageClient(model_id="local (http://localhost:8080)", max_references=0)
+    with Study(tmp_path, providers={"local": local}) as c:
+        assert c.view()["providers"] == {"h3": c.images.model_id, "local": local.model_id}
+        prompt = "A studio casting photograph of a woman. The image contains no text."
+        assert c.test(prompt=prompt, seeds=[5], provider="local").status_code == 202
+        turn = c.wait()["turns"][-1]
+        assert turn["provider"] == "local" and turn["status"] == "done"
+        assert [call[2] for call in local.calls] == [5] and c.images.calls == []
+        # No photo: the likeness is judged from the words alone, and they name no one.
+        assert turn["likeness"] is False
+        assert c.test(prompt=prompt, seeds=[6], provider="h3").status_code == 202
+        assert c.wait()["turns"][-1]["provider"] is None
+        assert [call[2] for call in c.images.calls] == [6]
+        r = c.test(prompt=prompt, provider="nope")
+        assert r.status_code == 422 and "local" in r.json()["detail"]
+
+
+def test_a_turn_naming_an_unconfigured_provider_fails_clearly():
+    import pytest
+
+    from drama_agent.experiment import ExperimentRunner
+    from drama_agent.imagegen import ImageGenError
+
+    runner = ExperimentRunner(None, None, FixtureImageClient(), None)
+    assert runner._client(None)[0] is runner.images
+    with pytest.raises(ImageGenError, match="'local' isn't configured"):
+        runner._client("local")
+
+
+def test_the_local_image_server_is_sent_a_form_and_answers_an_image():
+    """curl -s localhost:8080/image -F "prompt=a red fox in fresh snow" -o fox.png"""
+    import asyncio
+
+    import httpx
+    import pytest
+
+    from drama_agent.imagegen import ImageGenError, LocalImageClient, Reference, solid_png
+
+    png = solid_png(2, 2, b"\x10\x20\x30")
+    seen = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = request.content.decode("latin-1")
+        if "fail" in body:
+            return httpx.Response(500, text="boom")
+        if "text" in body:
+            return httpx.Response(200, text="not an image", headers={"content-type": "text/plain"})
+        return httpx.Response(
+            200, content=png, headers={"content-type": "application/octet-stream"}
+        )
+
+    client = LocalImageClient("http://localhost:8080/", transport=httpx.MockTransport(answer))
+    assert client.model_id == "local (http://localhost:8080)" and client.max_references == 0
+    out = asyncio.run(client.generate("a red fox in fresh snow", "2048x2048", 7, []))
+    assert out.data == png and out.content_type == "image/png"
+    [req] = seen
+    assert str(req.url) == "http://localhost:8080/image"
+    assert req.headers["content-type"].startswith("multipart/form-data")
+    body = req.content.decode()
+    for name, value in (
+        ("prompt", "a red fox in fresh snow"),
+        ("size", "2048x2048"),
+        ("seed", "7"),
+    ):
+        assert f'name="{name}"\r\n\r\n{value}\r\n' in body
+    with pytest.raises(ImageGenError, match="HTTP 500"):
+        asyncio.run(client.generate("fail", "2048x2048", 1, []))
+    with pytest.raises(ImageGenError, match="text/plain, not a PNG or JPEG"):
+        asyncio.run(client.generate("text", "2048x2048", 1, []))
+    with pytest.raises(ImageGenError, match="text only"):
+        asyncio.run(client.generate("x", "2048x2048", 1, [Reference("a.png", png)]))
+
+
+def test_the_runner_closes_its_providers():
+    import asyncio
+
+    from drama_agent.experiment import ExperimentRunner
+
+    class Closable(FixtureImageClient):
+        closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    local = Closable(max_references=0)
+    runner = ExperimentRunner(None, None, FixtureImageClient(), None, providers={"local": local})
+    asyncio.run(runner.aclose())
+    assert local.closed

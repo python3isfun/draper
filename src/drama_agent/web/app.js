@@ -879,7 +879,7 @@ function renderOverview(pkg, L) {
       h("h1", {}, b.title),
       h("p", { class: "logline" }, b.logline),
       h("dl", { class: "kv" },
-        kv("Genre", b.genre), kv("Audience", b.audience_assumption), kv("Emotional goal", b.emotional_goal),
+        kv("Genre", b.genre), kv("Audience", b.audience_assumption), kv("Rating", ratingPicker(pkg)), kv("Emotional goal", b.emotional_goal),
         kv("Core conflict", b.core_conflict), kv("Synopsis", b.series_synopsis),
         b.future_direction && kv("Future direction", b.future_direction),
       ),
@@ -933,6 +933,42 @@ function renderOverview(pkg, L) {
 }
 
 const kv = (k, v) => [h("dt", {}, k), h("dd", {}, v)];
+
+// A story's rating, as the MPA rates films (models/request.py). It caps the intimacy its
+// script may stage and what every image of it may show: chats, face studies, design
+// pictures and keyframes (content_guard.py). Changing it holds from the next image on.
+const RATINGS = {
+  G: "G: a kiss at most; images show nothing suggestive",
+  PG: "PG: a kiss at most; images show nothing suggestive",
+  "PG-13": "PG-13: intimacy implied; images may be suggestive (lingerie, a covered bed scene), no nudity",
+  R: "R: simulated intimacy; images may show nudity as an R-rated film does (never explicit)",
+};
+
+function ratingPicker(pkg) {
+  // The rating that applies now (set here, else the newest job's), not the viewed job's.
+  const url = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/rating`;
+  let now = null;
+  const note = h("span", { class: "muted small" });
+  const select = h("select", {
+    "aria-label": "Rating", disabled: true,
+    title: "Caps what this story's script may stage and what its images may show. A real person's likeness never gets anything sexualized, at any rating.",
+    onchange: async () => {
+      select.disabled = true;
+      try {
+        now = (await api(url, { method: "PUT", body: JSON.stringify({ rating: select.value }) })).rating;
+        note.textContent = " Saved. Images follow it from now on; written scenes are unchanged.";
+      } catch (err) {
+        select.value = now;  // the last saved rating
+        note.textContent = ` ${err.message}`;
+      } finally {
+        select.disabled = false;
+      }
+    },
+  }, Object.entries(RATINGS).map(([r, label]) => h("option", { value: r }, label)));
+  api(url).then((out) => { now = out.rating; select.value = now; select.disabled = false; })
+    .catch((err) => { note.textContent = ` ${err.message}`; });
+  return h("span", { class: "rating-pick" }, select, note);
+}
 // Visual text from packages made before the design sheets (kept under `legacy`).
 const legacyText = (obj) => obj.legacy && Object.values(obj.legacy).map((t) => h("p", { class: "muted" }, t));
 const listCard = (title, items) =>

@@ -91,7 +91,7 @@ def resolve(repo: Any, ref: str) -> Found | None:
         if img is None or img.status != "done" or not img.file:
             return None
         return Found(ref, img.file, img.thumb, img.content_type, _design_what(repo, img),
-                     img.prompt, _story_likeness(repo, img.package_id, img.likeness),
+                     img.prompt, story_likeness(repo, img.package_id, img.likeness),
                      bool(img.imported_from) or _has_upload(img), img.size)  # fmt: skip
     take = repo.get_shot_take(ident)
     d = next((d for d in take.results if d.n == n), None) if take else None
@@ -99,11 +99,11 @@ def resolve(repo: Any, ref: str) -> Found | None:
         return None
     return Found(ref, d.file, d.thumb, d.content_type,
                  f"keyframe draw {n + 1} of shot {take.shot_id}", take.prompt or None,
-                 _story_likeness(repo, take.package_id, take.likeness), False,
+                 story_likeness(repo, take.package_id, take.likeness), False,
                  take.size)  # fmt: skip
 
 
-def _story_likeness(repo: Any, package_id: str, marked: bool) -> bool | None:
+def story_likeness(repo: Any, package_id: str, marked: bool) -> bool | None:
     """A story picture's likeness as a chat takes it: marked only when drawn from one, so in
     a story with uploaded photos an unmarked picture is "unknown" (judged from the picture),
     as a chat started from a pick takes it (api/experiments.py)."""

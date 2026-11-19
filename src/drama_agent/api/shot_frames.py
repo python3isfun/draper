@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from ..content_guard import GuardRefused, screen
-from ..images import PICTURE_OUTDATED
+from ..images import PICTURE_OUTDATED, story_rating
 from ..media import MediaStore
 from ..models import ProductionPackage
 from ..models.images import GeneratedImage
@@ -327,7 +327,8 @@ def register(
         except NotReady as exc:
             raise HTTPException(409, str(exc)) from None
         prompt = req.prompt.strip()
-        findings = prompt_findings(prompt, refs)
+        rating = story_rating(repo, pkg.package_id)
+        findings = prompt_findings(prompt, refs, rating=rating)
         if hard := [f for f in findings if is_hard(f)]:
             raise HTTPException(422, "The prompt " + "; ".join(hard) + ".")
         if (level := intimate_scene(pkg, shot)) and any(r.likeness for r in refs):
@@ -351,6 +352,7 @@ def register(
                     for n, r in enumerate(refs, 1)
                 ],
                 restrictive=False,
+                rating=rating,
             )  # fmt: skip
         except GuardRefused as exc:
             raise HTTPException(422, str(exc)) from exc

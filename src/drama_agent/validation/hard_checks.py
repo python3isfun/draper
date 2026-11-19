@@ -10,7 +10,15 @@ import re
 from collections import defaultdict
 from collections.abc import Callable
 
-from ..models import INTIMACY_ORDER, RATING_LIMITS, Issue, JobOptions, ProductionPackage, Shot
+from ..models import (
+    INTIMACY_ORDER,
+    RATING_LIMITS,
+    Issue,
+    JobOptions,
+    ProductionPackage,
+    Shot,
+    as_rating,
+)
 from ..pipeline.asset_aggregation import required_units_for_shot, shot_reference_unit
 from .index import PackageIndex, design_entries, lockable_objects
 from .prose import find_prose_leaks
@@ -661,8 +669,8 @@ def check_intimacy_minors(pkg: ProductionPackage, idx: PackageIndex, _: JobOptio
 
 def check_intimacy(pkg: ProductionPackage, idx: PackageIndex, opts: JobOptions) -> list[Issue]:
     """Scene intimacy stays within the content rating and carries what production needs."""
-    rating = getattr(opts, "content_rating", "teen")
-    top, nudity_ok = RATING_LIMITS.get(rating, RATING_LIMITS["teen"])
+    rating = as_rating(getattr(opts, "content_rating", None))
+    top, nudity_ok = RATING_LIMITS[rating]
     issues: list[Issue] = []
     for ep in pkg.episodes:
         for sc in ep.scenes:

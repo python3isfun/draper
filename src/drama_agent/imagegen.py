@@ -9,6 +9,8 @@
   Gemini API's generateContent, or a gateway serving the same API. Up to eight reference
   images, each sent as a part introduced by "Picture N:"; the prompt's <Picture N> labels
   become "Picture N". The same request shape as dramer's gemini adapter.
+- LocalImageClient: a simple image server of your own (POST /image with a `prompt` form
+  field, answering with the image), text to image only. Face Lab tests can use it.
 - FixtureImageClient: draws a small solid-color PNG locally, for tests and offline mode.
 
 Every client has a `model_id` and `max_references` (the most reference images it takes).
@@ -268,6 +270,70 @@ def _gemini_error(text: str) -> str:
     return f"{err.get('status', '')} {err.get('message', '')}".strip()[:300] or text[:300]
 
 
+LOCAL_IMAGE_URL = "http://localhost:8080"
+
+
+class LocalImageClient:
+    """A simple image server of your own, text to image only:
+
+        curl -s localhost:8080/image -F "prompt=a red fox in fresh snow" -o fox.png
+
+    It is sent `prompt`, `size` ("WIDTHxHEIGHT") and `seed` as form fields (a server may
+    ignore the last two) and answers with the image's bytes (PNG or JPEG)."""
+
+    max_references = 0
+
+    def __init__(
+        self,
+        base_url: str = LOCAL_IMAGE_URL,
+        *,
+        timeout_s: float = 600.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model_id = f"local ({self.base_url})"
+        self._http = httpx.AsyncClient(timeout=timeout_s, transport=transport)
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    async def generate(
+        self, prompt: str, size: str, seed: int, references: list[Reference]
+    ) -> ImageResult:
+        if references:
+            raise ImageGenError("the local image server draws from text only")
+        fields = {"prompt": prompt, "size": size, "seed": str(seed)}
+        try:
+            # Multipart form fields, as curl -F sends them.
+            resp = await self._http.post(
+                f"{self.base_url}/image", files={k: (None, v) for k, v in fields.items()}
+            )
+        except httpx.TimeoutException as exc:
+            raise ImageGenError(f"the local image server timed out ({exc!r})") from exc
+        except httpx.TransportError as exc:
+            raise ImageGenError(
+                f"can't reach the local image server at {self.base_url} ({exc!r})"
+            ) from exc
+        if resp.status_code != 200:
+            raise ImageGenError(
+                f"the local image server failed: HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        mime = image_type(resp.content)
+        if mime is None:
+            said = resp.headers.get("content-type", "nothing")
+            raise ImageGenError(f"the local image server sent {said}, not a PNG or JPEG image")
+        return ImageResult(resp.content, mime)
+
+
+def image_type(data: bytes) -> str | None:
+    """PNG or JPEG by the file's first bytes, else None."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    return None
+
+
 class FixtureImageClient:
     """Offline stand-in: a small PNG whose color derives from the prompt and seed."""
 
@@ -282,7 +348,7 @@ class FixtureImageClient:
     ) -> None:
         if model_id:
             self.model_id = model_id
-        if max_references:
+        if max_references is not None:
             self.max_references = max_references
         self.delay_s = delay_s
         self.calls: list[tuple[str, str, int, list[str]]] = []

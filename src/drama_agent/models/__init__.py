@@ -35,7 +35,16 @@ from .package import (
     StageState,
     TraceEvent,
 )
-from .request import RATING_LIMITS, ContentRating, JobOptions, JobRequest, Source
+from .request import (
+    DEFAULT_RATING,
+    RATING_LIMITS,
+    RATINGS,
+    ContentRating,
+    JobOptions,
+    JobRequest,
+    Source,
+    as_rating,
+)
 from .screenplay import (
     INTIMACY_ORDER,
     Beat,
@@ -67,7 +76,9 @@ from .storyboard import (
 )
 
 __all__ = [
+    "DEFAULT_RATING",
     "INTIMACY_ORDER",
+    "RATINGS",
     "RATING_LIMITS",
     "STAGES",
     "AssetRequirement",
@@ -129,4 +140,5 @@ __all__ = [
     "TranscriptSegment",
     "UsedBy",
     "VideoFrame",
+    "as_rating",
 ]

@@ -61,7 +61,9 @@ class AssetRequirement(BaseModel):
     must_keep: list[str] = Field(default_factory=list)
     design_freedom: list[str] = Field(default_factory=list)
     source_refs: list[SourceRef] = Field(default_factory=list)
-    used_by: list[UsedBy] = Field(min_length=1)
+    # The shots that need it. Empty only for a look or set state added by hand on its
+    # Characters or Sets page that no shot uses yet (sheet_edit.add_variant).
+    used_by: list[UsedBy] = Field(default_factory=list)
     deliverables: list[Deliverable] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     priority: Priority = "required"

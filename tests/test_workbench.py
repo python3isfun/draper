@@ -251,3 +251,70 @@ def test_a_pick_start_saved_without_a_size_gets_its_pictures(tmp_path):
         http.post(f"/v1/experiments/{sid}/turns", json={"text": "grey beard"})
         v = _wait_turn(http, sid)
         assert v["turns"][0]["size"] == v["turns"][-1]["size"] == size_of(pick.size)
+
+
+def test_create_from_text_reuses_the_faces_empty_study(tmp_path):
+    """ "Create from text" clicked again opens the same empty face study; once it has a
+    test, another is made."""
+    with TestClient(_app(tmp_path)) as http:
+        job = _story(http)
+        body = {"kind": "face", "target": _target(job), "reuse_empty": True}
+        first = http.post("/v1/experiments", json=body).json()
+        assert first["kind"] == "face"
+        assert http.post("/v1/experiments", json=body).json()["session_id"] == first["session_id"]
+        # An empty chat for the same face is not a study.
+        chat = http.post("/v1/experiments", json={"target": _target(job), "reuse_empty": True})
+        assert chat.json()["session_id"] != first["session_id"]
+        sid = first["session_id"]
+        prompt = "A studio casting photograph of a man. The image contains no text."
+        assert http.post(f"/v1/experiments/{sid}/tests", json={"prompt": prompt}).status_code == 202
+        _wait_turn(http, sid)
+        assert http.post("/v1/experiments", json=body).json()["session_id"] != sid
+
+
+def test_a_chat_follows_its_storys_rating(tmp_path):
+    """Images follow the story's MPA rating (content_guard.py): nudity only at R, and the
+    rating can be changed after the story is made; a retry checks again at the new one."""
+    from drama_agent.content_guard import nudity_reason
+
+    with TestClient(_app(tmp_path)) as http:
+        job = _story(http)
+        pid = job["package_id"]
+        sid = http.post("/v1/experiments", json={"target": _target(job)}).json()["session_id"]
+        msg = {"text": "A naked man asleep under a white sheet, morning light.", "mode": "exact"}
+        http.post(f"/v1/experiments/{sid}/turns", json=msg)
+        turn = _wait_done_or_failed(http, sid)
+        assert turn["rating"] == "PG-13" and turn["refused"]
+        assert turn["error"] == nudity_reason("PG-13")
+
+        assert http.get(f"/v1/drama-packages/{pid}/rating").json() == {"rating": "PG-13"}
+        r = http.put(f"/v1/drama-packages/{pid}/rating", json={"rating": "R"})
+        assert r.status_code == 200 and r.json() == {"rating": "R"}
+        assert http.get(f"/v1/drama-packages/{pid}/rating").json() == {"rating": "R"}
+        # Kept apart from the job, which a running pipeline saves from its own copy.
+        job_now = http.get(f"/v1/drama-jobs/{job['job_id']}").json()
+        assert job_now["request"]["options"]["content_rating"] == "PG-13"
+        assert http.post(f"/v1/experiment-turns/{turn['turn_id']}/retry").status_code == 202
+        turn = _wait_done_or_failed(http, sid)
+        assert turn["rating"] == "R" and turn["status"] == "done" and turn["results"]
+
+        assert (
+            http.put(f"/v1/drama-packages/{pid}/rating", json={"rating": "NC-17"}).status_code
+            == 422
+        )
+        assert http.put("/v1/drama-packages/nope/rating", json={"rating": "R"}).status_code == 404
+        # A scratch chat (no story) is PG-13.
+        scratch = http.post("/v1/experiments", json={}).json()["session_id"]
+        http.post(f"/v1/experiments/{scratch}/turns", json=msg)
+        assert _wait_done_or_failed(http, scratch)["error"] == nudity_reason("PG-13")
+
+
+def _wait_done_or_failed(http, sid):
+    deadline = time.monotonic() + 10
+    while (t := http.get(f"/v1/experiments/{sid}").json()["turns"][-1])["status"] not in (
+        "done",
+        "failed",
+    ):
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    return t

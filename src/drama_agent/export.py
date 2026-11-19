@@ -828,7 +828,7 @@ def build_export(
 
         # Intimacy plan (text only), when any scene has intimacy
         if intimacy_scenes(pkg):
-            rating = job.request.options.content_rating if job else "teen"
+            rating = job.request.options.content_rating if job else "PG-13"
             text("08_intimacy/intimacy_plan.md", intimacy_md(pkg, n, rating))
 
         # Everything, and the README

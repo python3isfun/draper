@@ -173,6 +173,10 @@ CREATE TABLE IF NOT EXISTS asset_images (
     data        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS asset_images_asset ON asset_images (asset_id);
+CREATE TABLE IF NOT EXISTS story_ratings (
+    package_id  TEXT PRIMARY KEY,  -- a story whose rating was changed after it was made
+    rating      TEXT NOT NULL      -- G, PG, PG-13 or R
+);
 CREATE TABLE IF NOT EXISTS image_ids (
     gid         INTEGER PRIMARY KEY AUTOINCREMENT,  -- the image's global number (@1234)
     ref         TEXT NOT NULL UNIQUE                -- what it is (image_ids.py)
@@ -767,6 +771,19 @@ class SqliteRepository:
 
     def image_ref(self, gid: int) -> str | None:
         return self._one("SELECT ref FROM image_ids WHERE gid = ?", (gid,))
+
+    # A story's rating, when changed after it was made (design/setup.story_rating). Kept
+    # apart from the jobs, which a running pipeline saves from its own copy.
+
+    def get_story_rating(self, package_id: str) -> str | None:
+        return self._one("SELECT rating FROM story_ratings WHERE package_id = ?", (package_id,))
+
+    def set_story_rating(self, package_id: str, rating: str) -> None:
+        self._exec(
+            "INSERT INTO story_ratings (package_id, rating) VALUES (?, ?) "
+            "ON CONFLICT (package_id) DO UPDATE SET rating = excluded.rating",
+            (package_id, rating),
+        )
 
     # Shot keyframes ------------------------------------------------------------
 

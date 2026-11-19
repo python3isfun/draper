@@ -10,7 +10,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from ..design.setup import package_has_uploads
+from ..design.setup import package_has_uploads, story_rating
 from ..design.slots import selected_image
 from ..experiment import SIZES as EXP_SIZES
 from ..experiment import (
@@ -59,7 +59,10 @@ def register(app: FastAPI, ctx: Any) -> None:
         turns = _exp_turns(session.session_id)
         # A size saved before chats went to 2K shows as its 2K counterpart.
         shown = session.model_copy(update={"size": current_size(session.size)})
-        return ExpSessionView(session=shown, turns=turns, sizes=EXP_SIZES)
+        providers = {"h3": experiments.images.model_id} | {
+            name: client.model_id for name, client in experiments.providers.items()
+        }
+        return ExpSessionView(session=shown, turns=turns, sizes=EXP_SIZES, providers=providers)
 
     def _messages(session_id: str) -> int:
         return sum(t.mode not in ("pick", "import") for t in repo.list_exp_turns(session_id))
@@ -92,12 +95,12 @@ def register(app: FastAPI, ctx: Any) -> None:
             if kind in (None, s.kind) and wanted(s)
         ]
 
-    def _untouched(target: ExpTarget, pick_id: str | None) -> ExpSession | None:
-        """The picture's newest chat with no message yet, started from this pick (or, with
-        no pick, from nothing)."""
+    def _untouched(target: ExpTarget, pick_id: str | None, kind: str = "chat") -> ExpSession | None:
+        """The picture's newest chat (or face study) with no message yet, started from this
+        pick (or, with no pick, from nothing)."""
         for s in repo.list_exp_sessions():
             if (
-                s.kind != "chat"
+                s.kind != kind
                 or s.target is None
                 or (
                     (s.target.package_id, s.target.requirement_id, s.target.deliverable_id)
@@ -140,8 +143,8 @@ def register(app: FastAPI, ctx: Any) -> None:
                 key = (target.requirement_id, target.deliverable_id)
                 found = selected_image(repo.list_images(pkg.package_id, pkg.revision_id), key)
                 pick = found if found is not None and found.file else None
-            if req.kind == "chat" and req.reuse_empty:
-                same = _untouched(target, pick.image_id if pick is not None else None)
+            if req.reuse_empty:
+                same = _untouched(target, pick.image_id if pick is not None else None, req.kind)
                 if same is not None:
                     return same
         repo.save_exp_session(session)
@@ -164,7 +167,13 @@ def register(app: FastAPI, ctx: Any) -> None:
                             exc_info=True)  # fmt: skip
         return session
 
+    def _rating(session_id: str) -> str:
+        """The rating a chat's message is held to: its story's (PG-13 outside a story)."""
+        session = repo.get_exp_session(session_id)
+        return story_rating(repo, session.target.package_id if session and session.target else None)
+
     def _start_face_turn(session: ExpSession, turn: ExpTurn) -> ExpTurn:
+        turn.rating = _rating(session.session_id)
         if turn.attachments:
             # The same photo described again keeps its number.
             known = {
@@ -251,6 +260,10 @@ def register(app: FastAPI, ctx: Any) -> None:
         """Face Lab: render a prompt from text alone, with fixed seeds if given."""
         session = _exp_session_or_404(session_id)
         turns = _exp_turns(session_id)
+        provider = None if req.provider in (None, "", "h3") else req.provider
+        if provider is not None and provider not in experiments.providers:
+            names = ", ".join(["h3", *experiments.providers])
+            raise HTTPException(422, f"no image provider {provider!r}; there are: {names}")
         try:
             turn = plan_test(
                 session,
@@ -260,6 +273,7 @@ def register(app: FastAPI, ctx: Any) -> None:
                 seeds=req.seeds,
                 size=req.size,
                 restrictive=req.restrictive,
+                provider=provider,
             )
         except ExpError as exc:
             raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
@@ -343,6 +357,7 @@ def register(app: FastAPI, ctx: Any) -> None:
             repo.save_exp_turn(t)
         if turn.attachments:
             turn.attachment_labels = repo.allocate_exp_labels(session_id, len(turn.attachments))
+        turn.rating = _rating(session_id)
         repo.save_exp_turn(turn)
         if turn.mode == "upload":
             session.current = f"asset:{turn.attachments[0]}"
@@ -433,6 +448,7 @@ def register(app: FastAPI, ctx: Any) -> None:
             raise HTTPException(409, "Wait for the current image to finish first.")
         turn.status, turn.error, turn.finished_at = "pending", None, None
         turn.refused = False
+        turn.rating = _rating(turn.session_id)  # the story's rating may have changed
         repo.save_exp_turn(turn)
         experiments.start(turn.turn_id)
         return turn

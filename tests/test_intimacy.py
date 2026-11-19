@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from drama_agent.content_guard import (
+    EXPLICIT_REASON,
     MINOR_REASON,
     NUDITY_REASON,
     REAL_PERSON_REASON,
@@ -56,33 +57,45 @@ def intimacy_issues(pkg, rating):
 
 def test_rating_caps_the_staging(package):
     sc, _ = stage(package)
-    assert intimacy_issues(package, "teen") == []
-    general = intimacy_issues(package, "general")
-    assert len(general) == 1 and "at most kiss" in general[0].evidence
-    assert general[0].object_id == sc.scene_id and general[0].fix_scope == "script"
+    assert intimacy_issues(package, "PG-13") == []
+    for rating in ("G", "PG"):
+        found = intimacy_issues(package, rating)
+        assert len(found) == 1 and "at most kiss" in found[0].evidence
+        assert found[0].object_id == sc.scene_id and found[0].fix_scope == "script"
 
     sc.intimacy.level = "simulated"
-    assert any("at most implied" in i.evidence for i in intimacy_issues(package, "teen"))
-    mature = intimacy_issues(package, "mature")
-    assert [i.evidence for i in mature] == ["simulated intimacy or nudity needs closed_set=true"]
+    assert any("at most implied" in i.evidence for i in intimacy_issues(package, "PG-13"))
+    r = intimacy_issues(package, "R")
+    assert [i.evidence for i in r] == ["simulated intimacy or nudity needs closed_set=true"]
     sc.intimacy.closed_set = True
+    assert intimacy_issues(package, "R") == []
+    # Jobs stored before the MPA ratings: general, teen and mature read as PG, PG-13, R.
     assert intimacy_issues(package, "mature") == []
+    assert JobOptions(content_rating="teen").content_rating == "PG-13"
+    assert JobOptions(content_rating="general").content_rating == "PG"
+    assert JobOptions(content_rating="Teen").content_rating == "PG-13"
+    assert JobOptions(content_rating="pg-13").content_rating == "PG-13"
+    with pytest.raises(ValueError):
+        JobOptions(content_rating="NC-17")
+    from drama_agent.models.request import as_rating
+
+    assert as_rating("r") == "R" and as_rating(" pg ") == "PG" and as_rating("nope") == "PG-13"
 
 
 def test_nudity_consent_and_staging_are_required(package):
     sc, _ = stage(package, nudity="partial", consent_beats=[], on_screen=" ")
-    found = " | ".join(i.evidence for i in intimacy_issues(package, "teen"))
-    assert "partial nudity, which the teen rating does not allow" in found
+    found = " | ".join(i.evidence for i in intimacy_issues(package, "PG-13"))
+    assert "partial nudity, which the PG-13 rating does not allow" in found
     assert "no consent_beats" in found
     assert "on_screen is empty" in found
     assert "needs closed_set=true" in found
     sc.intimacy.character_ids = ["ch_nobody"]
-    assert any("ch_nobody" in i.evidence for i in intimacy_issues(package, "teen"))
+    assert any("ch_nobody" in i.evidence for i in intimacy_issues(package, "PG-13"))
 
 
 def test_default_rating_and_untouched_packages_pass(package):
-    assert JobOptions().content_rating == "teen"
-    assert intimacy_issues(package, "general") == []  # no scene has intimacy
+    assert JobOptions().content_rating == "PG-13"
+    assert intimacy_issues(package, "G") == []  # no scene has intimacy
     assert run_hard_checks(package, JobOptions()) == []
 
 
@@ -166,7 +179,7 @@ def test_export_has_an_intimacy_plan_only_when_needed(package, tmp_path):
     [
         ("A nude woman on a bed", NUDITY_REASON),
         ("She is topless on the beach", NUDITY_REASON),
-        ("A sexually explicit scene", NUDITY_REASON),
+        ("A sexually explicit scene", EXPLICIT_REASON),
         ("A teenage girl in lingerie", MINOR_REASON),
         ("A 16-year-old posing in a bikini, seductive look", MINOR_REASON),
         ("A schoolgirl with a sexy pose", MINOR_REASON),
@@ -178,6 +191,14 @@ def test_export_has_an_intimacy_plan_only_when_needed(package, tmp_path):
         ("Nude-colored heels with a black dress, nude tones.", None),
         ("Fully clothed, no nudity. Not naked.", None),
         ("Nude lipstick; she is nude on the bed.", NUDITY_REASON),
+        # A bare shoulder, arm or foot is not nudity; the person being naked still is.
+        ("Evening makeup, shirt stripped with naked shoulder exposed.", None),
+        ("Naked feet on the cold floor, nude arms folded.", None),
+        ("Shirt off her naked left shoulder, then she is naked.", NUDITY_REASON),
+        # A harmless part first doesn't clear what follows it.
+        ("A naked arms and chest portrait.", NUDITY_REASON),
+        ("Naked legs, torso and back.", NUDITY_REASON),
+        ("A naked back and naked breasts", NUDITY_REASON),
     ],
 )
 def test_text_guard(prompt, reason):
@@ -276,10 +297,54 @@ def test_worker_never_draws_a_refused_prompt(tmp_path):
         assert failed.status == "failed" and NUDITY_REASON in failed.error
 
 
+@pytest.mark.parametrize(
+    ("prompt", "allowed"),
+    [
+        # Clothed romance and swimwear: every rating.
+        ("Two adults kiss at a bus stop.", "G PG PG-13 R"),
+        ("A woman in a red bikini on the beach.", "G PG PG-13 R"),
+        ("Two lovers holding hands in the park.", "G PG PG-13 R"),
+        # Suggestive, no nudity: PG-13 and up.
+        ("She stands in black lace lingerie by the window.", "PG-13 R"),
+        ("A bed scene, the couple under the covers, shoulders bare.", "PG-13 R"),
+        # Nudity: R only.
+        ("A naked woman under a sheet in the morning light.", "R"),
+        ("She is topless, seen from behind.", "R"),
+        # Never, at any rating.
+        ("A sexually explicit close-up.", ""),
+        ("Two adults having sex.", ""),
+        ("Her genitals are visible.", ""),
+        # Minors: never romantic or bare, at any rating.
+        ("A naked teenager on the beach.", ""),
+        ("A 16-year-old in lingerie.", ""),
+    ],
+)
+def test_text_guard_follows_the_rating(prompt, allowed):
+    for rating in ("G", "PG", "PG-13", "R"):
+        assert (text_guard(prompt, rating) is None) == (rating in allowed.split()), rating
+
+
+def test_rules_follow_the_rating():
+    from drama_agent.content_guard import rules
+
+    assert "rated G" in rules("G") and "nothing suggestive" in rules("G")
+    assert "rated PG-13" in rules() and "lingerie" in rules("PG-13")
+    assert "nudity of adult characters is allowed" in rules("R")
+    assert "rated R" in rules("mature")  # a legacy rating reads as its MPA one
+    for rating in ("G", "PG", "PG-13", "R"):  # rules 2 and 3 never change
+        assert "anyone who is or looks under 18" in rules(rating)
+        assert "Never, at any rating: a sexualized image of a real person's likeness" in rules(
+            rating
+        )
+
+
 def test_upload_guard():
     assert upload_guard("Lila in a black lace bra and panties") == REAL_PERSON_REASON
     assert upload_guard("Two people in bed, morning light") == REAL_PERSON_REASON
     assert upload_guard("A nude portrait") == NUDITY_REASON
+    # R allows nudity, but never of someone who may be a real person.
+    assert upload_guard("A nude portrait", rating="R") == REAL_PERSON_REASON
+    assert upload_guard("Lila in a lace bra by the window", rating="R") == REAL_PERSON_REASON
     assert upload_guard("Lila in a charcoal blazer, nude lipstick") is None
     assert text_guard("Lila in a red bikini on the beach") is None  # fine without uploads
 
@@ -526,7 +591,7 @@ def test_open_mode_allows_clothed_romance_with_a_likeness():
 
     assert "clothed romantic scenes (a kiss, an embrace, swimwear" in mode_rule(False)
     assert "no kiss or embrace, no swimwear" in mode_rule(True)
-    assert "Never: a sexualized image of a real person's likeness" in RULES
+    assert "Never, at any rating: a sexualized image of a real person's likeness" in RULES
     assert upload_guard("Lila in a red swimsuit on a beach", restrictive=False) is None
     assert upload_guard("Lila in a red swimsuit on a beach") == REAL_PERSON_REASON
     assert upload_guard("Lila undressing", restrictive=False) == REAL_PERSON_REASON

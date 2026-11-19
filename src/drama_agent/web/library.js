@@ -1,16 +1,20 @@
 "use strict";
 
 /*
- * Characters and Sets: the asset library (docs/entity-reorganization.md, phase 2).
- * Every character or set, and one with its sheet, its looks or states, its items, current
- * pictures (click to enlarge; out-of-date ones marked) and the stories and shots that use it.
+ * Characters and Sets: the asset library (docs/entity-reorganization.md, phase 2), in three
+ * layers (docs/library-layers.md): a character or set with its sheet and its looks or states
+ * and items as cards (and "+ New look"); one look, state or item (or the face) with its line,
+ * sheet, pictures and the shots that use it; one picture with its takes, the pictures
+ * brought in (keyframes, chats), a new take and the workbench.
  * Each part is edited in place: the edit is saved to the story it came from (PATCH
  * …/entries/{id}, the same as the Cast and Sets tabs) and the library follows. "Redraw
  * out-of-date" redraws this asset's out-of-date pictures (and what is drawn from them).
  */
 
 const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "", story: "", timer: null, redrawing: "", scratch: [],
-  designs: {}, designTimer: null };  // design board data per story revision on the page
+  designs: {}, designTimer: null,
+  part: null, slot: null,  // the layer shown: a look, state or item (or the face), one of its pictures
+  adding: false, newDraft: {}, newError: "", stale: false };  // "+ New look"  // design board data per story revision on the page
 // Open editors by asset id; typed text is kept in `drafts` until saved or cancelled.
 const libEdit = { open: new Set(), drafts: {}, errors: {}, notes: {}, saving: new Set() };
 
@@ -26,7 +30,8 @@ const libLabel = (k) => k.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCas
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const kindOfId = (id) => (id.startsWith("chr_") ? "character" : id.startsWith("set_") ? "set" : null);
 
-// "#lib=characters", "#lib=sets", or "#lib=<asset id>".
+// "#lib=characters", "#lib=sets", or "#lib=<asset id>" (with "&part=" and "&slot=" for its
+// layers).
 async function libRoute(param) {
   const kind = param === "sets" ? "set" : param === "characters" || !param ? "character" : kindOfId(param);
   if (!kind) {
@@ -36,11 +41,22 @@ async function libRoute(param) {
   const meta = LIB_KINDS[kind];
   setMode(meta.mode);
   const id = kindOfId(param || "") ? param : null;
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const [part, slot] = id ? [hash.get("part"), hash.get("part") && hash.get("slot")] : [null, null];
+  // Another layer of the asset on the page: shown from what is loaded, then refreshed.
+  if (id && lib.id === id && lib.view && !lib.stale) {
+    Object.assign(lib, { part, slot, adding: false });
+    renderLibrary();
+    window.scrollTo(0, 0);
+    libReload();
+    return;
+  }
   if (lib.kind !== kind) Object.assign(lib, { kind, list: null, filter: "" });
   if (lib.id !== id) {
     Object.assign(libEdit, { open: new Set(), drafts: {}, errors: {}, notes: {} });
     lib.designs = {};
   }
+  Object.assign(lib, { part, slot, adding: false, stale: false });
   clearTimeout(lib.timer);
   clearTimeout(lib.designTimer);
   lib.id = id;
@@ -215,28 +231,75 @@ function libVariant(id, ownerId) {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
-// A look, a state or an item: its pictures, line, sheet and use.
-function libPart(part, kindLabel, ownerId) {
-  return h("section", { class: "card lib-part" },
-    h("div", { class: "section-head" },
-      h("h3", {}, libVariant(part.origin_entity_id, kindLabel === "item" ? "" : ownerId), " ", h("span", { class: "muted small mono" }, part.origin_entity_id)),
-      h("span", { class: "chip" }, kindLabel)),
-    libEdit.open.has(part.asset_id) ? libEditor(part) : [
-      part.description && h("p", {}, part.description),
-      h("details", {}, h("summary", { class: "small" }, "Sheet"), libSheet(part.sheet)),
-      libEditButton(part)],
-    libEdit.notes[part.asset_id] && h("p", { class: "small muted" }, libEdit.notes[part.asset_id]),
-    libPictures(part.pictures, part.name),
-    libDesign(part),
-    part.states && part.states.length > 0 && h("div", { class: "small" }, h("strong", {}, "States: "),
-      h("ul", { class: "plain" }, part.states.map((s) => h("li", {}, h("span", { class: "mono" }, s.state_id), ` · ${s.description}`)))),
-    h("div", { class: "small" }, h("strong", {}, "Used in"), libUsedIn(part.used_in, "keyframes")));
+// -- Layers: the character (or set), one look (state, item or the face), one picture --------
+// "#lib=<asset>" is the character or set; "&part=<asset>" one of its looks, states or items
+// (the character itself for its face); "&slot=<deliverable>" one picture of it, with its
+// takes. Each layer links to the next; a breadcrumb leads back.
+
+const libHref = (id, part, slot) => `#lib=${encodeURIComponent(id)}${part ? `&part=${encodeURIComponent(part)}` : ""}${slot ? `&slot=${encodeURIComponent(slot)}` : ""}`;
+
+// Everything on the page that has pictures: the character itself (its face), its looks or
+// states, its items.
+function libParts(a) {
+  const meta = LIB_KINDS[a.kind];
+  return [...(a.kind === "character" ? [a] : []), ...(a[meta.child] || []), ...(a.items || [])];
 }
 
-function renderLibAsset(a) {
+// "Face", "Look: Evening torn", "State: Night", "Item: Business card".
+function libPartTitle(a, part) {
+  if (part.asset_id === a.asset_id) return "Face";
+  const kind = { look: "Look", set_state: "State", item: "Item" }[part.kind] || "Part";
+  return `${kind}: ${libVariant(part.origin_entity_id, part.kind === "item" ? "" : a.origin_entity_id)}`;
+}
+
+function libCrumbs(a, part, slot) {
+  const meta = LIB_KINDS[a.kind];
+  const trail = [[`#lib=${meta.path}`, meta.plural], [libHref(a.asset_id), a.name]];
+  if (part) trail.push([libHref(a.asset_id, part.asset_id), libPartTitle(a, part)]);
+  if (slot) trail.push([null, slot.view]);
+  return h("nav", { class: "crumbs small", "aria-label": "Where you are" }, trail.map(([href, label], i) => [
+    i > 0 && h("span", { class: "muted", "aria-hidden": "true" }, " › "),
+    href && i < trail.length - 1 ? h("a", { href }, label) : h("strong", { "aria-current": "page" }, label)]));
+}
+
+// The design data of a part: its story revision's board and the slots that show it.
+function libSlotData(part) {
+  const ref = part.origin_revision_id ? { package_id: part.origin_package_id, revision_id: part.origin_revision_id } : null;
+  const v = ref && lib.designs[imagesKey(ref)];
+  return { ref, v, slots: libSlots(part, v) };
+}
+
+// What came in from elsewhere (a keyframe, a chat) or was drawn before takes: a slot's
+// finished pictures that belong to no take.
+const libLoose = (v, slot) => v.images.filter((i) => keyOf(i) === keyOf(slot) && !i.option_id && i.status === "done" && !i.finalizes);
+const libTakeCount = (v, slot) => v.options.filter((o) => keyOf(o) === keyOf(slot)).length + (libLoose(v, slot).length ? 1 : 0);
+
+// A card that opens a part (a look, a state, an item, the face): its pick, name and line.
+function libPartCard(a, part) {
+  const { v, slots } = libSlotData(part);
+  const pic = part.pictures[0];
+  const takes = v ? slots.reduce((n, s) => n + libTakeCount(v, s), 0) : null;
+  const shots = (part.used_in || []).reduce((n, u) => n + u.shots.length, 0);
+  const stale = part.pictures.some((p) => p.outdated.length);
+  return h("a", { href: libHref(a.asset_id, part.asset_id), class: "card lib-card", title: `Open ${libPartTitle(a, part)}: its pictures and takes` },
+    pic ? h("img", { src: pic.thumb, alt: libPartTitle(a, part), loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
+    pic && lookalikeTag(pic.likeness),
+    h("strong", {}, libPartTitle(a, part)),
+    part.asset_id !== a.asset_id && part.description && h("span", { class: "small lib-line" }, part.description),
+    h("span", { class: "muted small" }, [
+      takes != null && count(takes, "take", "takes"),
+      part.asset_id !== a.asset_id && (shots ? count(shots, "shot", "shots") : "in no shot yet"),
+    ].filter(Boolean).join(" · ")),
+    stale && h("span", { class: "chip warn" }, "out of date"));
+}
+
+// Level 1: the character (or set): its sheet, its face, its looks or states, its items.
+function renderLibTop(a) {
   const meta = LIB_KINDS[a.kind];
   const origin = jobOf(a.origin_package_id);
+  const children = a[meta.child];
   return h("div", { class: "lib-asset" },
+    libCrumbs(a),
     h("section", { class: "card" },
       h("div", { class: "section-head" },
         h("h2", {}, a.name),
@@ -246,21 +309,168 @@ function renderLibAsset(a) {
             title: "Open the story this came from" }, "Open its story"))),
       a.description && h("p", { class: "muted" }, a.description),
       libRedrawRow(a),
-      libDesignControls(),
-      a.kind === "character" && libPictures(a.pictures, a.name),
-      a.kind === "character" && libDesign(a),
-      libEdit.open.has(a.asset_id) ? libEditor(a) : [libSheet(a.sheet), libEditButton(a)],
+      libEdit.open.has(a.asset_id) ? libEditor(a) : [stickyDetails(`libsheet:${a.asset_id}`, "Sheet", libSheet(a.sheet)), libEditButton(a)],
       libEdit.notes[a.asset_id] && h("p", { class: "small muted" }, libEdit.notes[a.asset_id]),
       h("div", { class: "small" }, h("strong", {}, "Used in"), libUsedIn(a.used_in, "storyboard"))),
+    h("div", { class: "section-head" }, h("h3", {}, `${meta.childLabel} (${children.length})`),
+      !lib.adding && h("button", { type: "button", class: "btn small", onclick: () => { lib.adding = true; renderLibrary(); } }, `+ New ${meta.one}`)),
+    lib.adding && libNewVariant(a),
+    h("div", { class: "lib-grid" },
+      a.kind === "character" && libPartCard(a, a),
+      children.map((x) => libPartCard(a, x))),
+    !children.length && h("p", { class: "muted small" }, `No ${meta.many} yet.`),
+    h("h3", {}, a.kind === "character" ? `Carried items (${a.items.length})` : `Dressing (${a.items.length})`),
+    a.items.length ? h("div", { class: "lib-grid" }, a.items.map((x) => libPartCard(a, x)))
+      : h("p", { class: "muted small" }, a.kind === "character" ? "Nothing this character carries is registered." : "No registered props dress this set."),
     (a.also || []).length > 0 && h("section", { class: "card" },
       h("h3", {}, "Also drawn in"),
       h("p", { class: "muted small" }, `Other stories linked their ${a.kind === "character" ? "character" : "set"} to this one; these are their own pictures.`),
       a.also.map((x) => h("div", {}, h("strong", { class: "small" }, storyLink(x.package_id, "casting", x.title || x.package_id)),
-        libPictures(x.pictures, `${a.name} (${x.title})`)))),
-    h("h3", {}, `${meta.childLabel} (${a[meta.child].length})`),
-    a[meta.child].length ? a[meta.child].map((x) => libPart(x, a.kind === "character" ? "look" : "state", a.origin_entity_id)) : h("p", { class: "muted" }, "None yet."),
-    h("h3", {}, a.kind === "character" ? `Carried items (${a.items.length})` : `Dressing (${a.items.length})`),
-    a.items.length ? a.items.map((x) => libPart(x, "item", a.origin_entity_id)) : h("p", { class: "muted small" }, a.kind === "character" ? "Nothing this character carries is registered." : "No registered props dress this set."));
+        libPictures(x.pictures, `${a.name} (${x.title})`)))));
+}
+
+// Level 2: one look, state, item or the face: its line and sheet, its pictures (each opens
+// its takes), where it is used.
+function renderLibPart(a, part) {
+  const self = part.asset_id === a.asset_id;
+  const { v, slots } = libSlotData(part);
+  return h("div", { class: "lib-asset" },
+    libCrumbs(a, part),
+    h("section", { class: "card" },
+      h("div", { class: "section-head" }, h("h2", {}, libPartTitle(a, part)),
+        h("span", { class: "chip" }, self ? "face" : { look: "look", set_state: "state", item: "item" }[part.kind])),
+      !self && (libEdit.open.has(part.asset_id) ? libEditor(part) : [
+        part.description && h("p", {}, part.description),
+        h("details", {}, h("summary", { class: "small" }, "Sheet"), libSheet(part.sheet)),
+        libEditButton(part)]),
+      self && h("p", { class: "muted small" }, "The face every look is drawn from. Its sheet is on the character's page."),
+      libEdit.notes[part.asset_id] && h("p", { class: "small muted" }, libEdit.notes[part.asset_id]),
+      part.states && part.states.length > 0 && h("div", { class: "small" }, h("strong", {}, "States: "),
+        h("ul", { class: "plain" }, part.states.map((s) => h("li", {}, h("span", { class: "mono" }, s.state_id), ` · ${s.description}`)))),
+      !self && h("div", { class: "small" }, h("strong", {}, "Used in"), libUsedIn(part.used_in, "keyframes"))),
+    h("h3", {}, "Pictures"),
+    !v ? h("p", { class: "muted small" }, "Loading takes…")
+      : !slots.length ? h("p", { class: "muted small" }, "Nothing to draw for it in its story.")
+      : h("div", { class: "lib-grid" }, slots.map((slot) => {
+          const pick = part.pictures.find((p) => p.deliverable_id === slot.deliverable_id);
+          const n = libTakeCount(v, slot);
+          return h("a", { href: libHref(a.asset_id, part.asset_id, slot.deliverable_id), class: "card lib-card", title: `Open the ${slot.view}: its takes and draws` },
+            pick ? h("img", { src: pick.thumb, alt: slot.view, loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
+            pick && lookalikeTag(pick.likeness),
+            h("strong", {}, slot.view),
+            h("span", { class: "muted small" }, `${count(n, "take", "takes")}${pick?.picked ? " · picked" : ""}`),
+            pick && pick.outdated.length > 0 && h("span", { class: "chip warn", title: pick.outdated.join("; ") }, "out of date"));
+        })));
+}
+
+// Level 3: one picture: its takes and draws, pictures brought in, a new take, the workbench.
+function renderLibSlot(a, part, slot) {
+  const { ref, v } = libSlotData(part);
+  const job = jobOf(part.origin_package_id);
+  const picked = new Set(v.images.filter((i) => i.selected && i.status === "done").map(keyOf));
+  const parent = slot.parent_key && `${slot.parent_key[0]}|${slot.parent_key[1]}`;
+  const from = parent && v.slots.find((x) => keyOf(x) === parent);
+  const foreign = part.origin_package_id !== a.origin_package_id;
+  const loose = libLoose(v, slot);
+  return h("div", { class: "lib-asset" },
+    libCrumbs(a, part, slot),
+    h("section", { class: "card" },
+      h("div", { class: "section-head" }, h("h2", {}, `${libPartTitle(a, part)} · ${slot.view}`),
+        foreign && h("span", { class: "chip", title: "This look comes from a story linked to this character" }, "in its own story")),
+      libDesignControls(),
+      libWorkbench(part, slot, false)),
+    h("h3", {}, "Takes"),
+    renderTakeRows(v, slot),
+    loose.length > 0 && h("div", { class: "take" },
+      h("div", { class: "take-head" }, h("strong", {}, "Brought in"),
+        h("span", { class: "muted small" }, "From keyframes and chats, or drawn before takes. Click one to pick it.")),
+      h("div", { class: "draws" }, loose.map(libLooseDraw))),
+    h("h3", {}, "New take"),
+    parent && !picked.has(parent)
+      ? h("p", { class: "muted small" }, `Drawn from ${from ? `${from.entity}${from.variant ? ` (${from.variant})` : ""}, ${from.view}` : "another picture"}: pick an image for it first.`)
+      : renderNewTake(ref, slot, { jobId: job && job.job_id }));
+}
+
+// "keyframe take_1:0 (shot sh_01_02_01)" or "experiment exp_1 #3": where a picture came from.
+function libSource(img) {
+  const src = img.imported_from || "";
+  let m = src.match(/^keyframe (\S+):(\d+) \(shot (\S+)\)$/);
+  if (m) {
+    const job = jobOf(img.package_id);
+    const label = `Keyframe of shot ${m[3]}, draw ${Number(m[2]) + 1}`;
+    return job ? h("a", { href: `#job=${encodeURIComponent(job.job_id)}&tab=keyframes`, title: "Open the story's keyframes" }, label) : label;
+  }
+  m = src.match(/^experiment (\S+) #(\d+)$/);
+  if (m) return h("a", { href: `#exp=${encodeURIComponent(m[1])}` }, `Chat image #${m[2]}`);
+  return src ? `From ${src}` : "Drawn before takes";
+}
+
+function libLooseDraw(img) {
+  return h("figure", { class: `draw done${img.selected ? " selected" : ""}` },
+    h("button", { type: "button", class: "draw-pick", title: img.selected ? "Selected" : "Select this image",
+      onclick: (e) => imageAction(`/v1/generated-images/${encodeURIComponent(img.image_id)}/select`, e.currentTarget) },
+      h("img", { src: thumbUrl(img), alt: img.imported_from || "earlier draw", loading: "lazy" }), lookalikeTag(img.likeness), idTag(`design:${img.image_id}`)),
+    h("figcaption", { class: "small" }, libSource(img), img.selected ? " ✓" : "",
+      h("a", { href: thumbUrl(img, "content"), target: "_blank", rel: "noopener", class: "muted" }, " open")));
+}
+
+function renderLibAsset(a) {
+  const part = lib.part && libParts(a).find((p) => p.asset_id === lib.part);
+  if (lib.part && !part) return h("section", { class: "card" }, libCrumbs(a), h("p", {}, "That look, state or item isn't on this page any more."));
+  if (!part) return renderLibTop(a);
+  if (!lib.slot) return renderLibPart(a, part);
+  const { v, slots } = libSlotData(part);
+  if (!v) return h("div", { class: "lib-asset" }, libCrumbs(a, part), h("p", { class: "muted" }, "Loading takes…"));
+  const slot = slots.find((s) => s.deliverable_id === lib.slot);
+  if (!slot) return h("section", { class: "card" }, libCrumbs(a, part), h("p", {}, "That picture isn't drawn for it any more."));
+  return renderLibSlot(a, part, slot);
+}
+
+// "+ New look" (or state): a line and a few sheet fields, added to the story the character
+// or set came from; its picture page opens, ready for a first take.
+const LIB_NEW = {
+  character: [["wardrobe", "Wardrobe", "e.g. a black evening dress, one strap torn"], ["hair_and_makeup", "Hair and makeup", "e.g. hair down and wet, mascara running"], ["condition", "Condition", "e.g. soaked by rain, a cut on the lip"]],
+  set: [["time_of_day", "Time of day", "e.g. night"], ["lighting", "Lighting", "e.g. one desk lamp, rain shadows on the wall"], ["dressing_changes", "Dressing changes", "e.g. chairs stacked, a banner up"], ["condition", "Condition", "e.g. ransacked"]],
+};
+
+function libNewVariant(a) {
+  const meta = LIB_KINDS[a.kind];
+  const draft = (lib.newDraft ??= {});
+  const field = (key, label, hint, rows = 1) => {
+    const box = h("textarea", { rows, placeholder: hint, "aria-label": label, oninput: (e) => { draft[key] = e.target.value; } });
+    box.value = draft[key] || "";
+    return h("label", { class: "field" }, h("span", {}, label), box);
+  };
+  const save = async (button) => {
+    const description = (draft.description || "").trim();
+    if (!description) { lib.newError = "Describe it in a line first."; return renderLibrary(); }
+    const sheet = Object.fromEntries(LIB_NEW[a.kind].map(([k]) => [k, (draft[k] || "").trim()]).filter(([, x]) => x));
+    button.disabled = true;
+    try {
+      const out = await api(`/v1/drama-packages/${encodeURIComponent(a.origin_package_id)}/variants`, {
+        method: "POST", body: JSON.stringify({ parent_id: a.origin_entity_id, description, sheet, revision_id: a.origin_revision_id }) });
+      Object.assign(lib, { adding: false, newDraft: {}, newError: "", stale: true });
+      location.hash = libHref(out.lib_asset_id || a.asset_id, out.part_asset_id, out.deliverable_ids[0]).slice(1);
+    } catch (e) {
+      button.disabled = false;
+      lib.newError = e.message;
+      renderLibrary();
+    }
+  };
+  return h("section", { class: "card lib-editor" },
+    h("strong", {}, `New ${meta.one} for ${a.name}`),
+    field("description", "In one line", a.kind === "character" ? "e.g. Wedding dress, rain-soaked, after she runs out" : "e.g. The shop the night of the break-in"),
+    LIB_NEW[a.kind].map(([k, label, hint]) => field(k, label, hint)),
+    h("p", { class: "muted small" }, `Added to the story ${a.name} comes from. No shot ${a.kind === "character" ? "wears" : "uses"} it yet; its picture is drawn ${a.kind === "character" ? "from the face" : "like any state"}.`),
+    h("div", { class: "prompt-edit-actions" },
+      h("button", { type: "button", class: "btn small primary-outline", onclick: (e) => save(e.currentTarget) }, `Add ${meta.one}`),
+      h("button", { type: "button", class: "btn ghost small", onclick: () => { Object.assign(lib, { adding: false, newError: "" }); renderLibrary(); } }, "Cancel")),
+    lib.newError && h("p", { class: "small warn-text", role: "alert" }, lib.newError));
+}
+
+// After a draw, a pick or a new take: the asset again (its current pictures) and its takes.
+async function libAfterDesign() {
+  await libReload();
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -469,28 +679,6 @@ function libSlots(part, v) {
     || (part.kind === "item" && s.asset_type === "prop" && s.entity_id === id));
 }
 
-function libDesign(part) {
-  const ref = part.origin_revision_id ? { package_id: part.origin_package_id, revision_id: part.origin_revision_id } : null;
-  const v = ref && lib.designs[imagesKey(ref)];
-  if (!v) return h("p", { class: "muted small" }, "Loading takes…");
-  const slots = libSlots(part, v);
-  if (!slots.length) return null;
-  const job = jobOf(part.origin_package_id);
-  const picked = new Set(v.images.filter((i) => i.selected && i.status === "done").map(keyOf));
-  const foreign = lib.view && part.origin_package_id !== lib.view.origin_package_id;
-  return slots.map((slot) => {
-    const parent = slot.parent_key && `${slot.parent_key[0]}|${slot.parent_key[1]}`;
-    const from = parent && v.slots.find((x) => keyOf(x) === parent);
-    const blocked = parent && !picked.has(parent);
-    const takes = v.options.filter((o) => keyOf(o) === keyOf(slot)).length;
-    return [libWorkbench(part, slot, slots.length > 1), stickyDetails(`lib:${keyOf(slot)}`, `Takes and draws · ${slot.view} · ${count(takes, "take", "takes")}${foreign ? " · in its own story" : ""}`,
-      renderTakeRows(v, slot),
-      blocked
-        ? h("p", { class: "muted small" }, `Drawn from ${from ? `${from.entity}${from.variant ? ` (${from.variant})` : ""}, ${from.view}` : "another picture"}: pick an image for it first.`)
-        : renderNewTake(ref, slot, { jobId: job && job.job_id }))];
-  }).flat();
-}
-
 // The workbench (docs/workbench.md): develop a picture in a chat that starts from its pick;
 // a result's "Use as pick" makes it this picture's pick. The slot's chats are listed.
 function libWorkbench(part, slot, sayView) {
@@ -504,6 +692,13 @@ function libWorkbench(part, slot, sayView) {
     onchange: (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) benchFaceFromPhoto(f, target, fromPhoto); },
   });
   const fromPhoto = photo && h("button", { type: "button", class: "btn small", title: "Upload a reference photo: it is described in words, and you test the wording seed by seed (Face Lab)", onclick: () => photo.click() }, "From a photo");
+  // ... or a face study with no photo: write the description, draw it with H3 or a local
+  // image server (the study's "Drawn with").
+  const fromText = photo && h("button", {
+    type: "button", class: "btn small",
+    title: "Write a description of the face and draw it from text alone, with MiniMax H3 or your local image server (Face Lab)",
+    onclick: (e) => benchFaceFromText(target, e.currentTarget),
+  }, "Create from text");
   const develop = async (button) => {
     button.disabled = true;
     try {
@@ -519,7 +714,7 @@ function libWorkbench(part, slot, sayView) {
   };
   return h("div", { class: "design-row small" },
     h("button", { type: "button", class: "btn small", title: "Change this picture in a chat with the image model, starting from its pick", onclick: (e) => develop(e.currentTarget) }, sayView ? `Develop the ${slot.view} in a chat` : "Develop in a chat"),
-    fromPhoto, photo,
+    fromPhoto, photo, fromText,
     libLinkScratch(target, slot.asset_type === "character_identity"),
     mine.length > 0 && h("span", { class: "muted" }, "Chats:"),
     mine.slice(0, 6).map((s) => h("a", {
@@ -527,7 +722,7 @@ function libWorkbench(part, slot, sayView) {
       title: `${s.kind === "face" ? "Face Lab study" : "Chat"}, updated ${timeAgo(s.updated_at)}`,
       // Opens in the panel; a middle click still opens the full page.
       onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench(s.kind === "face" ? "face" : "chat", s.session_id, s.title); },
-    }, s.kind === "face" ? `${s.title} (photo)` : s.title)),
+    }, s.kind === "face" ? `${s.title} (face study)` : s.title)),
     mine.length > 6 && h("a", { href: "#", class: "muted", title: "Every chat is listed at the top of the panel",
       onclick: (e) => { e.preventDefault(); openBench("chat", mine.find((s) => s.kind !== "face")?.session_id || mine[0].session_id, label); } }, `and ${mine.length - 6} more`));
 }

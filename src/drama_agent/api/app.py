@@ -33,6 +33,7 @@ from ..imagegen import FixtureImageClient, ImageClient
 from ..images import (
     STALE_RUNNING_S,
     ImageWorker,
+    face_providers_from_env,
     image_client_from_env,
     keyframe_providers_from_env,
 )
@@ -77,6 +78,7 @@ def create_app(
     image_client: ImageClient | None = None,
     keyframe_providers: dict[str, ImageClient] | None = None,
     keyframe_provider: str = "h3",
+    face_providers: dict[str, ImageClient] | None = None,
 ) -> FastAPI:
     """Build the API. `workers` in-process job workers start with the app (lifespan);
     with workers=0 jobs are only enqueued, for a separate `python -m drama_agent.worker`.
@@ -91,7 +93,9 @@ def create_app(
     images = image_client or FixtureImageClient()
     wakeup = asyncio.Event()
     image_wakeup = asyncio.Event()
-    experiments = ExperimentRunner(repo, media, images, orchestrator.client)
+    # Face Lab tests may also be drawn by a local image server ("local"), chosen per test.
+    experiments = ExperimentRunner(repo, media, images, orchestrator.client,
+                                   providers=face_providers)  # fmt: skip
 
     # Keyframes share the Experiment tab's GPU lock: one render at a time from this process.
     # Keyframes can also be drawn with other providers (e.g. Nano Banana), chosen per take.
@@ -281,6 +285,7 @@ def create_app_from_env() -> FastAPI:
         image_client=image_client_from_env(),
         keyframe_providers=keyframe_providers_from_env(),
         keyframe_provider=os.environ.get("DRAMA_KEYFRAME_PROVIDER", "h3"),
+        face_providers=face_providers_from_env(),
     )
 
 

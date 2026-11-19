@@ -35,14 +35,21 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from .content_guard import RULES as CONTENT_RULES
 from .content_guard import GuardRefused, mode_rule, screen, text_guard
+from .content_guard import rules as content_rules
 from .image_ids import MENTION as GLOBAL_MENTION
-from .imagegen import MAX_REFERENCE_BYTES, MAX_REFERENCES, ImageClient, Reference
+from .imagegen import (
+    MAX_REFERENCE_BYTES,
+    MAX_REFERENCES,
+    ImageClient,
+    ImageGenError,
+    Reference,
+)
 from .llm import GenerationRequest
 from .media import MediaPart, MediaStore
 from .models import SourceAsset
 from .models.package import utcnow
+from .models.request import DEFAULT_RATING
 
 log = logging.getLogger(__name__)
 
@@ -122,8 +129,14 @@ class ExpTurn(BaseModel):
     likeness: bool | None = None
     # Restrictive mode (top-of-page switch) when the message was sent.
     restrictive: bool = False
+    # The story's rating (G, PG, PG-13, R) when it was sent, which caps what it may show;
+    # PG-13 outside a story (models/request.py, content_guard.py).
+    rating: str = DEFAULT_RATING
     from_image: str | None = None  # "pick": the design image it copies (its image_id)
     import_ref: str | None = None  # "import": the picture it copies (an image_ids ref)
+    # The image provider that draws it: None for H3, or another by name (a Face Lab test
+    # can use "local", a simple image server of your own).
+    provider: str | None = None
     # Global numbers the message mentions ("@1234") and the chat number each came in as.
     global_mentions: dict[str, int] = Field(default_factory=dict)
     results: list[ExpResult] = Field(default_factory=list)
@@ -699,11 +712,11 @@ class ExpPromptOutput(BaseModel):
     refusal: str = ""
 
 
-def writer_instructions(restrictive: bool = False) -> str:
+def writer_instructions(restrictive: bool = False, rating: str = DEFAULT_RATING) -> str:
     from .prompts import load_h3_image_examples, load_h3_image_rules
 
     guide = WRITER_GUIDE.format(
-        rules=CONTENT_RULES, mode=mode_rule(restrictive), max_draws=MAX_DRAWS
+        rules=content_rules(rating), mode=mode_rule(restrictive), max_draws=MAX_DRAWS
     )
     parts = [WRITER_ROLE, load_h3_image_rules(), load_h3_image_examples(), guide]
     return "\n\n".join(parts)
@@ -740,13 +753,22 @@ class ExperimentRunner:
     time anyway). Unfinished turns don't survive a restart: `recover` marks them failed."""
 
     def __init__(
-        self, repo: Any, media: MediaStore, images: ImageClient, writer_client: Any
+        self,
+        repo: Any,
+        media: MediaStore,
+        images: ImageClient,
+        writer_client: Any,
+        providers: dict[str, ImageClient] | None = None,
     ) -> None:
         self.repo = repo
         self.media = media
         self.images = images
         self.writer_client = writer_client
+        # Providers besides H3 (`images`) a turn may name, e.g. "local" (Face Lab tests).
+        self.providers = dict(providers or {})
         self._gpu = asyncio.Lock()
+        # One render at a time per provider; H3 shares the GPU lock with keyframes.
+        self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task[None]] = set()
 
     def recover(self) -> int:
@@ -763,6 +785,10 @@ class ExperimentRunner:
         for t in list(self._tasks):
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        # Providers besides H3 are this runner's own (H3 is closed by the app).
+        for client in self.providers.values():
+            if close := getattr(client, "aclose", None):
+                await close()
 
     async def run(self, turn_id: str) -> None:
         turn = self.repo.get_exp_turn(turn_id)
@@ -779,12 +805,11 @@ class ExperimentRunner:
             await self._guard(turn)
             # Read in a thread: up to nine images of several MB each.
             refs = await asyncio.to_thread(self._references, turn) if turn.draws else []
+            client, lock = self._client(turn.provider)
             for n in range(len(turn.results), turn.draws):
                 seed = turn.seeds[n] if n < len(turn.seeds) else random.randint(1, 2**31 - 1)
-                async with self._gpu:
-                    result = await self.images.generate(
-                        turn.prompt, current_size(turn.size), seed, refs
-                    )
+                async with lock:
+                    result = await client.generate(turn.prompt, current_size(turn.size), seed, refs)
                 ext = "png" if result.content_type == "image/png" else "jpg"
                 rel = f"experiments/{turn.session_id}/{turn.turn_id}_{n}.{ext}"
                 await asyncio.to_thread(self._write, rel, result.data)
@@ -832,6 +857,15 @@ class ExperimentRunner:
                 session.current = f"turn:{turn.turn_id}:0"
             session.updated_at = utcnow()
             self.repo.save_exp_session(session)
+
+    def _client(self, provider: str | None) -> tuple[ImageClient, asyncio.Lock]:
+        """The image client a turn names (None: H3) and the lock it renders under."""
+        if not provider:
+            return self.images, self._gpu
+        client = self.providers.get(provider)
+        if client is None:
+            raise ImageGenError(f"the image provider {provider!r} isn't configured")
+        return client, self._locks.setdefault(provider, asyncio.Lock())
 
     def _references(self, turn: ExpTurn) -> list[Reference]:
         """The turn's pictures for H3 in <Picture N> order, read from disk (blocking).
@@ -925,7 +959,7 @@ class ExperimentRunner:
         from .face_lab import STAGE as DESCRIBE_STAGE
         from .face_lab import DescribeOutput, describe_instructions
 
-        if reason := text_guard(turn.text):
+        if reason := text_guard(turn.text, turn.rating):
             raise GuardRefused(reason)
         asset = turn.attachments[0]
         # The model copy (up to 1,536 px) shows the face in detail; thumbs are too small.
@@ -946,7 +980,7 @@ class ExperimentRunner:
         )
         request = GenerationRequest(
             stage=DESCRIBE_STAGE,  # type: ignore[arg-type]
-            instructions=describe_instructions(turn.restrictive),
+            instructions=describe_instructions(turn.restrictive, turn.rating),
             context={"hint": turn.text or None, "previous_prompt": previous},
             media=[MediaPart(label="<Photo>", path=path, mime=mime)],
         )
@@ -963,7 +997,7 @@ class ExperimentRunner:
                 f"The description cites {', '.join(cited)}, but Face Lab tests send no "
                 "pictures. Retry for a new description."
             )
-        if reason := text_guard(prompt):
+        if reason := text_guard(prompt, turn.rating):
             raise GuardRefused(reason)
         turn.prompt, turn.reply = prompt, out.notes.strip()
         turn.prompt_model = request.model or "unknown"
@@ -974,7 +1008,7 @@ class ExperimentRunner:
         """Raise GuardRefused unless the turn's prompt may be drawn. A prompt the writer
         wrote was judged by the writer (it sees the rules and the pictures); one sent as
         typed (exact mode, or the writer failed) is screened by the text model."""
-        if reason := text_guard(turn.prompt) or text_guard(turn.text):
+        if reason := text_guard(turn.prompt, turn.rating) or text_guard(turn.text, turn.rating):
             raise GuardRefused(reason)
         if turn.prompt_model is None:
             parts, media, _, turns = self._for_model(turn)
@@ -985,6 +1019,7 @@ class ExperimentRunner:
                 media=media,
                 message=turn.text if turn.text != turn.prompt else None,
                 restrictive=turn.restrictive,
+                rating=turn.rating,
             )
             # Only ever adds a likeness (the writer may already have found one).
             turn.likeness = (
@@ -992,7 +1027,7 @@ class ExperimentRunner:
             )
 
     async def _write_prompt(self, turn: ExpTurn) -> None:
-        if reason := text_guard(turn.text):  # clear cases need no model call
+        if reason := text_guard(turn.text, turn.rating):  # clear cases need no model call
             raise GuardRefused(reason)
         parts, media, current_prompt, turns = self._for_model(turn)
         history = [
@@ -1002,7 +1037,7 @@ class ExperimentRunner:
         ][-HISTORY_TURNS:]
         request = GenerationRequest(
             stage=STAGE,  # type: ignore[arg-type]
-            instructions=writer_instructions(turn.restrictive),
+            instructions=writer_instructions(turn.restrictive, turn.rating),
             context={
                 "message": chat_text(turn.text, turn.global_mentions),
                 "pictures": parts,

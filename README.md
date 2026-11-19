@@ -312,6 +312,7 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
 | `MCPHUB_IMAGE_MODEL` | `minimax-h3-image` | image model |
 | `GEMINI_API_KEY` / `GEMINI_URL` | — / `https://generativelanguage.googleapis.com/v1beta` | enables Nano Banana as a second keyframe provider (`nano-banana`); a gateway serving the Gemini API can stand in for the URL. With fixture images, a local stand-in is offered instead |
 | `GEMINI_IMAGE_MODEL` | `gemini-nano-banana-2.1` | the Gemini image model for keyframes |
+| `DRAMA_LOCAL_IMAGE_URL` | `http://localhost:8080` | a simple image server of your own that Face Lab tests can be drawn with (`local`): `POST /image` with a `prompt` form field (plus `size` and `seed`, which it may ignore), answering with a PNG or JPEG. With fixture images, a local stand-in |
 | `DRAMA_KEYFRAME_PROVIDER` | `h3` | the keyframe provider when a request names none (`h3` or `nano-banana`) |
 
 The image route needs an MCPHub key from a `newsbreak.com` account; it is sent as
@@ -546,9 +547,12 @@ and Google Sheets open them correctly. Archived stories can't be exported.
 
 Intimate scenes are written as staging for the crew; the app never draws them.
 
-- **Content rating** (job option `content_rating`, under Options): `general` allows at most a
-  kiss; `teen` (default) at most *implied* intimacy (the scene cuts away), no nudity;
-  `mature` allows simulated intimacy with at most partial nudity, on a closed set.
+- **Content rating** (job option `content_rating`, under Options; changeable on the story's
+  Overview): the MPA film ratings. `G` and `PG` allow at most a kiss; `PG-13` (default) at
+  most *implied* intimacy (the scene cuts away), no nudity; `R` allows simulated intimacy
+  with at most partial nudity, on a closed set. Images follow the rating too: suggestive at
+  PG-13 and up, nudity only at R, never explicit, and never anything sexualized of a real
+  person's likeness (docs/content-safety-and-likeness.md).
 - **Scenes** carry an `intimacy` block when they have physical intimacy: level (`kiss`,
   `implied`, `simulated`), who, what the camera shows, what is implied, nudity, consent
   beats and closed set. The script tab marks these scenes.
@@ -586,6 +590,14 @@ Intimate scenes are written as staging for the crew; the app never draws them.
     Clearing likeness is production's and legal's call before anything is used.
   - **On:** GPT turns "like <a real person>" into generic traits and keeps real names out
     of prompts; an existing real-person likeness gets no romance or swimwear either.
+
+### Characters and Sets: layers
+
+A character or set page opens in layers (`docs/library-layers.md`): the character with its
+looks and items as cards, then one look (its line, sheet and shots), then one of its
+pictures with its takes. **+ New look** (or **+ New state**) adds one by hand; it's drawn
+from the face like any look. On the Keyframes tab, **Send to a look…** adds a keyframe
+draw as a take of a look its shot wears (or of its set), as the pick only when asked.
 
 ### Experiment: chat with the image model
 

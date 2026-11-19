@@ -20,8 +20,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .content_guard import RULES as CONTENT_RULES
 from .content_guard import mode_rule
+from .content_guard import rules as content_rules
 from .experiment import (
     MAX_DRAWS,
     MAX_PROMPT_CHARS,
@@ -36,6 +36,7 @@ from .experiment import (
 )
 from .llm import GenerationRequest
 from .models.package import utcnow
+from .models.request import DEFAULT_RATING
 
 STAGE = "face_describe"
 DEFAULT_SIZE = SIZES["3:4"]  # a casting photograph
@@ -112,10 +113,10 @@ class DescribeOutput(BaseModel):
     refusal: str = ""
 
 
-def describe_instructions(restrictive: bool = False) -> str:
+def describe_instructions(restrictive: bool = False, rating: str = DEFAULT_RATING) -> str:
     from .prompts import load_h3_image_examples, load_h3_image_rules
 
-    guide = DESCRIBE_GUIDE.format(rules=CONTENT_RULES, mode=mode_rule(restrictive))
+    guide = DESCRIBE_GUIDE.format(rules=content_rules(rating), mode=mode_rule(restrictive))
     parts = [DESCRIBE_ROLE, load_h3_image_rules(), load_h3_image_examples(), guide]
     return "\n\n".join(parts)
 
@@ -213,8 +214,10 @@ def plan_test(
     seeds: list[int] | None,
     size: str | None,
     restrictive: bool,
+    provider: str | None = None,
 ) -> ExpTurn:
-    """A test render of a prompt by itself (no pictures), with the given seeds if any."""
+    """A test render of a prompt by itself (no pictures), with the given seeds if any, drawn
+    by H3 or another provider (`provider`, e.g. "local")."""
     prompt = prompt.strip()
     if not prompt:
         raise ExpError("Write or generate a prompt first.")
@@ -250,6 +253,7 @@ def plan_test(
         seeds=seeds,
         size=size,
         restrictive=restrictive,
+        provider=provider,
         # Renders meant to recreate an identifiable person carry their likeness.
         likeness=True if photo_likeness(turns) else None,
         finished_at=None,

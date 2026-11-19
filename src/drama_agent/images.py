@@ -39,10 +39,12 @@ from .design.prompts import (
 from .design.setup import (
     NO_LIKENESS_USES,
     _image_kind,
+    face_providers_from_env,
     image_client_from_env,
     keyframe_providers_from_env,
     make_thumb,
     package_has_uploads,
+    story_rating,
 )
 from .design.slots import (
     NeedsPick,
@@ -139,6 +141,7 @@ __all__ = [
     "draws_for",
     "edit_take",
     "explore",
+    "face_providers_from_env",
     "finalize_prompt",
     "image_client_from_env",
     "import_pick",
@@ -157,5 +160,6 @@ __all__ = [
     "select",
     "selected_image",
     "slot_title",
+    "story_rating",
     "take_draws",
 ]

@@ -45,12 +45,13 @@ class BrokenWriter(FixtureModelClient):
 
 
 class Chat:
-    def __init__(self, tmp_path, images=None, text=None):
+    def __init__(self, tmp_path, images=None, text=None, providers=None):
         self.text = text or FixtureModelClient()
         self.images = images or FixtureImageClient()
         self.app = create_app(
-            client=self.text, image_client=self.images, media=MediaStore(tmp_path), poll_s=0.01
-        )
+            client=self.text, image_client=self.images, media=MediaStore(tmp_path), poll_s=0.01,
+            face_providers=providers,
+        )  # fmt: skip
 
     def __enter__(self):
         self.http = TestClient(self.app).__enter__()

@@ -35,7 +35,7 @@ const faceBusy = (v) => v && v.turns.some((t) => t.status === "pending" || t.sta
 function faceDraft(sid) {
   // seen: the newest description already offered (filled in, loaded, or noticed);
   // edited: the box holds the user's own text (or an older version they chose).
-  return (face.drafts[sid] ||= { prompt: "", seen: null, edited: false, draws: 2, seedMode: "random", seeds: "", hint: "", size: null });
+  return (face.drafts[sid] ||= { prompt: "", seen: null, edited: false, draws: 2, seedMode: "random", seeds: "", hint: "", size: null, provider: "h3" });
 }
 
 function goFace(sid) {
@@ -195,7 +195,7 @@ function mountFace(v) {
   el.photo = h("div", { class: "card face-photo" });
   el.prompt = h("textarea", {
     rows: 14, class: "mono", "aria-label": "Prompt",
-    placeholder: "The description appears here. Edit it, then render to test it.",
+    placeholder: "The photo's description appears here, or write your own description of the face. Edit it, then render to test it.",
     oninput: (e) => { d.prompt = e.target.value; d.edited = true; updateFaceCount(); },
   });
   el.prompt.value = d.prompt;
@@ -344,13 +344,13 @@ function renderPhoto(v) {
     ref
       ? h("a", { href: refUrl(ref, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
         h("img", { src: refUrl(ref), alt: "The photo being described", class: "face-photo-img" }), lookalikeTag(photoLikeness(v)), idTag(ref))
-      : h("p", { class: "muted" }, "No photo yet."),
+      : h("p", { class: "muted" }, "No photo. Write the face's description in the Prompt box and render it from text alone, or add a photo to describe."),
     ref && face.labels[ref] != null && h("span", { class: "exp-id" }, `#${face.labels[ref]}`),
     h("div", { class: "face-describe" },
       hint,
       h("div", { class: "face-actions" },
         h("button", { type: "button", class: "btn small", disabled: busy || !ref, onclick: () => describe({ hint: d.hint }) }, "Describe again"),
-        h("button", { type: "button", class: "btn ghost small", disabled: busy, onclick: () => swap.click() }, "Use another photo"),
+        h("button", { type: "button", class: "btn ghost small", disabled: busy, onclick: () => swap.click() }, ref ? "Use another photo" : "Add a photo"),
         swap),
       byNumber,
     ),
@@ -431,9 +431,20 @@ function renderPromptControls(v) {
       h("label", { class: "exp-draws" }, "Size ",
         h("select", { "aria-label": "Size", onchange: (e) => { d.size = e.target.value; } },
           Object.entries(v.sizes).map(([aspect, size]) => h("option", { value: size, selected: size === d.size }, `${aspect} · ${size}`)))),
+      // The image model that draws the test: H3 on MCPHub, or a local image server.
+      Object.keys(v.providers || {}).length > 1 && h("label", { class: "exp-draws" }, "Drawn with ",
+        h("select", { "aria-label": "Image provider", title: "The image model that draws this test", onchange: (e) => { d.provider = e.target.value; } },
+          Object.entries(v.providers).map(([name, model]) => h("option", { value: name, title: model, selected: name === d.provider }, faceProviderName(name, model))))),
     ),
   ));
   updateRenderButton();
+}
+
+/** A provider's name as shown: "MiniMax H3", "Local server (http://localhost:8080)". */
+function faceProviderName(name, model) {
+  if (name === "h3") return "MiniMax H3";
+  if (name === "local") return `Local server${model ? ` ${model.replace(/^[^(]*/, "")}` : ""}`;
+  return name;
 }
 
 function updateRenderButton() {
@@ -463,7 +474,7 @@ async function renderTest() {
   face.error = "";
   let body;
   try {
-    body = { prompt: face.el.prompt.value, size: d.size, restrictive: restrictiveBox.checked };
+    body = { prompt: face.el.prompt.value, size: d.size, restrictive: restrictiveBox.checked, provider: d.provider };
     if (d.seedMode === "fixed") {
       const seeds = parseSeeds(d.seeds);
       if (!seeds.length) throw new Error("Enter at least one seed, or choose Random.");
@@ -500,10 +511,11 @@ function renderTests(v) {
         h("div", { class: "exp-bot-head" },
           h("span", { class: `chip ${t.status === "done" ? "ok" : t.status === "failed" ? "bad" : "accent"}` }, t.refused ? "not allowed" : busy ? `rendering ${Math.min(t.results.length + 1, t.draws)} of ${t.draws}` : t.status),
           h("span", { class: "muted small" }, [
+            t.provider && faceProviderName(t.provider, face.view.providers?.[t.provider]),
             t.size,
             t.seeds.length ? `fixed seeds ${t.seeds.join(", ")}` : "random seeds",
             timeAgo(t.created_at),
-          ].join(" · ")),
+          ].filter(Boolean).join(" · ")),
           t.likeness && h("span", { class: "chip warn", title: "Recreates an identifiable person: nothing sexualized can be made from it" }, "real-person likeness"),
         ),
         h("div", { class: "face-results" },

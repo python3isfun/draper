@@ -115,6 +115,14 @@ content rules see the same likeness mark the story does.
 - **From a photo** sits next to Develop on a character's face. It uploads the photo,
   starts a study for that face and has the photo described. Each render then has Use as
   pick.
+- **Create from text** sits next to it: a study for that face with no photo (the face's
+  empty one, if there is one), where you write the description yourself and render it
+  from text alone. A study's **Drawn with** picks the image model for each test: MiniMax
+  H3 on MCPHub, or a simple image server of your own (`local`, at `DRAMA_LOCAL_IMAGE_URL`,
+  default `http://localhost:8080`), which is sent `prompt`, `size` and `seed` as form
+  fields and answers with a PNG or JPEG:
+  `curl -s localhost:8080/image -F "prompt=a red fox in fresh snow" -o fox.png`. With no
+  photo, a test's likeness is judged from its words alone.
 - After Use as pick, and when the panel closes, the page reloads its view: the new pick,
   what is now out of date, and the picture's chats.
 - Leaving the page (any route change) closes the panel.

@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse
 from starlette.background import BackgroundTask
 
+from ..design.setup import story_rating
 from ..export import build_export
 from ..models import (
     CastSheet,
@@ -24,6 +25,7 @@ from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import new_id
 from ..render import render_markdown
 from .schemas import (
+    RatingBody,
     _new_export_file,
 )
 
@@ -50,6 +52,24 @@ def register(app: FastAPI, ctx: Any) -> None:
             # copied) instead of downloading it.
             return PlainTextResponse(render_markdown(pkg), media_type="text/plain")
         return pkg
+
+    @app.get("/v1/drama-packages/{package_id}/rating", response_model=RatingBody)
+    async def get_rating(package_id: str) -> RatingBody:
+        """The story's rating as it applies now (design/setup.story_rating)."""
+        if repo.get_package(package_id) is None:
+            raise HTTPException(404, "package not found")
+        return RatingBody(rating=story_rating(repo, package_id))  # type: ignore[arg-type]
+
+    @app.put("/v1/drama-packages/{package_id}/rating", response_model=RatingBody)
+    async def set_rating(package_id: str, req: RatingBody) -> RatingBody:
+        """Change a story's rating (G, PG, PG-13, R). It caps what its images may show from
+        now on (content_guard.py) and what a revision of its script may stage; scenes already
+        written are not changed. Stored apart from its jobs, which a running pipeline saves
+        from its own copy."""
+        if repo.get_package(package_id) is None:
+            raise HTTPException(404, "package not found")
+        repo.set_story_rating(package_id, req.rating)
+        return req
 
     @app.get("/v1/drama-packages/{package_id}/export", response_class=FileResponse)
     async def export_package(

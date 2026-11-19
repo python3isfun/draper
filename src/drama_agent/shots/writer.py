@@ -8,10 +8,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ..content_guard import RULES as CONTENT_RULES
+from ..content_guard import rules as content_rules
 from ..experiment import cited_beyond
 from ..llm import GenerationRequest
 from ..models import ProductionPackage
+from ..models.request import DEFAULT_RATING
 from ..models.storyboard import Shot
 from ..shot_reading import PersonState
 from .common import _names, scene_of, shot_of
@@ -124,9 +125,10 @@ direction say.
 
 Clothes follow the look pictures unless the action or the user's `direction` changes them \
 (a jacket off, a man bare-chested in bed); follow such a direction within rules 1 and 2. In \
-a scene with intimacy, show the staging `scene.intimacy.on_screen` describes: no nudity \
-(no genitals, no woman's bare breasts) and no sexual activity is drawn; describe what is \
-there, not what is absent. Rules 1 to 3 above always apply.\
+a scene with intimacy, show the staging `scene.intimacy.on_screen` describes, within the \
+story's rating (rule 1): never genitals or a sex act shown explicitly, and below R no nudity \
+(no woman's bare breasts); describe what is there, not what is absent. Rules 1 to 3 above \
+always apply.\
 """
 
 
@@ -136,10 +138,10 @@ class FramePromptOutput(BaseModel):
     notes: str = ""
 
 
-def writer_instructions() -> str:
+def writer_instructions(rating: str = DEFAULT_RATING) -> str:
     from ..prompts import load_h3_image_examples, load_h3_image_rules
 
-    guide = WRITER_GUIDE.format(rules=CONTENT_RULES, mode=KEYFRAME_RULE)
+    guide = WRITER_GUIDE.format(rules=content_rules(rating), mode=KEYFRAME_RULE)
     return f"{WRITER_ROLE}\n\n{load_h3_image_rules()}\n\n{load_h3_image_examples()}\n\n{guide}"
 
 
@@ -379,7 +381,9 @@ def is_hard(finding: str) -> bool:
     return finding == "empty" or finding.startswith(("longer than", "not allowed", "cites"))
 
 
-def prompt_findings(prompt: str, refs: list[FrameRef], fixed: tuple[str, ...] = ()) -> list[str]:
+def prompt_findings(
+    prompt: str, refs: list[FrameRef], fixed: tuple[str, ...] = (), rating: str = DEFAULT_RATING
+) -> list[str]:
     """Where a keyframe prompt breaks the H3 image rules, as far as a program can tell:
     the edit form (every picture defined, the overview, one relationship each, the closing
     sentence), negations, instructions, story words, and a face picture used as anything
@@ -391,7 +395,7 @@ def prompt_findings(prompt: str, refs: list[FrameRef], fixed: tuple[str, ...] = 
         f"cites {', '.join(over)}, which this sub-shot doesn't send (it sends {len(refs)})"
         if f.startswith("cites a picture") and (over := cited_beyond(prompt, len(refs)))
         else f
-        for f in problems(prompt, len(refs))
+        for f in problems(prompt, len(refs), rating)
     ]
     body = prompt
     for sentence in fixed:

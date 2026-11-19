@@ -91,6 +91,22 @@ async function benchFaceFromPhoto(file, target, button) {
   }
 }
 
+// "Create from text" on a face: a study for that face with no photo, where the description
+// is written by hand and drawn from text alone (H3 or a local image server). Clicked again
+// before anything is in it, the same empty study opens.
+async function benchFaceFromText(target, button) {
+  button.parentElement?.querySelector(".bench-error")?.remove();
+  button.disabled = true;
+  try {
+    const study = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ kind: "face", target, reuse_empty: true }) });
+    openBench("face", study.session_id, target.label);
+  } catch (e) {
+    button.after(h("span", { class: "form-error bench-error" }, e.message));
+  } finally {
+    button.disabled = false;
+  }
+}
+
 $("#bench-close").addEventListener("click", () => closeBench());
 
 // Scratch's buttons (the Characters and Sets sidebar).

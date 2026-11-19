@@ -15,6 +15,20 @@ log = logging.getLogger(__name__)
 NO_LIKENESS_USES = {"location_reference", "visual_style"}
 
 
+def story_rating(repo: Any, package_id: str | None) -> str:
+    """A story's rating (G, PG, PG-13 or R; models/request.py), which caps what its script
+    may stage and what its images may show: the one set on its Overview, else its newest
+    job's. PG-13 for a picture outside any story."""
+    from ..models.request import DEFAULT_RATING, as_rating
+
+    if not package_id:
+        return DEFAULT_RATING
+    if changed := repo.get_story_rating(package_id):
+        return as_rating(changed)
+    jobs = repo.jobs_for_package(package_id)  # newest first
+    return jobs[0].request.options.content_rating if jobs else DEFAULT_RATING
+
+
 def package_has_uploads(repo: Any, package_id: str) -> bool:
     """Whether any job behind the package had uploaded photos or videos that may carry a
     real person's likeness: character references, or uploads with no stated use (a story
@@ -80,6 +94,20 @@ def _image_kind() -> str:
         if os.environ.get("DRAMA_MODEL_CLIENT", "fixture").lower() == "mcphub"
         else "fixture"
     )
+
+
+def face_providers_from_env() -> dict[str, ImageClient]:
+    """Face Lab test providers besides H3, by name: "local", a simple image server of your
+    own at DRAMA_LOCAL_IMAGE_URL (default http://localhost:8080; POST /image with a prompt).
+    With fixture images, a local stand-in, so the choice can be tried offline."""
+    import os
+
+    from ..imagegen import LOCAL_IMAGE_URL, FixtureImageClient, LocalImageClient
+
+    url = os.environ.get("DRAMA_LOCAL_IMAGE_URL", LOCAL_IMAGE_URL)
+    if _image_kind() == "fixture":
+        return {"local": FixtureImageClient(model_id=f"fixture-local ({url})", max_references=0)}
+    return {"local": LocalImageClient(url)}
 
 
 def keyframe_providers_from_env() -> dict[str, ImageClient]:

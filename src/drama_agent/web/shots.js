@@ -9,7 +9,8 @@
 
 const frames = { key: null, view: null, error: "", notes: [], timer: null, loading: false,
   draws: 2, rounds: 3, provider: null, directions: {}, prompts: {}, plans: {}, episode: "all",
-  sel: {}, notes2: {}, compare: {}, diffs: new Map(), vdraws: {}, verr: {} };
+  sel: {}, notes2: {}, compare: {}, diffs: new Map(), vdraws: {}, verr: {},
+  send: { key: null, targets: null, error: "" } };  // "Send to a look": the draw it is open on
 
 const framesKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
 const framesBase = (pkg) => `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/keyframes`;
@@ -89,6 +90,7 @@ function renderFrameDraw(take) {
         d.status === "done" && h("a", { href: drawUrl(take, d.n, "content"), target: "_blank", rel: "noopener", class: "muted small" }, "open"),
         approved && h("button", { type: "button", class: "btn ghost small",
           onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, null, "DELETE") }, "Withdraw"),
+        finished && d.status === "done" && renderSendToDesign(take, d),
         (failedItems.length > 0 || (d.check && d.check.summary)) && h("details", { class: "small" },
           h("summary", {}, failedItems.length ? `${failedItems.length} issue${failedItems.length > 1 ? "s" : ""}` : "Check"),
           d.check.summary && h("p", { class: "muted" }, d.check.summary),
@@ -98,6 +100,54 @@ function renderFrameDraw(take) {
       ),
     );
   };
+}
+
+// A keyframe draw as a take of a look its shot wears (or of its set state): it goes beside
+// that picture's drawn takes on its Characters or Sets page, as a pick only when asked.
+function renderSendToDesign(take, d) {
+  const key = `${take.take_id}:${d.n}`;
+  const base = `/v1/shot-takes/${encodeURIComponent(take.take_id)}/draws/${d.n}`;
+  const open = frames.send.key === key;
+  const load = async () => {
+    frames.send = { key, targets: null, error: "" };
+    renderMain();
+    try {
+      frames.send.targets = await api(`${base}/design-targets`);
+    } catch (e) {
+      frames.send.error = e.message;
+    }
+    if (frames.send.key === key) renderMain();
+  };
+  const send = async (t, pick, button) => {
+    button.disabled = true;
+    try {
+      await api(`${base}/to-design`, { method: "POST", body: JSON.stringify({ requirement_id: t.requirement_id, deliverable_id: t.deliverable_id, pick }) });
+      await load();
+    } catch (e) {
+      frames.send.error = e.message;
+      renderMain();
+    }
+  };
+  const toggle = h("button", { type: "button", class: "btn ghost small", "aria-expanded": String(open),
+    title: "Add this draw as a take of a look this shot wears, or of its set",
+    onclick: () => { if (open) { frames.send = { key: null, targets: null, error: "" }; renderMain(); } else load(); } },
+    open ? "Close" : "Send to a look…");
+  if (!open) return toggle;
+  const { targets, error } = frames.send;
+  return h("div", { class: "send-design small" }, toggle,
+    error && h("p", { class: "warn-text" }, error),
+    !targets && !error && h("p", { class: "muted" }, "Loading…"),
+    targets && !targets.length && h("p", { class: "muted" }, "Its shot has no look or set picture to send it to."),
+    targets && h("ul", { class: "plain" }, targets.map((t) => {
+      const page = t.lib_asset_id && `#lib=${encodeURIComponent(t.lib_asset_id)}&part=${encodeURIComponent(t.part_asset_id)}&slot=${encodeURIComponent(t.deliverable_id)}`;
+      return h("li", {}, h("span", {}, t.label),
+        t.sent_image_id
+          ? [h("span", { class: "chip ok" }, t.picked ? "sent · picked" : "sent"),
+             !t.picked && h("button", { type: "button", class: "btn ghost small", onclick: (e) => send(t, true, e.currentTarget) }, "Make it the pick")]
+          : [h("button", { type: "button", class: "btn ghost small", title: "Add it beside the picture's takes; the pick stays", onclick: (e) => send(t, false, e.currentTarget) }, "Add as take"),
+             h("button", { type: "button", class: "btn ghost small", title: "Add it and make it the picture's pick", onclick: (e) => send(t, true, e.currentTarget) }, "Add and pick")],
+        page && h("a", { href: page, title: "Open the picture's takes" }, "open"));
+    })));
 }
 
 function renderFrameTake(take, takes = []) {

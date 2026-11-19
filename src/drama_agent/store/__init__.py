@@ -71,6 +71,8 @@ class Repository(Protocol):
     def asset_in_use(self, asset_id: str) -> bool: ...
     def image_ids(self, refs: list[str]) -> dict[str, int]: ...
     def image_ref(self, gid: int) -> str | None: ...
+    def get_story_rating(self, package_id: str) -> str | None: ...
+    def set_story_rating(self, package_id: str, rating: str) -> None: ...
     def delete_source_asset(self, asset_id: str) -> None: ...
     def save_shot_take(self, take: ShotTake) -> None: ...
     def get_shot_take(self, take_id: str) -> ShotTake | None: ...
@@ -129,6 +131,7 @@ class InMemoryRepository:
         self.exp_turns: dict[str, ExpTurn] = {}
         self.exp_next_label: dict[str, int] = {}
         self.gids: dict[str, int] = {}  # global image numbers (image_ids.py)
+        self.ratings: dict[str, str] = {}  # stories' changed ratings
         self.shot_takes: dict[str, ShotTake] = {}
         self.shot_plans: dict[tuple[str, str, str], ShotPlan] = {}
         self.prompt_versions: list[PromptVersion] = []
@@ -401,6 +404,12 @@ class InMemoryRepository:
 
     def image_ref(self, gid: int) -> str | None:
         return next((r for r, g in self.gids.items() if g == gid), None)
+
+    def get_story_rating(self, package_id: str) -> str | None:
+        return self.ratings.get(package_id)
+
+    def set_story_rating(self, package_id: str, rating: str) -> None:
+        self.ratings[package_id] = rating
 
     def asset_in_use(self, asset_id: str) -> bool:
         """Whether a job, a reference image or a chat message uses this upload."""

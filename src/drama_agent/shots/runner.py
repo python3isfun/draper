@@ -13,7 +13,7 @@ from .. import shot_reading
 from ..content_guard import GuardRefused, text_guard, upload_guard
 from ..experiment import SIZES
 from ..imagegen import ImageClient, Reference
-from ..images import make_thumb, package_has_uploads
+from ..images import make_thumb, package_has_uploads, story_rating
 from ..llm import GenerationRequest
 from ..media import MediaPart, MediaStore
 from ..models import ProductionPackage
@@ -423,6 +423,7 @@ class ShotFrameRunner:
         The prompt becomes the sub-shot's next version."""
         template = template_prompt(pkg, take)
         pictures = picture_sentences(pkg, take)
+        rating = story_rating(self.repo, pkg.package_id)
         # The program's own sentences: the wording checks leave them to their authors.
         fixed = tuple(x[k] for x in pictures for k in ("define", "relationship"))
         context = {
@@ -446,7 +447,7 @@ class ShotFrameRunner:
         for attempt in range(2):
             request = GenerationRequest(
                 stage=WRITE_STAGE,  # type: ignore[arg-type]
-                instructions=writer_instructions(),
+                instructions=writer_instructions(rating),
                 context=context,
                 media=media,
                 attempt=attempt,
@@ -458,7 +459,7 @@ class ShotFrameRunner:
                 error = exc
                 break
             prompt = out.prompt.strip()
-            findings = prompt_findings(prompt, take.references, fixed)
+            findings = prompt_findings(prompt, take.references, fixed, rating)
             tries.append((prompt, out, findings, request))
             if not worth_repair(findings):
                 break
@@ -472,7 +473,7 @@ class ShotFrameRunner:
         if not usable:
             why = str(error) if error else "; ".join(f for f in tries[-1][2] if is_hard(f))
             take.prompt, take.prompt_source = template, "template"
-            take.warnings = prompt_findings(template, take.references, fixed)
+            take.warnings = prompt_findings(template, take.references, fixed, rating)
             take.notes = f"The prompt writer failed ({why[:120]}); using the built-in template."
             self._version(take, "template", None)
             return
@@ -513,7 +514,10 @@ class ShotFrameRunner:
                 "image without a likeness for the people in it."
             )
         strict = take.likeness or package_has_uploads(self.repo, take.package_id)
-        reason = upload_guard(take.prompt) if strict else text_guard(take.prompt)
+        rating = story_rating(self.repo, take.package_id)
+        reason = (
+            upload_guard(take.prompt, rating=rating) if strict else text_guard(take.prompt, rating)
+        )
         if reason:
             raise GuardRefused(f"Not drawn: {reason}")
 

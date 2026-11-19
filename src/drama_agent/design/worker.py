@@ -12,7 +12,7 @@ from ..models import SourceAsset
 from ..models.images import GeneratedImage
 from ..models.package import utcnow
 from .prompts import key_of
-from .setup import make_thumb, package_has_uploads
+from .setup import make_thumb, package_has_uploads, story_rating
 from .slots import selected_image
 from .staleness import plan_refresh
 from .takes import prompt_source
@@ -138,8 +138,11 @@ class ImageWorker:
         # people, and an image drawn from a picture with a real person's likeness does, so
         # those get the uploaded-photo rule.
         strict = img.likeness or package_has_uploads(self.repo, img.package_id)
-        check = upload_guard if strict else text_guard
-        if reason := check(img.prompt):
+        rating = story_rating(self.repo, img.package_id)
+        reason = (
+            upload_guard(img.prompt, rating=rating) if strict else text_guard(img.prompt, rating)
+        )
+        if reason:
             raise GuardRefused(f"Not drawn: {reason}")
         if missing:
             # The prompt defines each <Picture N> as a <Subject N> with its relationship;

@@ -16,6 +16,7 @@ from ..experiment import (
     image_labels,
     likeness_of,
 )
+from ..image_ids import story_likeness
 from ..image_prompts import problems
 from ..images import (
     SIZES,
@@ -31,6 +32,7 @@ from ..images import (
     plan_images,
     plan_refresh,
     slot_title,
+    story_rating,
     take_draws,
 )
 from ..images import develop as develop_plan
@@ -42,8 +44,11 @@ from ..models import (
     ProductionPackage,
 )
 from ..models.images import DesignOption, GeneratedImage
-from ..sheet_edit import EditError, EntryLocked, edit_entry
+from ..sheet_edit import EditError, EntryLocked, add_variant, edit_entry
 from .schemas import (
+    AddVariantRequest,
+    AddVariantResult,
+    DesignTarget,
     DevelopRequest,
     DrawsRequest,
     EditTakeRequest,
@@ -53,6 +58,7 @@ from .schemas import (
     ImagesView,
     ImportImageRequest,
     NewTakeRequest,
+    ToDesignRequest,
     UsePickRequest,
 )
 
@@ -346,14 +352,15 @@ def register(app: FastAPI, ctx: Any) -> None:
         mine = take_draws(images, option_id)
         prompt = req.prompt.strip()
         n_refs = len(mine[0].reference_ids) if mine else 0
-        found = problems(prompt, n_refs)
+        rating = story_rating(repo, pkg.package_id)
+        found = problems(prompt, n_refs, rating)
         fatal = [p for p in found if p == "empty" or p.startswith("cites a picture")]
         if fatal:
             raise HTTPException(422, f"prompt {'; '.join(fatal)}")
         # Hand-written prompts are screened. Pictures may come from the job's uploaded
         # photos (character references), so they count as possibly showing real people.
         has_uploads = package_has_uploads(repo, pkg.package_id)
-        if has_uploads and (reason := upload_guard(prompt)):
+        if has_uploads and (reason := upload_guard(prompt, rating=rating)):
             raise HTTPException(422, reason)
         kind = (
             "uploaded photo, or an image made from one (may show a real person)"
@@ -370,6 +377,7 @@ def register(app: FastAPI, ctx: Any) -> None:
                 # The design board's images go into the hand-off package the team shoots
                 # from, so it always uses the restrictive rules (the switch is Experiment's).
                 restrictive=True,
+                rating=rating,
             )
         except GuardRefused as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -447,6 +455,10 @@ def register(app: FastAPI, ctx: Any) -> None:
         _delete_images(draws)
         repo.delete_option(option_id)
 
+    def _no_running_job(package_id: str) -> None:
+        if any(j.status in ("queued", "running") for j in repo.jobs_for_package(package_id)):
+            raise HTTPException(409, "a job is still working on this story; edit when it's done")
+
     @app.patch("/v1/drama-packages/{package_id}/entries/{entry_id}", response_model=EntryEditResult)
     async def edit_package_entry(
         package_id: str, entry_id: str, req: EntryEditRequest
@@ -456,8 +468,7 @@ def register(app: FastAPI, ctx: Any) -> None:
         so new takes and Develop use the edit; images already drawn stay as they are."""
         pkg = _package_or_404(package_id, req.revision_id)
         _package_job(pkg.package_id, None, pkg.revision_id)
-        if any(j.status in ("queued", "running") for j in repo.jobs_for_package(package_id)):
-            raise HTTPException(409, "a job is still working on this story; edit when it's done")
+        _no_running_job(package_id)
         try:
             edit = edit_entry(pkg, entry_id, req.sheet, req.bible)
         except KeyError as exc:
@@ -483,6 +494,143 @@ def register(app: FastAPI, ctx: Any) -> None:
             replaced_written=edit.replaced_written,
             drawn_before=sorted({slot_title(pkg, k) for k in drawn}),
         )
+
+    def _lib_ids(package_id: str, kind: str, story_id: str) -> tuple[str | None, str | None]:
+        """(the character or set page, the look or state on it) of a story's look or state,
+        as the library has them now (a look of a linked character hangs off the shared one)."""
+        from ..library import sync_library
+        from ..library.models import asset_id
+
+        sync_library(repo)
+        part = repo.get_library_asset(asset_id(kind, package_id, story_id))  # type: ignore[arg-type]
+        return (part.parent_id, part.asset_id) if part is not None else (None, None)
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/variants",
+        status_code=201,
+        response_model=AddVariantResult,
+    )
+    async def add_package_variant(package_id: str, req: AddVariantRequest) -> AddVariantResult:
+        """A new look for a character (or state for a location), added by hand in place: its
+        story bible line, sheet entry and the requirement its pictures are drawn for. No
+        shot wears it yet. Draw it with New take, as any other picture."""
+        pkg = _package_or_404(package_id, req.revision_id)
+        _package_job(pkg.package_id, None, pkg.revision_id)  # refuses archived stories
+        _no_running_job(package_id)
+        try:
+            added = add_variant(pkg, req.parent_id, req.description, req.sheet)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc.args[0])) from None
+        except EntryLocked as exc:
+            raise HTTPException(409, str(exc)) from None
+        except EditError as exc:
+            raise HTTPException(422, str(exc)) from None
+        repo.replace_package(pkg)
+        is_look = added.entry_id in {lk.look_id for lk in pkg.story_bible.looks}
+        lib, part = _lib_ids(pkg.package_id, "look" if is_look else "set_state", added.entry_id)
+        return AddVariantResult(
+            package_id=pkg.package_id, revision_id=pkg.revision_id, entry_id=added.entry_id,
+            requirement_id=added.requirement_id, deliverable_ids=added.deliverable_ids,
+            lib_asset_id=lib, part_asset_id=part,
+        )  # fmt: skip
+
+    # -- Keyframe draws as takes of a look or a set state ---------------------------------
+
+    def _keyframe(take_id: str, n: int) -> tuple[Any, Any, ProductionPackage]:
+        """(the take, its draw, the story's latest revision), or 404."""
+        take = repo.get_shot_take(take_id)
+        d = next((d for d in take.results if d.n == n), None) if take else None
+        if take is None or d is None or d.status != "done" or not d.file:
+            raise HTTPException(404, "no such keyframe draw")
+        return take, d, _package_or_404(take.package_id, None)
+
+    def _keyframe_tag(take: Any, n: int) -> str:
+        return f"keyframe {take.take_id}:{n} (shot {take.shot_id})"
+
+    def _targets(take: Any, pkg: ProductionPackage) -> list[tuple[str, tuple[str, str], str]]:
+        """(kind, slot, story id) of each look the shot's characters wear and its set
+        state's wide view, among the story's design pictures."""
+        from ..pipeline.asset_aggregation import ReuseUnit
+
+        shot = next((s for s in pkg.shot_list if s.shot_id == take.shot_id), None)
+        if shot is None:
+            return []
+        reqs = {r.requirement_id: r for r in pkg.asset_requirements.items}
+        out = []
+        units = [("look", ReuseUnit("character_look", "character", r.character_id, r.look_id), r.look_id)
+                 for r in shot.character_look_refs]  # fmt: skip
+        if shot.location_state_id:
+            units.append(("set", ReuseUnit("location", "location", shot.location_id,
+                                           shot.location_state_id), shot.location_state_id))  # fmt: skip
+        for kind, unit, story_id in units:
+            req = reqs.get(unit.requirement_id)
+            if req is None or not req.deliverables:
+                continue
+            d = next((d for d in req.deliverables if d.deliverable_id.endswith("_wide")),
+                     req.deliverables[0])  # fmt: skip
+            out.append((kind, (req.requirement_id, d.deliverable_id), story_id))
+        return out
+
+    @app.get("/v1/shot-takes/{take_id}/draws/{n}/design-targets", response_model=list[DesignTarget])
+    async def keyframe_targets(take_id: str, n: int) -> list[DesignTarget]:
+        """Where this keyframe draw can go as a take: the looks its shot's characters wear
+        and its set state, each saying whether it was already sent there."""
+        take, _, pkg = _keyframe(take_id, n)
+        tag = _keyframe_tag(take, n)
+        imgs = repo.list_images(pkg.package_id, pkg.revision_id)
+        out = []
+        for kind, key, story_id in _targets(take, pkg):
+            sent = next((i for i in imgs if (i.requirement_id, i.deliverable_id) == key
+                         and i.imported_from == tag), None)  # fmt: skip
+            lib, part = _lib_ids(
+                pkg.package_id, "look" if kind == "look" else "set_state", story_id
+            )
+            out.append(DesignTarget(
+                requirement_id=key[0], deliverable_id=key[1], kind=kind,  # type: ignore[arg-type]
+                label=slot_title(pkg, key), sent_image_id=sent and sent.image_id,
+                picked=bool(sent and sent.selected), lib_asset_id=lib, part_asset_id=part,
+            ))  # fmt: skip
+        return out
+
+    @app.post(
+        "/v1/shot-takes/{take_id}/draws/{n}/to-design",
+        status_code=201,
+        response_model=GeneratedImage,
+    )
+    async def keyframe_to_design(take_id: str, n: int, req: ToDesignRequest) -> GeneratedImage:
+        """A keyframe draw as a take of a look its shot wears (or of its set state): copied
+        in beside the drawn takes, marked where it came from. It becomes the pick only with
+        `pick`. Sent again, the copy already there is used."""
+        take, d, pkg = _keyframe(take_id, n)
+        job = _package_job(pkg.package_id, None, pkg.revision_id)  # refuses archived stories
+        key = (req.requirement_id, req.deliverable_id)
+        if key not in {k for _, k, _ in _targets(take, pkg)}:
+            raise HTTPException(422, "send it to a look its shot wears or to its set state")
+        tag = _keyframe_tag(take, n)
+        img = next((i for i in repo.list_images(pkg.package_id, pkg.revision_id)
+                    if (i.requirement_id, i.deliverable_id) == key and i.imported_from == tag),
+                   None)  # fmt: skip
+        if img is None:
+            path = media.path(d.file)
+            ext = "png" if d.content_type == "image/png" else "jpg"
+            rel = f"generated/{pkg.package_id}/keyframe_{take.take_id}_{n}.{ext}"
+            data = await asyncio.to_thread(path.read_bytes)
+            dest = media.path(rel)
+            await asyncio.to_thread(dest.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(dest.write_bytes, data)
+            thumb = await asyncio.to_thread(make_thumb, media, rel)
+            # Unknown (a story with uploaded photos) counts as a likeness, as for a chat's.
+            likeness = story_likeness(repo, pkg.package_id, take.likeness) is not False
+            try:
+                img = import_pick(pkg, key, file=rel, thumb=thumb, content_type=d.content_type,
+                                  prompt=take.prompt, likeness=likeness, imported_from=tag,
+                                  job_id=job and job.job_id)  # fmt: skip
+            except KeyError as exc:
+                raise HTTPException(404, str(exc)) from None
+            repo.save_image(img)
+        if req.pick:
+            repo.set_selected(img.image_id)
+        return repo.get_image(img.image_id)
 
     @app.post(
         "/v1/generated-images/{image_id}/regenerate",

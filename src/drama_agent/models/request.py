@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 SourceType = Literal["text", "image", "video", "script"]
 SourceUse = Literal[
@@ -16,14 +16,34 @@ SourceUse = Literal[
 ]
 StoryScope = Literal["series_opening", "complete_short"]
 ReferenceMode = Literal["inspiration", "adaptation"]
-# The most intimate staging a job may contain (see RATING_LIMITS).
-ContentRating = Literal["general", "teen", "mature"]
+# A story's rating, as the MPA rates American films; it caps the story's intimate staging
+# (RATING_LIMITS) and what its images may show (content_guard.py). NC-17 is not offered.
+ContentRating = Literal["G", "PG", "PG-13", "R"]
+RATINGS: tuple[ContentRating, ...] = ("G", "PG", "PG-13", "R")
+DEFAULT_RATING: ContentRating = "PG-13"
+# The ratings jobs were stored with before the MPA ratings.
+LEGACY_RATINGS: dict[str, ContentRating] = {"general": "PG", "teen": "PG-13", "mature": "R"}
 # rating -> (highest scene intimacy level, partial nudity allowed)
 RATING_LIMITS: dict[str, tuple[str, bool]] = {
-    "general": ("kiss", False),
-    "teen": ("implied", False),
-    "mature": ("simulated", True),
+    "G": ("kiss", False),
+    "PG": ("kiss", False),
+    "PG-13": ("implied", False),
+    "R": ("simulated", True),
 }
+
+
+def _known_rating(value: object) -> ContentRating | None:
+    """An MPA rating in any case ("pg-13", "r") or a legacy one (general/teen/mature)."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    mpa = {r.upper(): r for r in RATINGS}.get(name.upper())
+    return mpa or LEGACY_RATINGS.get(name.lower())
+
+
+def as_rating(value: object) -> ContentRating:
+    """A rating, from an MPA rating or a legacy one (general/teen/mature); else the default."""
+    return _known_rating(value) or DEFAULT_RATING
 
 
 class Source(BaseModel):
@@ -72,12 +92,19 @@ class JobOptions(BaseModel):
     genre: str | None = None
     audience: str | None = None
     reference_mode: ReferenceMode = "inspiration"
-    # general: a kiss at most; teen: intimacy implied (cut away), no nudity; mature:
-    # simulated intimacy and partial nudity, staged for a closed set.
-    content_rating: ContentRating = "teen"
+    # G/PG: a kiss at most; PG-13: intimacy implied (cut away), no nudity; R: simulated
+    # intimacy and partial nudity, staged for a closed set. Images follow it too.
+    content_rating: ContentRating = DEFAULT_RATING
     variants: int = Field(default=1, ge=1)
     # Automatic revision attempts per stage (spec section 8 suggests 2).
     revision_budget_per_stage: int = Field(default=2, ge=0, le=5)
+
+    @field_validator("content_rating", mode="before")
+    @classmethod
+    def _mpa_rating(cls, value: object) -> object:
+        """Jobs stored before the MPA ratings say general/teen/mature; any case is read. An
+        unknown rating stays as it is, so it is refused."""
+        return _known_rating(value) or value
 
     @property
     def episode_duration_ms(self) -> int:

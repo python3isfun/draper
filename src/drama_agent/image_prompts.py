@@ -19,10 +19,12 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .content_guard import text_guard
+from .design.setup import story_rating
 from .images import NO_OTHER_TEXT, NO_TEXT  # the sentences the rules require
 from .llm import GenerationRequest
 from .models import ProductionPackage
 from .models.images import DesignOption, GeneratedImage
+from .models.request import DEFAULT_RATING
 from .tracing import Tracer
 
 log = logging.getLogger(__name__)
@@ -147,15 +149,16 @@ _PICTURE = re.compile(r"<Picture (\d+)>")
 _SUBJECT_DEF = re.compile(r"<Picture (\d+)>[^.]*? (?:is|are) <Subject \d+>")
 
 
-def problems(prompt: str, n_refs: int) -> list[str]:
+def problems(prompt: str, n_refs: int, rating: str = DEFAULT_RATING) -> list[str]:
     """Why a written prompt can't be used as is (empty if it can). Checks the parts of the
-    rules a program can verify: picture citations, the edit form and the text sentence."""
+    rules a program can verify: picture citations, the edit form and the text sentence, and
+    the content rules at the story's rating."""
     out: list[str] = []
     if not prompt.strip():
         return ["empty"]
     if len(prompt) > MAX_PROMPT_CHARS:
         out.append(f"longer than {MAX_PROMPT_CHARS} characters")
-    if reason := text_guard(prompt):
+    if reason := text_guard(prompt, rating):
         out.append(f"not allowed: {reason}")
     cited = {int(n) for n in _PICTURE.findall(prompt)}
     if any(n < 1 or n > n_refs for n in cited):
@@ -215,9 +218,10 @@ class ImagePromptWriter:
             return
         written = {p.image_id: p.prompt.strip() for p in output.prompts}
         fallbacks = []
+        rating = story_rating(self.repo, pkg.package_id)
         for img in images:
             prompt = written.get(img.image_id, "")
-            issues = problems(prompt, len(img.reference_ids)) if prompt else ["missing"]
+            issues = problems(prompt, len(img.reference_ids), rating) if prompt else ["missing"]
             if issues:
                 img.prompt_source = "template"
                 img.error = f"written prompt unusable ({'; '.join(issues)}); used the template"
@@ -336,12 +340,13 @@ async def write_takes(
         return
     written = {g.group_id: g.takes for g in output.groups}
     fallbacks = []
+    rating = story_rating(repo, pkg.package_id)
     for gid, opts in groups.items():
         takes = written.get(gid, [])
         for n, opt in enumerate(opts):
             take = takes[n] if n < len(takes) else None
             n_refs = len(opt.brief.get("references", []))
-            issues = problems(take.prompt, n_refs) if take else ["missing"]
+            issues = problems(take.prompt, n_refs, rating) if take else ["missing"]
             if issues:
                 opt.status = "template"
                 opt.error = f"written take unusable ({'; '.join(issues)}); used the template"
