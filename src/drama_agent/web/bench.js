@@ -61,8 +61,9 @@ function benchRefreshPage() {
 }
 
 // "From a photo" on a face: upload a reference photo, start a study for that face (or, with
-// no target, a scratch study) and have the photo described; the study opens in the panel.
-async function benchFaceFromPhoto(file, target, button) {
+// no target, a scratch study) and have the photo described; the study opens in the panel
+// (or, with `open` off, is only returned: the caller opens it). Returns the study, or null.
+async function benchFaceFromPhoto(file, target, button, { open = true } = {}) {
   // Problems are said beside the button: the page itself stays as it is.
   const say = (msg) => {
     button.parentElement?.querySelector(".bench-error")?.remove();
@@ -70,7 +71,7 @@ async function benchFaceFromPhoto(file, target, button) {
   };
   if (!/^image\/(jpeg|png|webp)$/.test(file.type)) {
     say(`${file.name}: use a JPEG, PNG or WebP photo.`);
-    return;
+    return null;
   }
   const label = button.textContent;
   button.disabled = true;
@@ -90,50 +91,27 @@ async function benchFaceFromPhoto(file, target, button) {
     button.disabled = false;
     button.textContent = label;
     // Open the study even if describing failed (it says why), so it isn't left unseen.
-    if (study) openBench("face", study.session_id, target ? target.label : study.title);
+    if (study && open) openBench("face", study.session_id, target ? target.label : study.title);
   }
+  return study;
 }
 
 // "Create from text" on a face: a study for that face with no photo, where the description
 // is written by hand and drawn from text alone (H3 or a local image server). Clicked again
-// before anything is in it, the same empty study opens.
-async function benchFaceFromText(target, button) {
+// before anything is in it, the same empty study opens (`open` off: it is only returned).
+// Returns the study, or null.
+async function benchFaceFromText(target, button, { open = true } = {}) {
   button.parentElement?.querySelector(".bench-error")?.remove();
   button.disabled = true;
   try {
     const study = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ kind: "face", target, reuse_empty: true }) });
-    openBench("face", study.session_id, target.label);
+    if (open) openBench("face", study.session_id, target.label);
+    return study;
   } catch (e) {
     button.after(h("span", { class: "form-error bench-error" }, e.message));
+    return null;
   } finally {
     button.disabled = false;
-  }
-}
-
-// "From a reference photo" on any picture but a face (a face has Face Lab): a chat for
-// that picture whose first message is the photo, so it is the current image; describe what
-// to make of it ("a clean product shot of this, on grey"), then Use as pick.
-async function benchChatFromPhoto(file, target, button) {
-  const say = (msg) => {
-    button.parentElement?.querySelector(".bench-error")?.remove();
-    button.after(h("span", { class: "form-error bench-error" }, msg));
-  };
-  if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return say(`${file.name}: use a JPEG, PNG or WebP photo.`);
-  const label = button.textContent;
-  button.disabled = true;
-  let chat = null;
-  try {
-    button.textContent = "Uploading…";
-    const asset = await uploadFile(file, (p) => { button.textContent = `Uploading (${Math.round(p * 100)}%)…`; }, () => { button.textContent = "Processing…"; });
-    chat = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, start_from_pick: false, title: `${target.label}: from ${file.name}` }) });
-    await api(`/v1/experiments/${encodeURIComponent(chat.session_id)}/turns`, {
-      method: "POST", body: JSON.stringify({ text: "", attachments: [asset.asset_id], restrictive: restrictiveBox.checked }) });
-  } catch (e) {
-    if (!chat) say(e.message);
-  } finally {
-    button.disabled = false;
-    button.textContent = label;
-    if (chat) openBench("chat", chat.session_id, target.label);
   }
 }
 

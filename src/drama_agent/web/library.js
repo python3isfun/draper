@@ -16,7 +16,7 @@ const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "
   part: null, slot: null,  // the layer shown: a look, state or item (or the face), one of its pictures
   shot: null,  // ... or one of the shots it is in, with their keyframes
   adding: false, newDraft: {}, newError: "", stale: false,  // "+ New look"
-  addingItem: false, itemDraft: {}, itemError: "", itemPhoto: null, pendingPhoto: null };  // "+ New item"
+  addingItem: false, itemDraft: {}, itemError: "", openAfter: null, startNote: null };  // "+ New item"
 // Open editors by asset id; typed text is kept in `drafts` until saved or cancelled.
 const libEdit = { open: new Set(), drafts: {}, errors: {}, notes: {}, saving: new Set() };
 
@@ -46,6 +46,12 @@ async function libRoute(param) {
   const hash = new URLSearchParams(location.hash.slice(1));
   const [part, slot] = id ? [hash.get("part"), hash.get("part") && hash.get("slot")] : [null, null];
   const shot = part && !slot ? hash.get("shot") : null;  // a shot's keyframes, from a look or state
+  // A new item's chat or study, made from its form: opens over its picture's page (the
+  // panel closes on every page change), and only there; it is dropped on any other page.
+  const after = lib.openAfter;
+  lib.openAfter = null;
+  lib.startNote = after && after.slot === slot && after.note ? after : null;
+  if (after && after.slot === slot && after.sid) setTimeout(() => openBench(after.kind, after.sid, after.label));
   // Another layer of the asset on the page: shown from what is loaded, then refreshed.
   if (id && lib.id === id && lib.view && !lib.stale) {
     Object.assign(lib, { part, slot, shot, adding: false, addingItem: false });
@@ -462,12 +468,6 @@ function libFrameControls(v) {
 // Level 3: one picture: its takes and draws, pictures brought in, a new take, the workbench.
 function renderLibSlot(a, part, slot) {
   const { ref, v } = libSlotData(part);
-  // A new item's reference photo: its chat starts once the picture's page is up.
-  if (lib.pendingPhoto && lib.pendingPhoto.target.deliverable_id === slot.deliverable_id) {
-    const { file, target } = lib.pendingPhoto;
-    lib.pendingPhoto = null;
-    setTimeout(() => { const b = [...document.querySelectorAll(".design-row button")].find((x) => x.textContent === "From a reference photo"); if (b) benchChatFromPhoto(file, target, b); });
-  }
   const job = jobOf(part.origin_package_id);
   const picked = new Set(v.images.filter((i) => i.selected && i.status === "done").map(keyOf));
   const parent = slot.parent_key && `${slot.parent_key[0]}|${slot.parent_key[1]}`;
@@ -610,8 +610,9 @@ function libNewVariant(a) {
 }
 
 // "+ New item" on a character: a prop it carries, added to its story (owned by it), with a
-// first state and a detail picture to draw. With a reference photo, a chat for that picture
-// opens with the photo in it.
+// first state and a detail picture to draw. Added with a way to start its picture (a chat,
+// a photo described in a study, or a study from text), that chat or study is made from the
+// form (its progress and problems shown there) and opens over the picture's page.
 const LIB_ITEM_FIELDS = [["size_and_scale", "Size and scale", "e.g. palm-sized, 9 x 5 cm"], ["materials", "Materials", "e.g. heavy cream card stock"],
   ["color_and_finish", "Color and finish", "e.g. ivory, letterpress in charcoal"], ["condition_and_wear", "Condition and wear", "e.g. crisp, one corner bent"],
   ["distinguishing_marks", "Distinguishing marks", "e.g. a gallery logo embossed top left"], ["handling", "Handling", "e.g. she flicks it between two fingers"]];
@@ -623,40 +624,62 @@ function libNewItem(a) {
     box.value = draft[key] || "";
     return h("label", { class: "field" }, h("span", {}, label), box);
   };
-  const photo = h("input", { type: "file", accept: "image/jpeg,image/png,image/webp", "aria-label": "Reference photo",
-    onchange: (e) => { lib.itemPhoto = e.target.files[0] || null; } });
-  const save = async (button) => {
-    const name = (draft.name || "").trim();
-    if (!name) { lib.itemError = "Name the item first."; return renderLibrary(); }
+  const named = () => {
+    if ((draft.name || "").trim()) return true;
+    lib.itemError = "Name the item first.";
+    renderLibrary();
+    return false;
+  };
+  const save = async (button, how, file) => {
+    if (!named()) return;
+    const name = draft.name.trim();
+    if (file && !/^image\/(jpeg|png|webp)$/.test(file.type)) { lib.itemError = `${file.name}: use a JPEG, PNG or WebP photo.`; return renderLibrary(); }
     const sheet = Object.fromEntries(LIB_ITEM_FIELDS.map(([k]) => [k, (draft[k] || "").trim()]).filter(([, x]) => x));
     button.disabled = true;
     try {
       const out = await api(`/v1/drama-packages/${encodeURIComponent(a.origin_package_id)}/items`, {
         method: "POST", body: JSON.stringify({ owner_id: a.origin_entity_id, name, story_function: (draft.story_function || "").trim(),
           state: (draft.state || "").trim(), sheet, revision_id: a.origin_revision_id }) });
-      const file = lib.itemPhoto;
-      Object.assign(lib, { addingItem: false, itemDraft: {}, itemError: "", itemPhoto: null, stale: true });
-      // The reference photo starts a chat for the new picture once its page is up.
-      if (file) lib.pendingPhoto = { file, target: { package_id: out.package_id, requirement_id: out.requirement_id, deliverable_id: out.deliverable_ids[0], label: `${name}, detail` } };
-      location.hash = libHref(out.lib_asset_id || a.asset_id, out.part_asset_id, out.deliverable_ids[0]).slice(1);
+      const slot = out.deliverable_ids[0];
+      // Its chat or study, made here; it opens once the picture's page is up. If making it
+      // fails, the item is still added: its page has the same buttons to try again.
+      if (how) {
+        const label = `${name}, ${((draft.state || "").trim() || "As it first appears").toLowerCase()}, detail`;
+        const target = { package_id: out.package_id, requirement_id: out.requirement_id, deliverable_id: slot, label };
+        let s = null;
+        if (how === "photo") s = await benchFaceFromPhoto(file, target, button, { open: false });
+        else if (how === "text") s = await benchFaceFromText(target, button, { open: false });
+        else s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true }) })
+          .catch((e) => { button.after(h("span", { class: "form-error bench-error" }, e.message)); return null; });
+        lib.openAfter = s ? { slot, kind: how === "chat" ? "chat" : "face", sid: s.session_id, label }
+          : { slot, note: `${name} was added, but its ${how === "photo" ? "photo study" : how === "text" ? "study" : "chat"} couldn't be started: ${button.parentElement?.querySelector(".bench-error")?.textContent || "try again here"}.` };
+      }
+      Object.assign(lib, { addingItem: false, itemDraft: {}, itemError: "", stale: true });
+      location.hash = libHref(out.lib_asset_id || a.asset_id, out.part_asset_id, slot).slice(1);
     } catch (e) {
       button.disabled = false;
       lib.itemError = e.message;
       renderLibrary();
     }
   };
+  const photo = h("input", { type: "file", accept: "image/jpeg,image/png,image/webp", hidden: true, "aria-label": "Reference photo",
+    onchange: (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) save(fromPhoto, "photo", f); } });
+  const fromPhoto = h("button", { type: "button", class: "btn small", title: "Add it, then upload a reference photo: GPT describes the object in words, and you test the wording seed by seed",
+    onclick: () => { if (named()) photo.click(); } }, "From a photo");
   return h("section", { class: "card lib-editor" },
     h("strong", {}, `New item ${a.name} carries`),
     field("name", "Name", "e.g. Business card"),
     field("story_function", "What it does in the story", "e.g. Gives Ryder a reason to call her"),
     field("state", "How it first appears", "e.g. Crisp and new (default: As it first appears)"),
     stickyDetails(`newitem:${a.asset_id}`, "What it looks like (optional)", LIB_ITEM_FIELDS.map(([k, label, hint]) => field(k, label, hint))),
-    h("label", { class: "field" }, h("span", {}, "Reference photo (optional)"), photo,
-      h("span", { class: "muted small" }, "Starts a chat for its picture with this photo; say what to make of it, then Use as pick.")),
     h("p", { class: "muted small" }, `Added to the story ${a.name} comes from, as a prop ${a.name} carries (in its Props too). No shot uses it yet.`),
     h("div", { class: "prompt-edit-actions" },
-      h("button", { type: "button", class: "btn small primary-outline", onclick: (e) => save(e.currentTarget) }, "Add item"),
-      h("button", { type: "button", class: "btn ghost small", onclick: () => { Object.assign(lib, { addingItem: false, itemError: "", itemPhoto: null }); renderLibrary(); } }, "Cancel")),
+      h("button", { type: "button", class: "btn small primary-outline", title: "Add it; its picture page offers the ways to draw it", onclick: (e) => save(e.currentTarget) }, "Add item"),
+      h("span", { class: "muted small" }, "or add and start its picture:"),
+      h("button", { type: "button", class: "btn small", title: "Add it, then open a chat for its picture with the image model", onclick: (e) => save(e.currentTarget, "chat") }, "Develop in a chat"),
+      photo, fromPhoto,
+      h("button", { type: "button", class: "btn small", title: "Add it, then write the description yourself and test it seed by seed", onclick: (e) => save(e.currentTarget, "text") }, "Create from text"),
+      h("button", { type: "button", class: "btn ghost small", onclick: () => { Object.assign(lib, { addingItem: false, itemError: "" }); renderLibrary(); } }, "Cancel")),
     lib.itemError && h("p", { class: "small warn-text", role: "alert" }, lib.itemError));
 }
 
@@ -892,8 +915,10 @@ const LIB_STUDY = {
 function libWorkbench(part, slot, sayView) {
   const mine = (lib.chats || []).filter((s) => s.target && s.target.package_id === part.origin_package_id
     && s.target.requirement_id === slot.requirement_id && s.target.deliverable_id === slot.deliverable_id);
-  // "Lila Montgomery, evening torn, full body": the variant by its short name, not its line.
-  const label = `${slot.entity}${slot.variant_id ? `, ${libVariant(slot.variant_id, slot.entity_id).toLowerCase()}` : ""}, ${slot.view}`;
+  // "Lila Montgomery, evening torn, full body": a look or set state by the short name in its
+  // id (its own name is a whole line); an item's state by its name ("as it first appears").
+  const variant = slot.asset_type === "prop" && slot.variant ? slot.variant : slot.variant_id && libVariant(slot.variant_id, slot.entity_id);
+  const label = `${slot.entity}${variant ? `, ${variant.toLowerCase()}` : ""}, ${slot.view}`;
   const target = { package_id: part.origin_package_id, requirement_id: slot.requirement_id, deliverable_id: slot.deliverable_id, label };
   const study = LIB_STUDY[slot.asset_type] || LIB_STUDY.character_identity;
   // A study (as Face Lab, for every kind of picture): a photo described in words, or words
@@ -923,11 +948,13 @@ function libWorkbench(part, slot, sayView) {
       renderLibrary();
     }
   };
+  const chat = h("button", { type: "button", class: "btn small", title: "Change this picture in a chat with the image model, starting from its pick (or, with none, from your words); attach a photo in the chat to work from it", onclick: (e) => develop(e.currentTarget) }, sayView ? `Develop the ${slot.view} in a chat` : "Develop in a chat");
   return [
     h("div", { class: "design-row small" },
-      h("button", { type: "button", class: "btn small", title: "Change this picture in a chat with the image model, starting from its pick (or, with none, from your words); attach a photo in the chat to work from it", onclick: (e) => develop(e.currentTarget) }, sayView ? `Develop the ${slot.view} in a chat` : "Develop in a chat"),
+      chat,
       fromPhoto, photo, fromText,
       libLinkScratch(target, true)),
+    lib.startNote && lib.startNote.slot === slot.deliverable_id && h("p", { class: "small warn-text", role: "alert" }, lib.startNote.note),
     libHistory(mine)];
 }
 

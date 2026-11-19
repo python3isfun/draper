@@ -120,11 +120,12 @@ under its character or set, with its pictures (one per state) and the shots it's
 
 - **+ New item** on a character page: a name, what it does in the story, how it first
   appears (its first state; default "As it first appears"), optionally what it looks like
-  (the prop sheet's fields) and a reference photo. It's added to the story in place
+  (the prop sheet's fields). It's added to the story in place
   (`POST /v1/drama-packages/{id}/items`, `sheet_edit.add_item`): the bible's prop, owned
   by the character, with its first state, their sheet entries, and the requirement its
-  detail picture is drawn for (in no shot yet). Its picture page opens; with a photo, a
-  chat for that picture opens with the photo as its current image.
+  detail picture is drawn for (in no shot yet). Its picture page opens. Besides **Add item**,
+  the form adds it and starts its picture the same three ways as any picture: **Develop in
+  a chat**, **From a photo** (pick the photo; a study describes it) or **Create from text**.
 - A picture's own workbench (below) also works from a photo: **From a photo** (a study),
   or Develop in a chat and attach it.
 - **Cross-reference:** the story's Casting tab lists its **Props** as cards (picture, what

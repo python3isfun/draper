@@ -601,7 +601,7 @@ draw as a take of a look its shot wears (or of its set), as the pick only when a
 A look's page also lists the shots it is in with their keyframes; each opens a page to
 review and develop them: approve, draw rounds, or **Develop in a chat** and bring a chat
 image back with **Use as keyframe**. **+ New item** adds a prop a character carries
-(with an optional reference photo). Every picture (face, look, set view, prop) has the same
+(and can start its picture right away, by chat, photo or text). Every picture (face, look, set view, prop) has the same
 workbench: **Develop in a chat**, **From a photo** and **Create from text** (a study, as Face
 Lab, described and tested as that kind of picture; a look is tested on the face's pick), with
 its history of chats and studies underneath. The story's Casting tab lists its Props as cards linked to
