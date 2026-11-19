@@ -207,6 +207,8 @@ async function route() {
   // The workbench panel belongs to the page it was opened on.
   // (A hash change while the page loads may come before bench.js has run.)
   if (typeof closeBench === "function") closeBench({ refresh: false });
+  // Any page change: a New item form still busy no longer opens its item's page.
+  if (typeof lib === "object") lib.nav += 1;
   const params = new URLSearchParams(location.hash.slice(1));
   if (params.has("lib")) {
     // Characters and Sets: the asset library (library.js).

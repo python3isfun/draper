@@ -72,8 +72,8 @@ async function benchFaceFromPhoto(file, target, button, { open = true } = {}) {
     button.parentElement?.querySelector(".bench-error")?.remove();
     button.after(h("span", { class: "form-error bench-error" }, msg));
   };
-  if (!/^image\/(jpeg|png|webp)$/.test(file.type)) {
-    say(`${file.name}: use a JPEG, PNG or WebP photo.`);
+  if (!isPhotoType(file)) {
+    say(photoTypeError(file));
     return { study: null, error };
   }
   const label = button.textContent;
@@ -119,10 +119,19 @@ async function benchFaceFromText(target, button, { open = true } = {}) {
 }
 
 // "Develop in a chat" on a picture: its chat, starting from its pick. Clicked again before
-// anything is written in it, the same untouched chat comes back, not another one.
-function benchStartChat(target) {
-  return api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true }) });
+// anything is written in it, the same untouched chat comes back, not another one. Returns
+// { study, error } as benchFaceFromPhoto (the chat as `study`); the caller says the error.
+async function benchStartChat(target) {
+  try {
+    return { study: await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true }) }), error: "" };
+  } catch (e) {
+    return { study: null, error: e.message };
+  }
 }
+
+// The photos a study or chat takes.
+const isPhotoType = (file) => /^image\/(jpeg|png|webp)$/.test(file.type);
+const photoTypeError = (file) => `${file.name}: use a JPEG, PNG or WebP photo.`;
 
 $("#bench-close").addEventListener("click", () => closeBench());
 

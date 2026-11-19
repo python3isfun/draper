@@ -16,7 +16,7 @@ const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "
   part: null, slot: null,  // the layer shown: a look, state or item (or the face), one of its pictures
   shot: null,  // ... or one of the shots it is in, with their keyframes
   adding: false, newDraft: {}, newError: "", stale: false,  // "+ New look"
-  addingItem: false, itemDraft: {}, itemError: "", openAfter: null, startNote: null };  // "+ New item"
+  addingItem: false, itemDraft: {}, itemError: "", itemBusy: null, openAfter: null, itemNotes: {}, nav: 0 };  // "+ New item"
 // Open editors by asset id; typed text is kept in `drafts` until saved or cancelled.
 const libEdit = { open: new Set(), drafts: {}, errors: {}, notes: {}, saving: new Set() };
 
@@ -50,8 +50,7 @@ async function libRoute(param) {
   // panel closes on every page change), and only there; it is dropped on any other page.
   const after = lib.openAfter;
   lib.openAfter = null;
-  lib.startNote = after && after.slot === slot && after.note ? after : null;
-  if (after && after.slot === slot && after.sid) setTimeout(() => openBench(after.kind, after.sid, after.label));
+  if (after && after.slot === slot) setTimeout(() => openBench(after.kind, after.sid, after.label));
   // Another layer of the asset on the page: shown from what is loaded, then refreshed.
   if (id && lib.id === id && lib.view && !lib.stale) {
     Object.assign(lib, { part, slot, shot, adding: false, addingItem: false });
@@ -618,9 +617,9 @@ const LIB_ITEM_FIELDS = [["size_and_scale", "Size and scale", "e.g. palm-sized, 
   ["distinguishing_marks", "Distinguishing marks", "e.g. a gallery logo embossed top left"], ["handling", "Handling", "e.g. she flicks it between two fingers"]];
 
 // The form's ways to start the new item's picture: the bench panel each opens, what it is
-// called if it fails, and how it is made (with the form's button for progress and errors).
+// called, and how it is made (`status` shows its progress). Each returns { study, error }.
 const LIB_ITEM_START = {
-  chat: { kind: "chat", noun: "chat", make: (target) => benchStartChat(target).then((study) => ({ study, error: "" }), (e) => ({ study: null, error: e.message })) },
+  chat: { kind: "chat", noun: "chat", make: (target) => benchStartChat(target) },
   photo: { kind: "face", noun: "photo study", make: (target, button, file) => benchFaceFromPhoto(file, target, button, { open: false }) },
   text: { kind: "face", noun: "study", make: (target, button) => benchFaceFromText(target, button, { open: false }) },
 };
@@ -638,49 +637,70 @@ function libNewItem(a) {
     renderLibrary();
     return false;
   };
-  const save = async (button, how, file) => {
+  const save = async (how, file) => {
     if (!named()) return;
     const name = draft.name.trim();
-    if (file && !/^image\/(jpeg|png|webp)$/.test(file.type)) { lib.itemError = `${file.name}: use a JPEG, PNG or WebP photo.`; return renderLibrary(); }
+    if (file && !isPhotoType(file)) { lib.itemError = photoTypeError(file); return renderLibrary(); }
     const sheet = Object.fromEntries(LIB_ITEM_FIELDS.map(([k]) => [k, (draft[k] || "").trim()]).filter(([, x]) => x));
     const state = (draft.state || "").trim();
-    // One at a time: every button of the form waits (a photo can take a while to describe).
-    const buttons = [...button.closest(".lib-editor").querySelectorAll("button")];
-    buttons.forEach((b) => { b.disabled = true; });
-    const from = location.hash;
+    // Busy: the form shows only what is happening (no buttons), however often the page is
+    // drawn meanwhile; `status` is one element, moved into each drawing, with the progress.
+    const status = h("button", { type: "button", class: "btn small", disabled: true }, "Adding…");
+    lib.itemBusy = { name, status };
+    lib.itemError = "";
+    const nav = lib.nav;
+    renderLibrary();
     let out;
     try {
       out = await api(`/v1/drama-packages/${encodeURIComponent(a.origin_package_id)}/items`, {
         method: "POST", body: JSON.stringify({ owner_id: a.origin_entity_id, name, story_function: (draft.story_function || "").trim(),
           state, sheet, revision_id: a.origin_revision_id }) });
     } catch (e) {
-      buttons.forEach((b) => { b.disabled = false; });
+      lib.itemBusy = null;
       lib.itemError = e.message;
-      return renderLibrary();
+      if (lib.nav === nav) renderLibrary();
+      return;
     }
-    // Added: from here on the form never comes back (trying again would add it twice).
-    Object.assign(lib, { itemDraft: {}, itemError: "", stale: true });
+    // Added: the form never comes back with this draft (trying again would add it twice).
+    Object.assign(lib, { itemDraft: {}, stale: true });
     const slot = (out.deliverable_ids || [])[0] || null;
-    let after = null;
-    // Its chat or study, made here; it opens once the picture's page is up. If making it
-    // fails, the item is still added: its page says why and has the same buttons.
-    const start = how && slot && LIB_ITEM_START[how];
-    if (start) {
+    // Its chat or study, made here. If making it fails, the item is still added: its page
+    // says why, beside the same buttons.
+    const start = how && LIB_ITEM_START[how];
+    let made = null;
+    if (start && !slot) made = { note: `${name} was added, but it has no picture to start a ${start.noun} for.` };
+    else if (start) {
       const label = libSlotLabel({ entity: name, asset_type: "prop", variant: state || "As it first appears",
         variant_id: out.state_id, entity_id: out.prop_id, view: "detail" });
       const target = { package_id: out.package_id, requirement_id: out.requirement_id, deliverable_id: slot, label };
-      const { study, error } = await start.make(target, button, file);
-      after = study ? { slot, kind: start.kind, sid: study.session_id, label }
-        : { slot, note: `${name} was added, but its ${start.noun} couldn't be started${error ? `: ${error}` : ""}. Try again here.` };
+      status.textContent = `Starting its ${start.noun}…`;
+      const { study, error } = await start.make(target, status, file);
+      made = study ? { kind: start.kind, sid: study.session_id, label }
+        : { note: `${name} was added, but its ${start.noun} couldn't be started${error ? `: ${error}` : ""}. Try again here.` };
     }
-    // Still where it was added from (not moved on while its photo was described): its page.
-    lib.addingItem = false;
-    if (location.hash !== from) return;
-    lib.openAfter = after;
-    location.hash = libHref(out.lib_asset_id || a.asset_id, out.part_asset_id, slot).slice(1);
+    Object.assign(lib, { itemBusy: null, addingItem: false });
+    if (lib.nav !== nav) {
+      // Moved on meanwhile: nothing opens and nobody is pulled back; the item's page says
+      // what was made, to open from there.
+      if (made && slot) lib.itemNotes[slot] = made.sid ? { ...made, note: `${name}'s ${start.noun} is ready.` } : made;
+      return;
+    }
+    if (made && slot) {
+      if (made.sid) lib.openAfter = { slot, ...made };
+      else lib.itemNotes[slot] = made;
+    }
+    const next = libHref(out.lib_asset_id || a.asset_id, out.part_asset_id, slot);
+    if (location.hash === next) route();  // the same page: no hash change to show it
+    else location.hash = next.slice(1);
   };
+  if (lib.itemBusy) {
+    return h("section", { class: "card lib-editor", "aria-busy": "true" },
+      h("strong", {}, `New item ${a.name} carries`),
+      h("p", {}, `Adding ${lib.itemBusy.name}. Its page opens when it's ready.`),
+      h("div", { class: "prompt-edit-actions" }, lib.itemBusy.status));
+  }
   const photo = h("input", { type: "file", accept: "image/jpeg,image/png,image/webp", hidden: true, "aria-label": "Reference photo",
-    onchange: (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) save(fromPhoto, "photo", f); } });
+    onchange: (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) save("photo", f); } });
   const fromPhoto = h("button", { type: "button", class: "btn small", title: "Add it, then upload a reference photo: GPT describes the object in words, and you test the wording seed by seed",
     onclick: () => { if (named()) photo.click(); } }, "From a photo");
   return h("section", { class: "card lib-editor" },
@@ -691,11 +711,11 @@ function libNewItem(a) {
     stickyDetails(`newitem:${a.asset_id}`, "What it looks like (optional)", LIB_ITEM_FIELDS.map(([k, label, hint]) => field(k, label, hint))),
     h("p", { class: "muted small" }, `Added to the story ${a.name} comes from, as a prop ${a.name} carries (in its Props too). No shot uses it yet.`),
     h("div", { class: "prompt-edit-actions" },
-      h("button", { type: "button", class: "btn small primary-outline", title: "Add it; its picture page offers the ways to draw it", onclick: (e) => save(e.currentTarget) }, "Add item"),
+      h("button", { type: "button", class: "btn small primary-outline", title: "Add it; its picture page offers the ways to draw it", onclick: () => save() }, "Add item"),
       h("span", { class: "muted small" }, "or add and start its picture:"),
-      h("button", { type: "button", class: "btn small", title: "Add it, then open a chat for its picture with the image model", onclick: (e) => save(e.currentTarget, "chat") }, "Develop in a chat"),
+      h("button", { type: "button", class: "btn small", title: "Add it, then open a chat for its picture with the image model", onclick: () => save("chat") }, "Develop in a chat"),
       photo, fromPhoto,
-      h("button", { type: "button", class: "btn small", title: "Add it, then write the description yourself and test it seed by seed", onclick: (e) => save(e.currentTarget, "text") }, "Create from text"),
+      h("button", { type: "button", class: "btn small", title: "Add it, then write the description yourself and test it seed by seed", onclick: () => save("text") }, "Create from text"),
       h("button", { type: "button", class: "btn ghost small", onclick: () => { Object.assign(lib, { addingItem: false, itemError: "" }); renderLibrary(); } }, "Cancel")),
     lib.itemError && h("p", { class: "small warn-text", role: "alert" }, lib.itemError));
 }
@@ -960,13 +980,11 @@ function libWorkbench(part, slot, sayView) {
   }, "Create from text");
   const develop = async (button) => {
     button.disabled = true;
-    try {
-      const s = await benchStartChat(target);
-      button.disabled = false;
-      openBench("chat", s.session_id, label);
-    } catch (e) {
-      button.disabled = false;
-      lib.error = e.message;
+    const { study, error } = await benchStartChat(target);
+    button.disabled = false;
+    if (study) openBench("chat", study.session_id, label);
+    else {
+      lib.error = error;
       renderLibrary();
     }
   };
@@ -976,8 +994,19 @@ function libWorkbench(part, slot, sayView) {
       chat,
       fromPhoto, photo, fromText,
       libLinkScratch(target, true)),
-    lib.startNote && lib.startNote.slot === slot.deliverable_id && h("p", { class: "small warn-text", role: "alert" }, lib.startNote.note),
+    libItemNote(slot.deliverable_id),
     libHistory(mine)];
+}
+
+// What the New item form made for this picture, when it couldn't open it here: a chat or
+// study made after the page was left (Open it), or why it couldn't be made.
+function libItemNote(slotId) {
+  const n = lib.itemNotes[slotId];
+  if (!n) return null;
+  const done = () => { delete lib.itemNotes[slotId]; renderLibrary(); };
+  return h("p", { class: `small ${n.sid ? "" : "warn-text"}`, role: n.sid ? "status" : "alert" }, n.note, " ",
+    n.sid && h("button", { type: "button", class: "btn small", onclick: () => { done(); openBench(n.kind, n.sid, n.label); } }, "Open it"),
+    h("button", { type: "button", class: "btn ghost small", onclick: done }, "Dismiss"));
 }
 
 // The picture's chats and studies, newest first: each with its newest image, what it is,
