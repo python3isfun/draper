@@ -261,7 +261,8 @@ function renderFaceHeader(v) {
   const del = h("button", { type: "button", class: "btn ghost small", disabled: faceBusy(v), onclick: deleteFace }, "Delete study");
   face.el.header.replaceChildren(
     s.target && h("p", { class: "small exp-target" }, "For ", h("strong", {}, s.target.label || "a face"),
-      ". Use as pick on a render makes it that face's pick."),
+      ". Use as pick on a render makes it that face's pick. ",
+      h("button", { type: "button", class: "btn ghost small", title: "Move this study back to Scratch, tied to no face", onclick: () => unlinkSession(s.session_id, () => loadFaceStudy()) }, "Unlink")),
     face.notice && h("p", { class: "small hint" }, face.notice),
     h("div", { class: "exp-head-row" }, title,
       h("span", { class: "muted small" }, `${describes(v).length} description${describes(v).length === 1 ? "" : "s"} · ${tests(v).length} test${tests(v).length === 1 ? "" : "s"}`),

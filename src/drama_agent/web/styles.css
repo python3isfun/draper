@@ -672,3 +672,4 @@ td.mono { white-space: nowrap; }
 .bench-body .face-photo img { max-height: 360px; width: auto; max-width: 100%; object-fit: contain; }
 /* Wide windows: the page makes room for the panel instead of sitting under it. */
 @media (min-width: 1400px) { body.bench-open .main { margin-right: 680px; } }
+.lib-scratch { margin-top: 12px; }

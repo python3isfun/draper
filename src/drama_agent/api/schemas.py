@@ -207,6 +207,9 @@ class ExpSessionPatch(BaseModel):
     size: str | None = None  # "auto" or one of EXP_SIZES
     current: str | None = None  # an image of the session: "asset:<id>" or "turn:<id>:<n>"
     clear_current: bool = False  # the next message makes a new image (text to image)
+    # Link a scratch chat or study to a design picture (docs/workbench.md), or unlink it.
+    target: ExpTarget | None = None
+    unlink: bool = False
 
 
 class ExpTurnRequest(BaseModel):

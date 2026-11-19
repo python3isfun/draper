@@ -421,7 +421,7 @@ prompt and draws what is named), instructions ("keep", "frame", "retain": narrat
 finished image), story or intent words, and a face picture used as a mere style reference.
 A written prompt that breaks them is sent back to the writer once with the findings; what
 remains is shown on the version and the take. Keyframes use their own content rule, not
-the Experiment tab's restrictive mode: the picks are the production's chosen designs, so
+the image chats' restrictive mode: the picks are the production's chosen designs, so
 faces and clothes are carried over exactly; rules 1 to 3 still apply.
 6. **Approve** one draw per sub-shot; the next sub-shot then starts by itself. **Plan cuts
    and draw first keyframes for every shot** does steps 1-4 for every shot at once.
@@ -589,8 +589,17 @@ Intimate scenes are written as staging for the crew; the app never draws them.
 
 ### Experiment: chat with the image model
 
-The **Experiment** tab (top bar) is a chat for trying MiniMax-H3-Image by hand. Chats are
-saved and listed on the left.
+An image chat is a conversation with MiniMax-H3-Image, one change per message. It lives on
+the **Characters** and **Sets** pages (the workbench, `docs/workbench.md`):
+
+- **Develop in a chat**, above each picture, starts a chat from that picture's pick.
+  **Use as pick** on a result makes it the picture's pick, and what was drawn from the old
+  one is marked out of date.
+- **Scratch**, in the sidebar, holds chats tied to no picture (**New chat**). Link one to a
+  picture with **Link a scratch chat…** on that picture's row.
+
+Chats open in a side panel over the page. **Open full page** shows a chat on its own
+(`#exp=<id>`), with every chat listed on the left. The steps below are the same in both.
 
 1. **New chat**, then attach a base image (button or drag and drop) and send it without
    text: it becomes the *current image* (outlined, marked "current").
@@ -627,9 +636,12 @@ API: `GET/POST /v1/experiments`, `GET/PATCH/DELETE /v1/experiments/{id}`,
 
 ### Face Lab: from a photo to a reusable prompt
 
-The **Face Lab** tab turns a photo of a face into the most descriptive text prompt GPT can
+A face study (Face Lab) turns a photo of a face into the most descriptive text prompt GPT can
 write, then tests that prompt by itself, so you can see how close words alone get, and keep
-a description that works as a reusable, castable character prompt.
+a description that works as a reusable, castable character prompt. Start one with **From a
+photo** on a character's face (each render then has **Use as pick**), or with **New study
+from a photo** in Scratch. A study opens in the side panel; **Open full page** shows it on
+its own (`#face=<id>`).
 
 1. **New study from a photo:** GPT looks at the photo (at up to 1,536 px) and writes a
    text-to-image prompt recreating it: framing and pose, then the face feature by feature

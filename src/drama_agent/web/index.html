@@ -12,15 +12,13 @@
       <span class="brand-mark" aria-hidden="true">▶</span>
       <span>Drama Agent</span>
     </div>
-    <label class="restrict-toggle" title="Applies to the Experiment tab. Off (default): exploration mode. A character may be made to resemble a named real person, or take a face from an uploaded photo, including in clothed romantic scenes; production and legal clear likeness later. On: no real-person likeness (GPT describes generic traits instead), and no romance or swimwear with a likeness already there. Either way, nothing sexualized is drawn of a real person's likeness (no lingerie, undressing or bed scenes), no nudity, and nothing romantic or sexual of minors.">
-      <input type="checkbox" id="restrictive"> Restrictive mode (Experiment)
+    <label class="restrict-toggle" title="Applies to image chats and face studies (the workbench on the Characters and Sets pages). Off (default): exploration mode. A character may be made to resemble a named real person, or take a face from an uploaded photo, including in clothed romantic scenes; production and legal clear likeness later. On: no real-person likeness (GPT describes generic traits instead), and no romance or swimwear with a likeness already there. Either way, nothing sexualized is drawn of a real person's likeness (no lingerie, undressing or bed scenes), no nudity, and nothing romantic or sexual of minors.">
+      <input type="checkbox" id="restrictive"> Restrictive mode (image chats)
     </label>
     <nav class="modes" aria-label="Sections">
       <a href="#" data-mode="drama" class="active" aria-current="page">Drama</a>
       <a href="#lib=characters" data-mode="chars">Characters</a>
       <a href="#lib=sets" data-mode="sets">Sets</a>
-      <a href="#exp" data-mode="exp">Experiment</a>
-      <a href="#face" data-mode="face">Face Lab</a>
     </nav>
     <div class="topbar-meta" id="meta">…</div>
   </header>
@@ -117,6 +115,18 @@
         </section>
         <section class="jobs">
           <ul id="lib-list" class="job-list lib-list"></ul>
+        </section>
+        <!-- Scratch: image chats and face studies not tied to a picture (docs/workbench.md). -->
+        <section class="card lib-scratch">
+          <h2>Scratch</h2>
+          <p class="hint">Image chats and face studies not tied to a picture yet. Link one to
+            a picture from that picture's row.</p>
+          <div class="design-row small">
+            <button type="button" class="btn small" id="scratch-chat">New chat</button>
+            <button type="button" class="btn small" id="scratch-face">New study from a photo</button>
+            <input type="file" id="scratch-file" accept="image/jpeg,image/png,image/webp" hidden>
+          </div>
+          <ul id="lib-scratch" class="job-list"></ul>
         </section>
       </div>
 

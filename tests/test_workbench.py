@@ -145,3 +145,38 @@ def test_a_pick_whose_file_is_gone_starts_an_empty_chat(tmp_path):
         r = http.post("/v1/experiments", json={"target": _target(job)})
         assert r.status_code == 201
         assert http.get(f"/v1/experiments/{r.json()['session_id']}").json()["turns"] == []
+
+
+def test_a_scratch_chat_can_be_linked_to_a_picture_and_unlinked(tmp_path):
+    with TestClient(_app(tmp_path)) as http:
+        job = _story(http)
+        sid = http.post("/v1/experiments", json={}).json()["session_id"]
+        r = http.patch(f"/v1/experiments/{sid}", json={"target": _target(job)})
+        assert r.status_code == 200 and r.json()["target"]["requirement_id"] == FRANK_FACE[0]
+        q = {"package_id": job["package_id"], "requirement_id": FRANK_FACE[0]}
+        assert [s["session_id"] for s in http.get("/v1/experiments", params=q).json()] == [sid]
+        # Linking keeps the chat as it is: it doesn't start from the pick.
+        assert http.get(f"/v1/experiments/{sid}").json()["turns"] == []
+        bad = {**_target(job), "requirement_id": "ar_nope"}
+        assert http.patch(f"/v1/experiments/{sid}", json={"target": bad}).status_code == 404
+        r = http.patch(f"/v1/experiments/{sid}", json={"unlink": True})
+        assert r.json()["target"] is None
+        assert http.get("/v1/experiments", params=q).json() == []
+
+
+def test_a_face_study_is_only_for_a_face(tmp_path):
+    with TestClient(_app(tmp_path)) as http:
+        job = _story(http)
+        pkg = http.get(f"/v1/drama-packages/{job['package_id']}").json()
+        look = next(r for r in pkg["asset_requirements"]["items"]
+                    if r["asset_type"] == "character_look")  # fmt: skip
+        target = {"package_id": job["package_id"], "requirement_id": look["requirement_id"],
+                  "deliverable_id": look["deliverable_ids"][0] if "deliverable_ids" in look
+                  else look["deliverables"][0]["deliverable_id"]}  # fmt: skip
+        r = http.post("/v1/experiments", json={"kind": "face", "target": target})
+        assert r.status_code == 422
+        sid = http.post("/v1/experiments", json={"kind": "face"}).json()["session_id"]
+        assert http.patch(f"/v1/experiments/{sid}", json={"target": target}).status_code == 422
+        assert (
+            http.patch(f"/v1/experiments/{sid}", json={"target": _target(job)}).status_code == 200
+        )

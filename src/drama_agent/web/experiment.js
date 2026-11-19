@@ -313,7 +313,8 @@ function renderExpHeader(v) {
   exp.el.header.replaceChildren(
     target && h("p", { class: "small exp-target" }, "For ",
       job ? h("a", { href: `#job=${encodeURIComponent(job.job_id)}&tab=casting` }, h("strong", {}, target.label || "a design picture")) : h("strong", {}, target.label || "a design picture"),
-      ". Use as pick on a result makes it that picture's pick."),
+      ". Use as pick on a result makes it that picture's pick. ",
+      h("button", { type: "button", class: "btn ghost small", title: "Move this chat back to Scratch, tied to no picture", onclick: () => unlinkSession(s.session_id, () => loadExpSession()) }, "Unlink")),
     exp.notice && h("p", { class: "small hint" }, exp.notice),
     h("div", { class: "exp-head-row" },
       h("h2", { class: "exp-title", title: "Click to rename", onclick: rename }, s.title),
@@ -442,6 +443,18 @@ function expImage(ref, current, label, result) {
       result && exp.likeness[ref] && h("span", { class: "chip warn", title: "Shows a real person's likeness: nothing sexualized can be made from it (in Restrictive mode, no romance or swimwear either)" }, "real-person likeness"),
     ),
   );
+}
+
+// Unlink a chat or study from its picture: it goes back to Scratch (docs/workbench.md).
+// `then` reloads the view; the page under the workbench panel shows the change too.
+async function unlinkSession(sid, then) {
+  try {
+    await api(`/v1/experiments/${encodeURIComponent(sid)}`, { method: "PATCH", body: JSON.stringify({ unlink: true }) });
+  } catch (e) {
+    exp.notice = e.message;
+  }
+  await then();
+  if (typeof benchRefreshPage === "function" && (exp.host || face.host)) benchRefreshPage();
 }
 
 // Use as pick (docs/workbench.md): the image becomes the pick of the chat's design picture.

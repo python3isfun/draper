@@ -54,10 +54,11 @@ function closeBench({ refresh = true } = {}) {
 // picture's chats.
 function benchRefreshPage() {
   if (lib.kind && lib.id) libReload();
+  if (lib.kind) libLoadScratch();  // a chat may have been made, renamed or deleted
 }
 
-// "From a photo" on a face: upload a reference photo, start a study for that face and have
-// the photo described; the study opens in the panel.
+// "From a photo" on a face: upload a reference photo, start a study for that face (or, with
+// no target, a scratch study) and have the photo described; the study opens in the panel.
 async function benchFaceFromPhoto(file, target, button) {
   // Problems are said beside the button: the page itself stays as it is.
   const say = (msg) => {
@@ -75,7 +76,7 @@ async function benchFaceFromPhoto(file, target, button) {
     button.textContent = "Uploading…";
     const asset = await uploadFile(file, (p) => { button.textContent = `Uploading (${Math.round(p * 100)}%)…`; }, () => { button.textContent = "Processing…"; });
     button.textContent = "Describing…";
-    study = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ kind: "face", target }) });
+    study = await api("/v1/experiments", { method: "POST", body: JSON.stringify(target ? { kind: "face", target } : { kind: "face" }) });
     await api(`/v1/experiments/${encodeURIComponent(study.session_id)}/describe`, {
       method: "POST",
       body: JSON.stringify({ asset_id: asset.asset_id, restrictive: restrictiveBox.checked }),
@@ -86,11 +87,32 @@ async function benchFaceFromPhoto(file, target, button) {
     button.disabled = false;
     button.textContent = label;
     // Open the study even if describing failed (it says why), so it isn't left unseen.
-    if (study) openBench("face", study.session_id, target.label);
+    if (study) openBench("face", study.session_id, target ? target.label : study.title);
   }
 }
 
 $("#bench-close").addEventListener("click", () => closeBench());
+
+// Scratch's buttons (the Characters and Sets sidebar).
+$("#scratch-chat").addEventListener("click", async (e) => {
+  const button = e.currentTarget;
+  button.disabled = true;
+  try {
+    const s = await api("/v1/experiments", { method: "POST", body: "{}" });
+    openBench("chat", s.session_id, s.title);
+    libLoadScratch();
+  } catch (err) {
+    button.after(h("span", { class: "form-error bench-error" }, err.message));
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#scratch-face").addEventListener("click", () => $("#scratch-file").click());
+$("#scratch-file").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (file) benchFaceFromPhoto(file, null, $("#scratch-face")).then(libLoadScratch);
+});
 document.addEventListener("keydown", (e) => {
   // Not while typing, and not while a picture is shown full size (Escape closes that).
   if (e.key === "Escape" && bench.kind && !$(".lightbox") && !e.target.closest?.("input, textarea, select")) closeBench();

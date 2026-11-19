@@ -16,6 +16,7 @@ from ..experiment import SIZES as EXP_SIZES
 from ..experiment import (
     ExpError,
     ExpSession,
+    ExpTarget,
     ExpTurn,
     image_labels,
     is_busy,
@@ -25,6 +26,7 @@ from ..experiment import (
     plan_turn,
 )
 from ..face_lab import new_study, plan_describe, plan_test, source_photo
+from ..models import ProductionPackage
 from ..models.package import utcnow
 from .schemas import (
     ExpSessionCreate,
@@ -73,21 +75,29 @@ def register(app: FastAPI, ctx: Any) -> None:
 
         return [s for s in repo.list_exp_sessions() if kind in (None, s.kind) and wanted(s)]
 
+    def _target_story(target: ExpTarget, kind: str = "chat") -> ProductionPackage:
+        """The story of a design picture a chat is for; 404 when it has no such picture,
+        422 for a face study (Face Lab) aimed at anything but a character's face."""
+        pkg = repo.get_package(target.package_id)
+        if pkg is None:
+            raise HTTPException(404, "story not found")
+        reqmt = next((r for r in pkg.asset_requirements.items
+                      if r.requirement_id == target.requirement_id), None)  # fmt: skip
+        if reqmt is None or not any(
+            d.deliverable_id == target.deliverable_id for d in reqmt.deliverables
+        ):
+            raise HTTPException(404, "no such design picture in this story")
+        if kind == "face" and reqmt.asset_type != "character_identity":
+            raise HTTPException(422, "a face study can only be for a character's face")
+        return pkg
+
     @app.post("/v1/experiments", status_code=201, response_model=ExpSession)
     async def create_experiment(req: ExpSessionCreate) -> ExpSession:
         title = req.title or (req.target.label if req.target else None)
         session = new_study(title) if req.kind == "face" else new_session(title)
         pick = None
         if (target := req.target) is not None:
-            pkg = repo.get_package(target.package_id)
-            if pkg is None:
-                raise HTTPException(404, "story not found")
-            reqmt = next((r for r in pkg.asset_requirements.items
-                          if r.requirement_id == target.requirement_id), None)  # fmt: skip
-            if reqmt is None or not any(
-                d.deliverable_id == target.deliverable_id for d in reqmt.deliverables
-            ):
-                raise HTTPException(404, "no such design picture in this story")
+            pkg = _target_story(target, req.kind)
             session.target = target
             if req.kind == "chat" and req.start_from_pick:
                 key = (target.requirement_id, target.deliverable_id)
@@ -196,6 +206,11 @@ def register(app: FastAPI, ctx: Any) -> None:
             if req.current not in known_refs(repo.list_exp_turns(session_id)):
                 raise HTTPException(422, "that image is not part of this session")
             session.current = req.current
+        if req.unlink:
+            session.target = None
+        elif req.target is not None:
+            _target_story(req.target, session.kind)
+            session.target = req.target
         session.updated_at = utcnow()
         repo.save_exp_session(session)
         return session

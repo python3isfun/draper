@@ -9,7 +9,7 @@
  * out-of-date" redraws this asset's out-of-date pictures (and what is drawn from them).
  */
 
-const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "", story: "", timer: null, redrawing: "",
+const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "", story: "", timer: null, redrawing: "", scratch: [],
   designs: {}, designTimer: null };  // design board data per story revision on the page
 // Open editors by asset id; typed text is kept in `drafts` until saved or cancelled.
 const libEdit = { open: new Set(), drafts: {}, errors: {}, notes: {}, saving: new Set() };
@@ -48,6 +48,8 @@ async function libRoute(param) {
   lib.error = "";
   lib.redrawing = "";
   renderLibrary();
+  // Scratch feeds the sidebar and each picture's "Link a scratch chat": in before the page.
+  const scratch = libLoadScratch();
   if (!state.jobs.length) await loadJobs();
   try {
     lib.list = await api(`/v1/library/${meta.path}`);
@@ -58,6 +60,7 @@ async function libRoute(param) {
   } catch (e) {
     lib.error = e.message;
   }
+  await scratch;
   if (lib.kind === kind && lib.id === id) renderLibrary();
 }
 
@@ -83,6 +86,53 @@ function renderLibSide() {
       a.cover ? h("img", { src: a.cover.thumb, alt: "", loading: "lazy" }) : h("span", { class: "lib-noimg" }),
       h("span", {}, a.name, h("span", { class: "muted small" }, ` · ${count(a.children, meta.one, meta.many)}`))))));
   if (!shown.length) list.replaceChildren(h("li", { class: "muted small" }, f || lib.story ? "No match." : "Nothing yet."));
+}
+
+// Scratch (docs/workbench.md): image chats and face studies tied to no picture, newest
+// first. They open in the workbench panel.
+async function libLoadScratch() {
+  try {
+    lib.scratch = (await api("/v1/experiments")).filter((s) => !s.target);
+  } catch {
+    lib.scratch = [];
+  }
+  renderLibScratch();
+}
+
+function renderLibScratch() {
+  const list = $("#lib-scratch");
+  if (!list) return;
+  const items = lib.scratch || [];
+  if (!items.length) return list.replaceChildren(h("li", { class: "muted small" }, "Nothing here."));
+  list.replaceChildren(...items.map((s) => h("li", {},
+    h("a", {
+      href: `#${s.kind === "face" ? "face" : "exp"}=${encodeURIComponent(s.session_id)}`,
+      class: `lib-side-item${bench.sid === s.session_id ? " active" : ""}`,
+      onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench(s.kind === "face" ? "face" : "chat", s.session_id, s.title); },
+    }, h("span", {}, s.title, h("span", { class: "muted small" }, ` · ${s.kind === "face" ? "face study" : "chat"} · ${timeAgo(s.updated_at)}`))))));
+}
+
+// Link a scratch chat (or, on a face, a face study) to this picture; it leaves Scratch.
+function libLinkScratch(target, isFace) {
+  const free = (lib.scratch || []).filter((s) => s.kind === "chat" || isFace);
+  if (!free.length) return null;
+  return h("select", {
+    "aria-label": "Link a scratch chat to this picture",
+    onchange: async (e) => {
+      const sid = e.target.value;
+      if (!sid) return;
+      e.target.disabled = true;
+      try {
+        await api(`/v1/experiments/${encodeURIComponent(sid)}`, { method: "PATCH", body: JSON.stringify({ target }) });
+        await libLoadScratch();
+        libLoadDesign();
+      } catch (err) {
+        lib.error = err.message;
+        renderLibrary();
+      }
+    },
+  }, h("option", { value: "" }, "Link a scratch chat…"),
+    free.map((s) => h("option", { value: s.session_id }, `${s.title} (${s.kind === "face" ? "face study" : "chat"})`)));
 }
 
 // The characters (or sets) of the story chosen in the story filter (all when none is).
@@ -469,6 +519,7 @@ function libWorkbench(part, slot, sayView) {
   return h("div", { class: "design-row small" },
     h("button", { type: "button", class: "btn small", title: "Change this picture in a chat with the image model, starting from its pick", onclick: (e) => develop(e.currentTarget) }, sayView ? `Develop the ${slot.view} in a chat` : "Develop in a chat"),
     fromPhoto, photo,
+    libLinkScratch(target, slot.asset_type === "character_identity"),
     mine.length > 0 && h("span", { class: "muted" }, "Chats:"),
     mine.slice(0, 6).map((s) => h("a", {
       href: `#${s.kind === "face" ? "face" : "exp"}=${encodeURIComponent(s.session_id)}`,

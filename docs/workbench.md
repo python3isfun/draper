@@ -1,6 +1,6 @@
 # The workbench: Experiment and Face Lab inside Characters and Sets
 
-Status: phases 1 and 2 built (19 Nov 2026); phase 3 to do.
+Status: built (19 Nov 2026), phases 1 to 3.
 
 ## Why
 
@@ -118,6 +118,23 @@ content rules see the same likeness mark the story does.
 - After Use as pick, and when the panel closes, the page reloads its view: the new pick,
   what is now out of date, and the picture's chats.
 - Leaving the page (any route change) closes the panel.
+
+## Phase 3 as built
+
+- **The top bar** is Drama, Characters and Sets. The Experiment and Face Lab tabs are gone.
+  Their full pages stay at `#exp=<id>` / `#face=<id>`, the target of the panel's Open full
+  page, and old links keep working.
+- **Scratch**, in the Characters and Sets sidebar, lists every chat and study tied to no
+  picture, newest first. **New chat** and **New study from a photo** start one. Each opens
+  in the panel.
+- **Link a scratch chat…** on a picture's row links one to that picture
+  (`PATCH /v1/experiments/{id}` with `target`). A face study can only be linked to a face.
+  The chat leaves Scratch and is listed under the picture. Linking doesn't add the pick to
+  the chat. **Unlink**, in a linked chat's or study's "For …" line, sends it back to Scratch
+  (`{"unlink": true}`), so a wrong link is easy to undo.
+- A face study can be for a character's face only. The server refuses anything else (422),
+  since its Use as pick would otherwise replace another kind of picture with a face.
+- The restrictive-mode switch says it applies to image chats.
 
 ## Choices
 
