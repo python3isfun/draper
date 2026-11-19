@@ -78,10 +78,12 @@ function renderFrameDraw(take) {
       d.status !== "done"
         ? h("div", { class: "draw-placeholder", title: d.error || "" }, "failed")
         : !finished
-          ? h("img", { class: "draw-waiting", src: drawUrl(take, d.n), alt: label, loading: "lazy", title: "Approve once the round is finished" })
+          ? h("div", { class: "draw-waiting-box" },
+              h("img", { class: "draw-waiting", src: drawUrl(take, d.n), alt: label, loading: "lazy", title: "Approve once the round is finished" }),
+              lookalikeTag(take.likeness))
           : h("button", { type: "button", class: "draw-pick", title: approved ? "Approved" : "Approve this keyframe",
               onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, { n: d.n }) },
-              h("img", { src: drawUrl(take, d.n), alt: label, loading: "lazy" })),
+              h("img", { src: drawUrl(take, d.n), alt: label, loading: "lazy" }), lookalikeTag(take.likeness)),
       h("figcaption", {},
         h("div", { class: "keyframe-cap" }, `${label}${approved ? " ✓ approved" : ""}`, checkBadge(d)),
         d.status === "done" && h("a", { href: drawUrl(take, d.n, "content"), target: "_blank", rel: "noopener", class: "muted small" }, "open"),
@@ -284,12 +286,12 @@ function refSrc(r, variant = "thumb") {
 
 // Each reference picture opens full size; the arrows step through the sub-shot's pictures.
 function renderRefStrip(sub) {
-  const items = sub.references.map((r, i) => ({ src: refSrc(r, "content"), caption: `<Picture ${i + 1}>`, title: r.role }));
+  const items = sub.references.map((r, i) => ({ src: refSrc(r, "content"), caption: `<Picture ${i + 1}>`, title: r.role, likeness: r.likeness }));
   return h("div", { class: "ref-strip" }, sub.references.map((r, i) =>
     h("figure", { class: "ref", title: `${r.role} (click to enlarge)` },
       h("button", { type: "button", class: "ref-open", "aria-label": `Enlarge <Picture ${i + 1}>: ${r.role}`, onclick: () => enlarge(items, i) },
-        h("img", { src: refSrc(r), alt: r.role, loading: "lazy" })),
-      h("figcaption", {}, `<Picture ${i + 1}>`, r.likeness && h("span", { class: "warn-text" }, " · likeness")))));
+        h("img", { src: refSrc(r), alt: r.role, loading: "lazy" }), lookalikeTag(r.likeness)),
+      h("figcaption", {}, `<Picture ${i + 1}>`))));
 }
 
 // Plan editor: one row per sub-shot (start, framing, camera, action, people).
@@ -396,13 +398,13 @@ function renderChoices(pkg, shot, sub) {
       frameAction(url, null, { revision_id: pkg.revision_id, sub_shot: sub.index, character_id: c.character_id, image_id: e.target.value }) },
       c.candidates.map((x) => h("option", { value: x.image_id, selected: x.image_id === c.image_id, title: x.shows }, x.label.slice(0, 70))));
     // Opens on the chosen picture; the arrows step through the person's other pictures to compare.
-    const pool = c.candidates.some((x) => x.image_id === c.image_id) ? c.candidates : [{ image_id: c.image_id, label: c.name, shows: c.shows }, ...c.candidates];
+    const pool = c.candidates.some((x) => x.image_id === c.image_id) ? c.candidates : [{ image_id: c.image_id, label: c.name, shows: c.shows, likeness: c.likeness }, ...c.candidates];
     const items = pool.map((x) => ({ src: `/v1/generated-images/${encodeURIComponent(x.image_id)}/content`,
-      caption: `${c.name}${x.image_id === c.image_id ? " (drawn from)" : ""}`, title: x.label }));
+      caption: `${c.name}${x.image_id === c.image_id ? " (drawn from)" : ""}`, title: x.label, likeness: x.likeness }));
     return h("div", { class: "choice" },
       h("button", { type: "button", class: "ref-open", "aria-label": `Enlarge ${c.name}'s picture`, title: `${c.shows || c.name} (click to enlarge)`,
                     onclick: () => enlarge(items, pool.findIndex((x) => x.image_id === c.image_id)) },
-        h("img", { src: `/v1/generated-images/${encodeURIComponent(c.image_id)}/thumb`, alt: c.name, loading: "lazy" })),
+        h("img", { src: `/v1/generated-images/${encodeURIComponent(c.image_id)}/thumb`, alt: c.name, loading: "lazy" }), lookalikeTag(c.likeness)),
       h("div", { class: "small" },
         h("div", {}, h("strong", {}, c.name), " ", h("span", { class: "muted" }, stateLine(c.state))),
         c.keep.length > 0 && h("div", { class: "muted" }, `The picture already has: ${c.keep.join(", ")}`),

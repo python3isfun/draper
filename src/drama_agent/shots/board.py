@@ -69,7 +69,10 @@ def shot_board(
                     "reason": c.reason,
                     "source": c.source,
                     "shows": pool[c.image_id].shows if c.image_id in pool else "",
-                    "candidates": [{"image_id": x.image_id, "label": x.label, "shows": x.shows}
+                    # Shows a real person's likeness: the UI labels it "Lookalike".
+                    "likeness": pool[c.image_id].likeness if c.image_id in pool else False,
+                    "candidates": [{"image_id": x.image_id, "label": x.label, "shows": x.shows,
+                                    "likeness": x.likeness}
                                    for x in pool.values() if x.character_id == who],
                 })  # fmt: skip
             ap = approved_take(mine, shot.shot_id, sub.index)

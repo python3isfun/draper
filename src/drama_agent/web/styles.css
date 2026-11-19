@@ -668,8 +668,25 @@ td.mono { white-space: nowrap; }
 .bench-head strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bench-body { flex: 1; overflow-y: auto; padding: 16px; }
 .bench-body .face-grid { grid-template-columns: 1fr; }
+/* One column in the panel: a sticky photo would sit over the tests scrolling under it. */
+.bench-body .face-photo { position: static; }
 .bench-error { margin-left: 6px; }
 .bench-body .face-photo img { max-height: 360px; width: auto; max-width: 100%; object-fit: contain; }
 /* Wide windows: the page makes room for the panel instead of sitting under it. */
 @media (min-width: 1400px) { body.bench-open .main { margin-right: 680px; } }
 .lib-scratch { margin-top: 12px; }
+
+/* "Lookalike": a picture that shows a real person's likeness (content rule 3). The label
+   sits over the picture's top-left corner, inside the link, button or figure holding it. */
+:where(*):has(> .lookalike-tag:not(.inline)) { position: relative; }
+.lookalike-tag {
+  position: absolute; top: 6px; left: 6px; z-index: 1; pointer-events: auto;
+  padding: 2px 6px; border-radius: 4px; background: #dc2626; color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 1.3; letter-spacing: 0.02em;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
+}
+.lookalike-tag.inline { position: static; display: inline-block; margin-left: 6px; vertical-align: middle; }
+.lookalike-tag[hidden] { display: none; }
+.lib-card > .lookalike-tag { top: 14px; left: 14px; }
+.lookalike-thumb { outline: 2px solid #dc2626; outline-offset: -2px; }
+

@@ -83,7 +83,7 @@ function renderLibSide() {
   const shown = libShown().filter((a) => !f || a.name.toLowerCase().includes(f));
   list.replaceChildren(...shown.map((a) =>
     h("li", {}, h("a", { href: `#lib=${a.asset_id}`, class: `lib-side-item${a.asset_id === lib.id ? " active" : ""}` },
-      a.cover ? h("img", { src: a.cover.thumb, alt: "", loading: "lazy" }) : h("span", { class: "lib-noimg" }),
+      a.cover ? h("img", { src: a.cover.thumb, alt: "", loading: "lazy", class: a.cover.likeness ? "lookalike-thumb" : null, title: a.cover.likeness ? LOOKALIKE_TIP : null }) : h("span", { class: "lib-noimg" }),
       h("span", {}, a.name, h("span", { class: "muted small" }, ` · ${count(a.children, meta.one, meta.many)}`))))));
   if (!shown.length) list.replaceChildren(h("li", { class: "muted small" }, f || lib.story ? "No match." : "Nothing yet."));
 }
@@ -165,6 +165,7 @@ function renderLibGrid() {
     h("div", { class: "lib-grid" }, shown.map((a) =>
       h("a", { href: `#lib=${a.asset_id}`, class: "card lib-card" },
         a.cover ? h("img", { src: a.cover.thumb, alt: a.name, loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
+        lookalikeTag(a.cover?.likeness),
         h("strong", {}, a.name),
         h("span", { class: "muted small" }, `${count(a.children, meta.one, meta.many)} · ${count(a.items, "item", "items")} · ${count(a.stories, "story", "stories")}`)))));
 }
@@ -179,13 +180,12 @@ const storyLink = (packageId, tab, label) => {
 // Pictures: click to enlarge (each list steps through its own); out-of-date ones say why.
 function libPictures(pictures, title) {
   if (!pictures.length) return h("p", { class: "muted small" }, "No picture yet.");
-  const items = pictures.map((p) => ({ src: p.content, caption: `${title} · ${p.view}`, title: p.imported_from ? `imported from ${p.imported_from}` : `${p.size}` }));
+  const items = pictures.map((p) => ({ src: p.content, caption: `${title} · ${p.view}`, likeness: p.likeness, title: p.imported_from ? `imported from ${p.imported_from}` : `${p.size}` }));
   return h("div", { class: "lib-pics" }, pictures.map((p, i) =>
     h("figure", { class: "lib-pic" },
       h("button", { type: "button", class: "ref-open", "aria-label": `Enlarge ${title}, ${p.view}`, onclick: () => enlarge(items, i) },
-        h("img", { src: p.thumb, alt: `${title}, ${p.view}`, loading: "lazy" })),
+        h("img", { src: p.thumb, alt: `${title}, ${p.view}`, loading: "lazy" }), lookalikeTag(p.likeness)),
       h("figcaption", { class: "small" }, p.view,
-        p.likeness && h("span", { class: "chip warn", title: "Shows a real person's likeness (content rule 3)" }, "likeness"),
         p.outdated.length > 0 && h("span", { class: "chip warn", title: p.outdated.join("; ") }, "out of date")))));
 }
 

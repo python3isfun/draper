@@ -25,8 +25,16 @@ function h(tag, attrs, ...children) {
 
 const $ = (sel) => document.querySelector(sel);
 
+// A red "Lookalike" label over a picture that shows a real person's likeness: an
+// identifiable person from an uploaded photo, someone made to resemble a real person, or a
+// picture drawn from one of those. Put it right after the <img>, inside the picture's link
+// or button; the stricter image rules (content rule 3) apply to it.
+const LOOKALIKE_TIP = "Lookalike: shows a real person's likeness (from a photo of an identifiable person, or made to resemble a real person). Nothing sexualized can be made from it; in Restrictive mode, no romance or swimwear either.";
+const lookalikeTag = (on) => on && h("span", { class: "lookalike-tag", title: LOOKALIKE_TIP }, "Lookalike");
+
 /**
- * Show pictures full size over the page: `items` are {src, caption, title?}, opened at `start`.
+ * Show pictures full size over the page: `items` are {src, caption, title?, likeness?},
+ * opened at `start`.
  * Left/right arrows (or the buttons) step through them; Escape, the close button or a click
  * outside the picture closes it. It lives on <body>, so the board redrawing underneath
  * doesn't close it.
@@ -38,8 +46,10 @@ function enlarge(items, start = 0) {
   const img = h("img", { alt: "" });
   const caption = h("figcaption", {});
   const count = h("span", { class: "muted small" });
+  const tag = h("span", { class: "lookalike-tag inline", title: LOOKALIKE_TIP }, "Lookalike");
   const show = () => {
     const it = items[at];
+    tag.hidden = !it.likeness;
     img.src = it.src;
     img.alt = it.title || it.caption || "";
     caption.replaceChildren(h("strong", {}, it.caption || ""), it.title ? ` ${it.title}` : "");
@@ -59,7 +69,7 @@ function enlarge(items, start = 0) {
       img,
       h("div", { class: "lightbox-bar" },
         more && h("button", { type: "button", class: "btn ghost small", "aria-label": "Previous picture", onclick: () => step(-1) }, "‹"),
-        caption, count,
+        tag, caption, count,
         more && h("button", { type: "button", class: "btn ghost small", "aria-label": "Next picture", onclick: () => step(1) }, "›"),
         h("a", { class: "btn ghost small", href: "#", target: "_blank", rel: "noopener",
                  onclick: (e) => { e.currentTarget.href = items[at].src; } }, "Open"),
@@ -1114,7 +1124,7 @@ function renderDraw(img) {
     img.status === "done"
       ? h("button", { type: "button", class: "draw-pick", title: selected ? "Selected" : "Select this image",
           onclick: (e) => imageAction(`/v1/generated-images/${encodeURIComponent(img.image_id)}/select`, e.currentTarget) },
-          h("img", { src: thumbUrl(img), alt: label, loading: "lazy" }))
+          h("img", { src: thumbUrl(img), alt: label, loading: "lazy" }), lookalikeTag(img.likeness))
       : h("div", { class: "draw-placeholder", title: img.error || "" }, status,
           img.status === "failed" && h("button", { type: "button", class: "btn ghost small", title: img.error || "Try this draw again (same prompt and seed)",
             onclick: (e) => imageAction(`/v1/generated-images/${encodeURIComponent(img.image_id)}/retry`, e.currentTarget) }, "Retry")),
@@ -1289,6 +1299,7 @@ function renderCasting(pkg) {
     return h("div", { class: "card lib-card" },
       h("a", { href: `#lib=${a.asset_id}`, class: "lib-card-link", title: `Open ${a.name}: sheet, pictures, takes` },
         a.cover ? h("img", { src: a.cover.thumb, alt: a.name, loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
+        lookalikeTag(a.cover?.likeness),
         h("strong", {}, a.name), h("span", { class: "muted small" }, `${sub} · ${a.items} item${a.items === 1 ? "" : "s"}`)),
       castingLink(pkg, storyId, kindLabel));
   };

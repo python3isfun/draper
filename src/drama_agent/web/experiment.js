@@ -425,7 +425,7 @@ function expImage(ref, current, label, result) {
   const n = exp.labels[ref];
   return h("figure", { class: `exp-image${isCurrent ? " current" : ""}` },
     h("a", { href: refUrl(ref, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
-      h("img", { src: refUrl(ref, "thumb"), alt: n != null ? `#${n} ${label}` : label, loading: "lazy" })),
+      h("img", { src: refUrl(ref, "thumb"), alt: n != null ? `#${n} ${label}` : label, loading: "lazy" }), lookalikeTag(exp.likeness[ref])),
     h("figcaption", {},
       n != null && h("button", {
         type: "button", class: "exp-id", title: `Image #${n}: click to mention it in your message`,
@@ -440,7 +440,6 @@ function expImage(ref, current, label, result) {
         title: `Make this the pick of ${exp.view.session.target.label || "the picture this chat is for"}`,
         onclick: (e) => usePick(ref, e.currentTarget),
       }, exp.used[ref] ? "Now the pick" : "Use as pick"),
-      result && exp.likeness[ref] && h("span", { class: "chip warn", title: "Shows a real person's likeness: nothing sexualized can be made from it (in Restrictive mode, no romance or swimwear either)" }, "real-person likeness"),
     ),
   );
 }
@@ -517,9 +516,10 @@ function renderComposer(v) {
   const current = v.session.current;
   el.current.replaceChildren(current
     ? h("div", { class: "exp-current-row" },
-      h("img", { src: refUrl(current), alt: "Current image" }),
+      h("img", { src: refUrl(current), alt: "Current image", class: exp.likeness[current] ? "lookalike-thumb" : null, title: exp.likeness[current] ? LOOKALIKE_TIP : null }),
       h("div", {},
         h("strong", {}, `Editing the current image${exp.labels[current] != null ? ` (#${exp.labels[current]})` : ""}`),
+        exp.likeness[current] && h("span", { class: "lookalike-tag inline", title: LOOKALIKE_TIP }, "Lookalike"),
         h("div", { class: "muted small" }, d.files.length ? `Sent as <Picture 1>; your attachments follow as <Picture 2>${d.files.length > 1 ? `–${d.files.length + 1}` : ""}.` : "Sent as <Picture 1> with your message.")),
       h("button", { type: "button", class: "btn ghost small", disabled: busy, onclick: () => patchExp({ clear_current: true }) }, "Start a new image"))
     : h("div", { class: "muted small" }, d.files.length

@@ -166,6 +166,8 @@ async function loadFaceStudy() {
 // Study view
 
 const describes = (v) => v.turns.filter((t) => t.mode === "describe");
+// The photo shows an identifiable person (judged when it was described).
+const photoLikeness = (v) => describes(v).some((t) => t.likeness === true);
 const tests = (v) => v.turns.filter((t) => t.mode !== "describe" && t.mode !== "upload");
 
 function photoRef(v) {
@@ -316,7 +318,7 @@ function renderPhoto(v) {
     h("h3", {}, "Photo"),
     ref
       ? h("a", { href: refUrl(ref, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
-        h("img", { src: refUrl(ref), alt: "The photo being described", class: "face-photo-img" }))
+        h("img", { src: refUrl(ref), alt: "The photo being described", class: "face-photo-img" }), lookalikeTag(photoLikeness(v)))
       : h("p", { class: "muted" }, "No photo yet."),
     ref && face.labels[ref] != null && h("span", { class: "exp-id" }, `#${face.labels[ref]}`),
     h("div", { class: "face-describe" },
@@ -480,13 +482,13 @@ function renderTests(v) {
         ),
         h("div", { class: "face-results" },
           photo && h("figure", { class: "exp-image face-original" },
-            h("img", { src: refUrl(photo), alt: "The photo" }),
+            h("img", { src: refUrl(photo), alt: "The photo" }), lookalikeTag(photoLikeness(v)),
             h("figcaption", {}, h("span", { class: "muted small" }, "photo"))),
           t.results.map((r, n) => {
             const ref = `turn:${t.turn_id}:${n}`;
             return h("figure", { class: "exp-image" },
               h("a", { href: refUrl(ref, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
-                h("img", { src: refUrl(ref), alt: `Seed ${r.seed}`, loading: "lazy" })),
+                h("img", { src: refUrl(ref), alt: `Seed ${r.seed}`, loading: "lazy" }), lookalikeTag(t.likeness)),
               h("figcaption", {},
                 r.label != null && h("span", { class: "exp-id" }, `#${r.label}`),
                 h("span", { class: "muted small" }, `seed ${r.seed}`),
