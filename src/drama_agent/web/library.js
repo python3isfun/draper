@@ -617,6 +617,14 @@ const LIB_ITEM_FIELDS = [["size_and_scale", "Size and scale", "e.g. palm-sized, 
   ["color_and_finish", "Color and finish", "e.g. ivory, letterpress in charcoal"], ["condition_and_wear", "Condition and wear", "e.g. crisp, one corner bent"],
   ["distinguishing_marks", "Distinguishing marks", "e.g. a gallery logo embossed top left"], ["handling", "Handling", "e.g. she flicks it between two fingers"]];
 
+// The form's ways to start the new item's picture: the bench panel each opens, what it is
+// called if it fails, and how it is made (with the form's button for progress and errors).
+const LIB_ITEM_START = {
+  chat: { kind: "chat", noun: "chat", make: (target) => benchStartChat(target).then((study) => ({ study, error: "" }), (e) => ({ study: null, error: e.message })) },
+  photo: { kind: "face", noun: "photo study", make: (target, button, file) => benchFaceFromPhoto(file, target, button, { open: false }) },
+  text: { kind: "face", noun: "study", make: (target, button) => benchFaceFromText(target, button, { open: false }) },
+};
+
 function libNewItem(a) {
   const draft = (lib.itemDraft ??= {});
   const field = (key, label, hint) => {
@@ -635,32 +643,41 @@ function libNewItem(a) {
     const name = draft.name.trim();
     if (file && !/^image\/(jpeg|png|webp)$/.test(file.type)) { lib.itemError = `${file.name}: use a JPEG, PNG or WebP photo.`; return renderLibrary(); }
     const sheet = Object.fromEntries(LIB_ITEM_FIELDS.map(([k]) => [k, (draft[k] || "").trim()]).filter(([, x]) => x));
-    button.disabled = true;
+    const state = (draft.state || "").trim();
+    // One at a time: every button of the form waits (a photo can take a while to describe).
+    const buttons = [...button.closest(".lib-editor").querySelectorAll("button")];
+    buttons.forEach((b) => { b.disabled = true; });
+    const from = location.hash;
+    let out;
     try {
-      const out = await api(`/v1/drama-packages/${encodeURIComponent(a.origin_package_id)}/items`, {
+      out = await api(`/v1/drama-packages/${encodeURIComponent(a.origin_package_id)}/items`, {
         method: "POST", body: JSON.stringify({ owner_id: a.origin_entity_id, name, story_function: (draft.story_function || "").trim(),
-          state: (draft.state || "").trim(), sheet, revision_id: a.origin_revision_id }) });
-      const slot = out.deliverable_ids[0];
-      // Its chat or study, made here; it opens once the picture's page is up. If making it
-      // fails, the item is still added: its page has the same buttons to try again.
-      if (how) {
-        const label = `${name}, ${((draft.state || "").trim() || "As it first appears").toLowerCase()}, detail`;
-        const target = { package_id: out.package_id, requirement_id: out.requirement_id, deliverable_id: slot, label };
-        let s = null;
-        if (how === "photo") s = await benchFaceFromPhoto(file, target, button, { open: false });
-        else if (how === "text") s = await benchFaceFromText(target, button, { open: false });
-        else s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true }) })
-          .catch((e) => { button.after(h("span", { class: "form-error bench-error" }, e.message)); return null; });
-        lib.openAfter = s ? { slot, kind: how === "chat" ? "chat" : "face", sid: s.session_id, label }
-          : { slot, note: `${name} was added, but its ${how === "photo" ? "photo study" : how === "text" ? "study" : "chat"} couldn't be started: ${button.parentElement?.querySelector(".bench-error")?.textContent || "try again here"}.` };
-      }
-      Object.assign(lib, { addingItem: false, itemDraft: {}, itemError: "", stale: true });
-      location.hash = libHref(out.lib_asset_id || a.asset_id, out.part_asset_id, slot).slice(1);
+          state, sheet, revision_id: a.origin_revision_id }) });
     } catch (e) {
-      button.disabled = false;
+      buttons.forEach((b) => { b.disabled = false; });
       lib.itemError = e.message;
-      renderLibrary();
+      return renderLibrary();
     }
+    // Added: from here on the form never comes back (trying again would add it twice).
+    Object.assign(lib, { itemDraft: {}, itemError: "", stale: true });
+    const slot = (out.deliverable_ids || [])[0] || null;
+    let after = null;
+    // Its chat or study, made here; it opens once the picture's page is up. If making it
+    // fails, the item is still added: its page says why and has the same buttons.
+    const start = how && slot && LIB_ITEM_START[how];
+    if (start) {
+      const label = libSlotLabel({ entity: name, asset_type: "prop", variant: state || "As it first appears",
+        variant_id: out.state_id, entity_id: out.prop_id, view: "detail" });
+      const target = { package_id: out.package_id, requirement_id: out.requirement_id, deliverable_id: slot, label };
+      const { study, error } = await start.make(target, button, file);
+      after = study ? { slot, kind: start.kind, sid: study.session_id, label }
+        : { slot, note: `${name} was added, but its ${start.noun} couldn't be started${error ? `: ${error}` : ""}. Try again here.` };
+    }
+    // Still where it was added from (not moved on while its photo was described): its page.
+    lib.addingItem = false;
+    if (location.hash !== from) return;
+    lib.openAfter = after;
+    location.hash = libHref(out.lib_asset_id || a.asset_id, out.part_asset_id, slot).slice(1);
   };
   const photo = h("input", { type: "file", accept: "image/jpeg,image/png,image/webp", hidden: true, "aria-label": "Reference photo",
     onchange: (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) save(fromPhoto, "photo", f); } });
@@ -912,13 +929,19 @@ const LIB_STUDY = {
   prop: { what: "the object", from: "text alone, or the first state's pick" },
 };
 
+// A picture's name in chat and study titles: "Lila Montgomery, evening torn, full body".
+// The variant by the short name in its id (a look's own name is a whole line), but an
+// item's state by its name when that is short ("as it first appears": its id is clipped).
+function libSlotLabel(slot) {
+  const short = slot.asset_type === "prop" && slot.variant && slot.variant.length <= 40;
+  const variant = short ? slot.variant : slot.variant_id && libVariant(slot.variant_id, slot.entity_id);
+  return `${slot.entity}${variant ? `, ${variant.toLowerCase()}` : ""}, ${slot.view}`;
+}
+
 function libWorkbench(part, slot, sayView) {
   const mine = (lib.chats || []).filter((s) => s.target && s.target.package_id === part.origin_package_id
     && s.target.requirement_id === slot.requirement_id && s.target.deliverable_id === slot.deliverable_id);
-  // "Lila Montgomery, evening torn, full body": a look or set state by the short name in its
-  // id (its own name is a whole line); an item's state by its name ("as it first appears").
-  const variant = slot.asset_type === "prop" && slot.variant ? slot.variant : slot.variant_id && libVariant(slot.variant_id, slot.entity_id);
-  const label = `${slot.entity}${variant ? `, ${variant.toLowerCase()}` : ""}, ${slot.view}`;
+  const label = libSlotLabel(slot);
   const target = { package_id: part.origin_package_id, requirement_id: slot.requirement_id, deliverable_id: slot.deliverable_id, label };
   const study = LIB_STUDY[slot.asset_type] || LIB_STUDY.character_identity;
   // A study (as Face Lab, for every kind of picture): a photo described in words, or words
@@ -938,8 +961,7 @@ function libWorkbench(part, slot, sayView) {
   const develop = async (button) => {
     button.disabled = true;
     try {
-      // Clicked again before writing anything: the untouched chat opens, not another one.
-      const s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true }) });
+      const s = await benchStartChat(target);
       button.disabled = false;
       openBench("chat", s.session_id, label);
     } catch (e) {

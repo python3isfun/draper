@@ -62,16 +62,19 @@ function benchRefreshPage() {
 
 // "From a photo" on a face: upload a reference photo, start a study for that face (or, with
 // no target, a scratch study) and have the photo described; the study opens in the panel
-// (or, with `open` off, is only returned: the caller opens it). Returns the study, or null.
+// (or, with `open` off, is only returned: the caller opens it). Returns { study, error }:
+// the study (null if none was made) and, if it failed, why (also said beside the button).
 async function benchFaceFromPhoto(file, target, button, { open = true } = {}) {
   // Problems are said beside the button: the page itself stays as it is.
+  let error = "";
   const say = (msg) => {
+    error = msg;
     button.parentElement?.querySelector(".bench-error")?.remove();
     button.after(h("span", { class: "form-error bench-error" }, msg));
   };
   if (!/^image\/(jpeg|png|webp)$/.test(file.type)) {
     say(`${file.name}: use a JPEG, PNG or WebP photo.`);
-    return null;
+    return { study: null, error };
   }
   const label = button.textContent;
   button.disabled = true;
@@ -93,26 +96,32 @@ async function benchFaceFromPhoto(file, target, button, { open = true } = {}) {
     // Open the study even if describing failed (it says why), so it isn't left unseen.
     if (study && open) openBench("face", study.session_id, target ? target.label : study.title);
   }
-  return study;
+  return { study, error };
 }
 
 // "Create from text" on a face: a study for that face with no photo, where the description
 // is written by hand and drawn from text alone (H3 or a local image server). Clicked again
 // before anything is in it, the same empty study opens (`open` off: it is only returned).
-// Returns the study, or null.
+// Returns { study, error } as benchFaceFromPhoto.
 async function benchFaceFromText(target, button, { open = true } = {}) {
   button.parentElement?.querySelector(".bench-error")?.remove();
   button.disabled = true;
   try {
     const study = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ kind: "face", target, reuse_empty: true }) });
     if (open) openBench("face", study.session_id, target.label);
-    return study;
+    return { study, error: "" };
   } catch (e) {
     button.after(h("span", { class: "form-error bench-error" }, e.message));
-    return null;
+    return { study: null, error: e.message };
   } finally {
     button.disabled = false;
   }
+}
+
+// "Develop in a chat" on a picture: its chat, starting from its pick. Clicked again before
+// anything is written in it, the same untouched chat comes back, not another one.
+function benchStartChat(target) {
+  return api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true }) });
 }
 
 $("#bench-close").addEventListener("click", () => closeBench());
