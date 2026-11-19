@@ -18,18 +18,24 @@ from ..experiment import (
     ExpSession,
     ExpTarget,
     ExpTurn,
+    current_size,
+    global_mentions,
     image_labels,
+    import_turn,
     is_busy,
     known_refs,
     new_session,
     pick_turn,
     plan_turn,
+    size_of,
 )
 from ..face_lab import new_study, plan_describe, plan_test, source_photo
+from ..image_ids import resolve as resolve_image
 from ..models import ProductionPackage
 from ..models.package import utcnow
 from .schemas import (
     ExpSessionCreate,
+    ExpSessionItem,
     ExpSessionPatch,
     ExpSessionView,
     ExpTurnRequest,
@@ -50,17 +56,23 @@ def register(app: FastAPI, ctx: Any) -> None:
 
     def _exp_view(session: ExpSession) -> ExpSessionView:
         turns = _exp_turns(session.session_id)
-        return ExpSessionView(session=session, turns=turns, sizes=EXP_SIZES)
+        # A size saved before chats went to 2K shows as its 2K counterpart.
+        shown = session.model_copy(update={"size": current_size(session.size)})
+        return ExpSessionView(session=shown, turns=turns, sizes=EXP_SIZES)
 
-    @app.get("/v1/experiments", response_model=list[ExpSession])
+    def _messages(session_id: str) -> int:
+        return sum(t.mode not in ("pick", "import") for t in repo.list_exp_turns(session_id))
+
+    @app.get("/v1/experiments", response_model=list[ExpSessionItem])
     async def list_experiments(
         kind: Literal["chat", "face"] | None = None,
         package_id: str | None = None,
         requirement_id: str | None = None,
         deliverable_id: str | None = None,
-    ) -> list[ExpSession]:
-        """Chats and studies, optionally only those for a story or one of its design
-        pictures (docs/workbench.md)."""
+    ) -> list[ExpSessionItem]:
+        """Chats and studies, most recently active first, optionally only those for a story
+        or one of its design pictures (docs/workbench.md). Each says how many messages it
+        has."""
 
         def wanted(s: ExpSession) -> bool:
             t = s.target
@@ -73,7 +85,31 @@ def register(app: FastAPI, ctx: Any) -> None:
                                       strict=True)
             )  # fmt: skip
 
-        return [s for s in repo.list_exp_sessions() if kind in (None, s.kind) and wanted(s)]
+        return [
+            ExpSessionItem(**s.model_dump(), messages=_messages(s.session_id))
+            for s in repo.list_exp_sessions()
+            if kind in (None, s.kind) and wanted(s)
+        ]
+
+    def _untouched(target: ExpTarget, pick_id: str | None) -> ExpSession | None:
+        """The picture's newest chat with no message yet, started from this pick (or, with
+        no pick, from nothing)."""
+        for s in repo.list_exp_sessions():
+            if (
+                s.kind != "chat"
+                or s.target is None
+                or (
+                    (s.target.package_id, s.target.requirement_id, s.target.deliverable_id)
+                    != (target.package_id, target.requirement_id, target.deliverable_id)
+                )
+            ):
+                continue
+            turns = repo.list_exp_turns(s.session_id)
+            if pick_id is None and not turns:
+                return s
+            if pick_id is not None and len(turns) == 1 and turns[0].from_image == pick_id:
+                return s
+        return None
 
     def _target_story(target: ExpTarget, kind: str = "chat") -> ProductionPackage:
         """The story of a design picture a chat is for; 404 when it has no such picture,
@@ -103,6 +139,10 @@ def register(app: FastAPI, ctx: Any) -> None:
                 key = (target.requirement_id, target.deliverable_id)
                 found = selected_image(repo.list_images(pkg.package_id, pkg.revision_id), key)
                 pick = found if found is not None and found.file else None
+            if req.kind == "chat" and req.reuse_empty:
+                same = _untouched(target, pick.image_id if pick is not None else None)
+                if same is not None:
+                    return same
         repo.save_exp_session(session)
         if pick is not None:
             # A design picture is marked as a likeness only when drawn from one; a story
@@ -236,10 +276,14 @@ def register(app: FastAPI, ctx: Any) -> None:
         asset_ids = list(req.attachments)
         if session.current and session.current.startswith("asset:"):
             asset_ids.append(session.current.removeprefix("asset:"))
+        if is_busy(turns):
+            raise HTTPException(409, "Wait for the current image to finish first.")
+        _size_pick_start(session, turns)
+        imports, numbers = await _bring_in(session, turns, req.text)
         try:
             turn = plan_turn(
                 session,
-                turns,
+                [*turns, *imports],
                 repo.get_source_assets(asset_ids),
                 text=req.text,
                 attachments=req.attachments,
@@ -247,21 +291,87 @@ def register(app: FastAPI, ctx: Any) -> None:
                 draws=req.draws,
                 size=req.size,
                 restrictive=req.restrictive,
+                numbers=numbers,
             )
         except ExpError as exc:
+            _drop_files(imports)
             raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
+        for t in imports:
+            repo.save_exp_turn(t)
         if turn.attachments:
             turn.attachment_labels = repo.allocate_exp_labels(session_id, len(turn.attachments))
         repo.save_exp_turn(turn)
         if turn.mode == "upload":
             session.current = f"asset:{turn.attachments[0]}"
-        if session.title == "New chat" and turn.text:
+        # Titled by its first message, as chats are listed by title. A chat for a picture
+        # starts with the picture's name: the panel says what it is for anyway.
+        untitled = ("New chat", session.target.label if session.target else None)
+        if session.title in untitled and turn.text and turn.mode != "pick":
             session.title = turn.text[:60] + ("…" if len(turn.text) > 60 else "")
         session.updated_at = turn.created_at
         repo.save_exp_session(session)
         if turn.status == "pending":
             experiments.start(turn.turn_id)
         return turn
+
+    def _size_pick_start(session: ExpSession, turns: list[ExpTurn]) -> None:
+        """Give a pick start saved without a size its picture's (any picture of the slot
+        has the slot's shape), so an automatic size isn't square for a 3:4 face."""
+        for t in turns:
+            if t.mode != "pick" or t.size:
+                continue
+            img = repo.get_image(t.from_image) if t.from_image else None
+            if img is None and session.target is not None:
+                tg = session.target
+                pkg = repo.get_package(tg.package_id)
+                if pkg is not None:
+                    img = selected_image(
+                        repo.list_images(pkg.package_id, pkg.revision_id),
+                        (tg.requirement_id, tg.deliverable_id),
+                    )
+            if img is not None and (size := size_of(img.size)):
+                t.size = size
+                repo.save_exp_turn(t)
+
+    def _drop_files(imports: list[ExpTurn]) -> None:
+        """Remove the copies unsaved import turns made."""
+        for t in imports:
+            for r in t.results:
+                for rel in (r.file, r.thumb):
+                    if rel:
+                        ctx.media.path(rel).unlink(missing_ok=True)
+
+    async def _bring_in(
+        session: ExpSession, turns: list[ExpTurn], text: str
+    ) -> tuple[list[ExpTurn], dict[int, int]]:
+        """The images a message mentions by global number (@1234) that aren't in the chat
+        yet, as unsaved "import" turns, and each mentioned number's chat number (#5). An
+        image already here (made, uploaded, picked or brought in before) is reused."""
+        labels = {ref: n for n, ref in image_labels(turns).items()}
+        for t in turns:
+            for r in t.results[:1]:
+                if r.label is not None and t.mode == "import" and t.import_ref:
+                    labels.setdefault(t.import_ref, r.label)
+                if r.label is not None and t.mode == "pick" and t.from_image:
+                    labels.setdefault(f"design:{t.from_image}", r.label)
+        imports: list[ExpTurn] = []
+        numbers: dict[int, int] = {}
+        index = max((t.index for t in turns), default=0)
+        for gid in global_mentions(text):
+            ref = repo.image_ref(gid)
+            if ref in labels:
+                numbers[gid] = labels[ref]
+                continue
+            found = resolve_image(repo, ref) if ref is not None else None
+            if found is None:
+                _drop_files(imports)
+                gone = "is no longer available" if ref else "doesn't exist"
+                raise HTTPException(422, f"Image @{gid} {gone}.")
+            index += 1
+            t = await asyncio.to_thread(import_turn, repo, ctx.media, session, found, gid, index)
+            imports.append(t)
+            labels[ref] = numbers[gid] = t.results[0].label  # type: ignore[assignment]
+        return imports, numbers
 
     def _exp_turn_or_404(turn_id: str) -> ExpTurn:
         turn = repo.get_exp_turn(turn_id)

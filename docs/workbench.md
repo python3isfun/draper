@@ -136,6 +136,23 @@ content rules see the same likeness mark the story does.
   since its Use as pick would otherwise replace another kind of picture with a face.
 - The restrictive-mode switch says it applies to image chats.
 
+## Chat history (each chat kept)
+
+- **Every chat is saved**, each with its own turns, and a picture's chats are listed at the
+  top of the panel (**Chats for this picture**): title, message count, last activity,
+  newest first. Click one to continue it; **New chat** starts another from the picture's
+  current pick, and the one you were in stays as it was.
+- **Develop in a chat**, clicked again before anything is written, reopens that untouched
+  chat instead of making another (`reuse_empty` on `POST /v1/experiments`). A chat counts
+  as untouched while it holds only its pick start (`ExpTurn.from_image`, the pick it
+  copies) and that pick is still the picture's pick.
+- **A chat is titled by its first message** (as Scratch chats are), unless it was renamed;
+  until then it carries the picture's name. `GET /v1/experiments` gives each chat's
+  `messages` (the pick start is not one).
+- **Chat images are about 4 MP ("2K")** for quick iteration: 2048x2048, 1728x2304 for
+  3:4 and so on (`experiment.SIZES`). A size saved before (the earlier 16 MP ones) draws at
+  the same aspect ratio's 2K size.
+
 ## Choices
 
 - **A side panel, not a full page** (phase 2): the sheet, the other looks and the out-of-date

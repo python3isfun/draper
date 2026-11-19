@@ -22,6 +22,8 @@ const exp = {
   likeness: {},  // results that show a real person's likeness, by reference
   used: {},  // results made a design picture's pick from this chat, by reference
   notice: "",  // what Use as pick did (shown under the chat's title)
+  // The chats of the picture the open chat is for, newest first: its history row.
+  siblings: { key: null, list: [] },
   // The workbench panel's element when the chat is open over a character or set page
   // (bench.js); null: the Experiment tab, in #main.
   host: null,
@@ -160,9 +162,11 @@ async function loadExpSession() {
     const v = await api(`/v1/experiments/${encodeURIComponent(sid)}`);
     if (exp.sid !== sid || !inExp()) return;  // switched chats or tabs meanwhile
     const titleChanged = exp.view?.session.title !== v.session.title;
+    const turnsChanged = exp.view?.turns.length !== v.turns.length;
     exp.view = v;
     renderExp();
     if (titleChanged) loadExpSessions();
+    if (v.session.target && (titleChanged || turnsChanged)) loadExpSiblings(v.session.target);
   } catch (e) {
     if (exp.sid !== sid || !inExp()) return;
     exp.mounted = null;
@@ -171,6 +175,64 @@ async function loadExpSession() {
   }
   clearTimeout(exp.timer);
   if (expBusy(exp.view)) exp.timer = setTimeout(loadExpSession, EXP_POLL_MS);
+}
+
+// A picture's chats are saved, each one: the history row lists them to switch between, with
+// New chat. The list is the server's (GET /v1/experiments for that picture).
+const targetKey = (t) => `${t.package_id}|${t.requirement_id}|${t.deliverable_id}`;
+
+async function loadExpSiblings(target) {
+  const key = targetKey(target);
+  const q = new URLSearchParams({ kind: "chat", package_id: target.package_id, requirement_id: target.requirement_id, deliverable_id: target.deliverable_id });
+  let list;
+  try {
+    list = await api(`/v1/experiments?${q}`);
+  } catch {
+    return;  // the row keeps what it had
+  }
+  exp.siblings = { key, list };
+  const t = exp.view?.session.target;
+  if (t && targetKey(t) === key && exp.el.header && !exp.renaming) renderExpHeader(exp.view);
+}
+
+// Open another chat in the same place: the panel, or the full page.
+function switchExpChat(s) {
+  if (s.session_id === exp.sid) return;
+  if (exp.host) openBench("chat", s.session_id, (s.target && s.target.label) || s.title);
+  else goExp(s.session_id);
+}
+
+// A new chat for the picture, starting from its current pick (an untouched one is reused).
+async function newChatFor(target, button) {
+  button.disabled = true;
+  try {
+    const s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true }) });
+    if (s.session_id === exp.sid) { button.disabled = false; return; }
+    switchExpChat(s);
+    if (typeof libLoadScratch === "function" && lib.kind) libLoadScratch();  // the page's list of chats
+  } catch (e) {
+    button.disabled = false;
+    exp.error = e.message;
+    renderExp();
+  }
+}
+
+function renderExpHistory(s) {
+  const t = s.target;
+  const list = exp.siblings.key === targetKey(t) ? exp.siblings.list : [];
+  const shown = list.some((x) => x.session_id === s.session_id) ? list : [{ ...s, messages: exp.view.turns.filter((x) => !["pick", "import"].includes(x.mode)).length }, ...list];
+  return h("div", { class: "exp-history", role: "navigation", "aria-label": "Chats for this picture" },
+    h("span", { class: "muted small" }, `Chats for this picture (${shown.length}):`),
+    h("div", { class: "exp-history-list" }, shown.map((x) => {
+      const on = x.session_id === s.session_id;
+      return h("button", {
+        type: "button", class: `exp-history-item${on ? " active" : ""}`, "aria-current": on ? "true" : null,
+        title: `${x.title}, updated ${timeAgo(x.updated_at)}`, onclick: () => switchExpChat(x),
+      },
+        h("span", { class: "exp-history-title" }, x.title),
+        h("span", { class: "muted small" }, `${x.messages ? `${x.messages} message${x.messages === 1 ? "" : "s"}` : "no messages yet"} · ${timeAgo(x.updated_at)}`));
+    })),
+    h("button", { type: "button", class: "btn small", title: "Start another chat from the picture's current pick; this one stays saved", onclick: (e) => newChatFor(t, e.currentTarget) }, "New chat"));
 }
 
 async function patchExp(body) {
@@ -199,11 +261,12 @@ function labelsOf(v) {
   return out;
 }
 
+// n: a chat number (3, written "#3") or a global one ("@1234").
 function insertMention(n) {
   const el = exp.el.text, d = expDraft(exp.sid);
   const at = el.selectionStart ?? el.value.length;
   const before = el.value.slice(0, at), after = el.value.slice(el.selectionEnd ?? at);
-  const token = `${before && !/\s$/.test(before) ? " " : ""}#${n} `;
+  const token = `${before && !/\s$/.test(before) ? " " : ""}${typeof n === "number" ? `#${n}` : n} `;
   el.value = before + token + after;
   d.text = el.value;
   el.focus();
@@ -243,7 +306,7 @@ function mountExp(v) {
   el.transcript = h("div", { class: "exp-transcript" });
   el.text = h("textarea", {
     rows: 3, "aria-label": "Message",
-    placeholder: "Describe the change, e.g. \"gather her hair into a low bun\". Refer to earlier images by number: \"go back to #3 and add a hat\", \"hair like #4\". (Enter to send, Shift+Enter for a new line)",
+    placeholder: "Describe the change, e.g. \"gather her hair into a low bun\". Refer to earlier images by number: \"go back to #3 and add a hat\", \"hair like #4\"; any picture in the app by its @number: \"her jacket from @1234\". (Enter to send, Shift+Enter for a new line)",
     oninput: (e) => { d.text = e.target.value; updateSendButton(); },
     onkeydown: (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -316,9 +379,11 @@ function renderExpHeader(v) {
       ". Use as pick on a result makes it that picture's pick. ",
       h("button", { type: "button", class: "btn ghost small", title: "Move this chat back to Scratch, tied to no picture", onclick: () => unlinkSession(s.session_id, () => loadExpSession()) }, "Unlink")),
     exp.notice && h("p", { class: "small hint" }, exp.notice),
+    target && renderExpHistory(s),
     h("div", { class: "exp-head-row" },
       h("h2", { class: "exp-title", title: "Click to rename", onclick: rename }, s.title),
-      h("span", { class: "muted small" }, `${v.turns.length} message${v.turns.length === 1 ? "" : "s"}`),
+      // The pick it started from is not a message (as in the history row).
+      ((n) => h("span", { class: "muted small" }, n ? `${n} message${n === 1 ? "" : "s"}` : "no messages yet"))(v.turns.filter((t) => !["pick", "import"].includes(t.mode)).length),
       h("div", { class: "exp-head-actions" },
         sizeSelect,
         h("button", { type: "button", class: "btn ghost small", onclick: deleteExp, disabled: expBusy(v) }, "Delete chat"),
@@ -368,7 +433,18 @@ function renderTurn(t) {
     return h("div", { class: "exp-turn" },
       h("div", { class: "exp-msg bot" }, h("div", { class: "bubble" },
         h("p", { class: "muted small" }, t.text, " Your next message changes it."),
-        h("div", { class: "exp-results" }, t.results.map((r, n) => expImage(`turn:${t.turn_id}:${n}`, current, "The current pick"))),
+        h("div", { class: "exp-results" }, t.results.map((r, n) => expImage(`turn:${t.turn_id}:${n}`, current, "The current pick", null, t.from_image ? `design:${t.from_image}` : undefined))),
+        t.prompt && h("details", { class: "exp-prompt" },
+          h("summary", {}, "The prompt that made it"),
+          h("pre", {}, t.prompt),
+          h("button", { type: "button", class: "btn small", onclick: () => usePrompt(t.prompt) }, "Edit this prompt")))));
+  }
+  if (t.mode === "import") {
+    // An image a message brought in by its global number (@1234, docs/image-ids.md).
+    return h("div", { class: "exp-turn" },
+      h("div", { class: "exp-msg bot" }, h("div", { class: "bubble" },
+        h("p", { class: "muted small" }, t.text),
+        h("div", { class: "exp-results" }, t.results.map((r, n) => expImage(`turn:${t.turn_id}:${n}`, current, "Brought in", null, t.import_ref || undefined))),
         t.prompt && h("details", { class: "exp-prompt" },
           h("summary", {}, "The prompt that made it"),
           h("pre", {}, t.prompt),
@@ -420,12 +496,14 @@ function renderTurn(t) {
   return h("div", { class: "exp-turn" }, user, bot);
 }
 
-function expImage(ref, current, label, result) {
+// gref: the picture's global address when it's a copy (a pick start or an image brought
+// in), so it shows the original's @number.
+function expImage(ref, current, label, result, gref = ref) {
   const isCurrent = ref === current;
   const n = exp.labels[ref];
   return h("figure", { class: `exp-image${isCurrent ? " current" : ""}` },
     h("a", { href: refUrl(ref, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
-      h("img", { src: refUrl(ref, "thumb"), alt: n != null ? `#${n} ${label}` : label, loading: "lazy" }), lookalikeTag(exp.likeness[ref])),
+      h("img", { src: refUrl(ref, "thumb"), alt: n != null ? `#${n} ${label}` : label, loading: "lazy" }), lookalikeTag(exp.likeness[ref]), idTag(gref)),
     h("figcaption", {},
       n != null && h("button", {
         type: "button", class: "exp-id", title: `Image #${n}: click to mention it in your message`,

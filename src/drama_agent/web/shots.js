@@ -80,10 +80,10 @@ function renderFrameDraw(take) {
         : !finished
           ? h("div", { class: "draw-waiting-box" },
               h("img", { class: "draw-waiting", src: drawUrl(take, d.n), alt: label, loading: "lazy", title: "Approve once the round is finished" }),
-              lookalikeTag(take.likeness))
+              lookalikeTag(take.likeness), idTag(`take:${take.take_id}:${d.n}`))
           : h("button", { type: "button", class: "draw-pick", title: approved ? "Approved" : "Approve this keyframe",
               onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, { n: d.n }) },
-              h("img", { src: drawUrl(take, d.n), alt: label, loading: "lazy" }), lookalikeTag(take.likeness)),
+              h("img", { src: drawUrl(take, d.n), alt: label, loading: "lazy" }), lookalikeTag(take.likeness), idTag(`take:${take.take_id}:${d.n}`)),
       h("figcaption", {},
         h("div", { class: "keyframe-cap" }, `${label}${approved ? " ✓ approved" : ""}`, checkBadge(d)),
         d.status === "done" && h("a", { href: drawUrl(take, d.n, "content"), target: "_blank", rel: "noopener", class: "muted small" }, "open"),
@@ -290,7 +290,7 @@ function renderRefStrip(sub) {
   return h("div", { class: "ref-strip" }, sub.references.map((r, i) =>
     h("figure", { class: "ref", title: `${r.role} (click to enlarge)` },
       h("button", { type: "button", class: "ref-open", "aria-label": `Enlarge <Picture ${i + 1}>: ${r.role}`, onclick: () => enlarge(items, i) },
-        h("img", { src: refSrc(r), alt: r.role, loading: "lazy" }), lookalikeTag(r.likeness)),
+        h("img", { src: refSrc(r), alt: r.role, loading: "lazy" }), lookalikeTag(r.likeness), idTag(r.ref_id.startsWith("frame:") ? `take:${r.ref_id.slice(6)}` : `design:${r.ref_id}`)),
       h("figcaption", {}, `<Picture ${i + 1}>`))));
 }
 
@@ -404,7 +404,7 @@ function renderChoices(pkg, shot, sub) {
     return h("div", { class: "choice" },
       h("button", { type: "button", class: "ref-open", "aria-label": `Enlarge ${c.name}'s picture`, title: `${c.shows || c.name} (click to enlarge)`,
                     onclick: () => enlarge(items, pool.findIndex((x) => x.image_id === c.image_id)) },
-        h("img", { src: `/v1/generated-images/${encodeURIComponent(c.image_id)}/thumb`, alt: c.name, loading: "lazy" }), lookalikeTag(c.likeness)),
+        h("img", { src: `/v1/generated-images/${encodeURIComponent(c.image_id)}/thumb`, alt: c.name, loading: "lazy" }), lookalikeTag(c.likeness), idTag(`design:${c.image_id}`)),
       h("div", { class: "small" },
         h("div", {}, h("strong", {}, c.name), " ", h("span", { class: "muted" }, stateLine(c.state))),
         c.keep.length > 0 && h("div", { class: "muted" }, `The picture already has: ${c.keep.join(", ")}`),

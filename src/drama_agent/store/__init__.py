@@ -69,6 +69,8 @@ class Repository(Protocol):
     def fail_unfinished_exp_turns(self, error: str) -> int: ...
     def allocate_exp_labels(self, session_id: str, n: int) -> list[int]: ...
     def asset_in_use(self, asset_id: str) -> bool: ...
+    def image_ids(self, refs: list[str]) -> dict[str, int]: ...
+    def image_ref(self, gid: int) -> str | None: ...
     def delete_source_asset(self, asset_id: str) -> None: ...
     def save_shot_take(self, take: ShotTake) -> None: ...
     def get_shot_take(self, take_id: str) -> ShotTake | None: ...
@@ -126,6 +128,7 @@ class InMemoryRepository:
         self.exp_sessions: dict[str, ExpSession] = {}
         self.exp_turns: dict[str, ExpTurn] = {}
         self.exp_next_label: dict[str, int] = {}
+        self.gids: dict[str, int] = {}  # global image numbers (image_ids.py)
         self.shot_takes: dict[str, ShotTake] = {}
         self.shot_plans: dict[tuple[str, str, str], ShotPlan] = {}
         self.prompt_versions: list[PromptVersion] = []
@@ -390,6 +393,14 @@ class InMemoryRepository:
         start = self.exp_next_label.get(session_id, 1)
         self.exp_next_label[session_id] = start + n
         return list(range(start, start + n))
+
+    def image_ids(self, refs: list[str]) -> dict[str, int]:
+        for r in refs:
+            self.gids.setdefault(r, len(self.gids) + 1)
+        return {r: self.gids[r] for r in refs}
+
+    def image_ref(self, gid: int) -> str | None:
+        return next((r for r, g in self.gids.items() if g == gid), None)
 
     def asset_in_use(self, asset_id: str) -> bool:
         """Whether a job, a reference image or a chat message uses this upload."""

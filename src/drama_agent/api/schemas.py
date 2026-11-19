@@ -178,6 +178,9 @@ class ExpSessionCreate(BaseModel):
     # The design picture it is for (docs/workbench.md); a chat starts from its pick.
     target: ExpTarget | None = None
     start_from_pick: bool = True
+    # Open the picture's untouched chat (no message yet, started from its current pick)
+    # instead of starting another one: "Develop in a chat" clicked again.
+    reuse_empty: bool = False
 
 
 class UsePickRequest(BaseModel):
@@ -221,6 +224,13 @@ class ExpTurnRequest(BaseModel):
     # Restrictive mode (top-of-page switch, off by default): no real-person likeness by name
     # or face. The content rules that protect minors and real people apply either way.
     restrictive: bool = False
+
+
+class ExpSessionItem(ExpSession):
+    """A chat or study in a list: with how many messages it has (the pick start is not
+    one), so the history can tell an untouched chat from one in use."""
+
+    messages: int = 0
 
 
 class ExpSessionView(BaseModel):

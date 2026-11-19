@@ -32,6 +32,66 @@ const $ = (sel) => document.querySelector(sel);
 const LOOKALIKE_TIP = "Lookalike: shows a real person's likeness (from a photo of an identifiable person, or made to resemble a real person). Nothing sexualized can be made from it; in Restrictive mode, no romance or swimwear either.";
 const lookalikeTag = (on) => on && h("span", { class: "lookalike-tag", title: LOOKALIKE_TIP }, "Lookalike");
 
+// Every picture's global number ("@1234", docs/image-ids.md), shown at its top right: write
+// it in any chat message to bring that picture in. Put it next to lookalikeTag; `ref` is the
+// picture's address (asset:<id>, turn:<id>:<n>, design:<image_id>, take:<id>:<n>). The
+// numbers are filled in after rendering, a batch at a time.
+// (A span, not a button: it often sits inside the picture's own button or link.) A number
+// already known shows at once, so redrawn views don't flicker.
+const idTag = (ref) => ref && gidLabel(h("span", {
+  role: "button", tabindex: "0", class: "gid-tag", "data-iref": ref, hidden: true,
+  onclick: (e) => { e.preventDefault(); e.stopPropagation(); useGlobalId(e.currentTarget); },
+  onkeydown: (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault(); e.stopPropagation(); useGlobalId(e.currentTarget);
+  },
+}));
+const gids = new Map(); // ref -> number
+let gidTimer = null;
+
+function gidLabel(el) {
+  const n = gids.get(el.dataset.iref);
+  if (n == null) return el;
+  el.dataset.gid = n;
+  el.textContent = `@${n}`;
+  el.title = `Image @${n}: click to copy (or, with a chat open, to mention it). Write @${n} in any chat message to bring this picture in.`;
+  el.hidden = false;
+  return el;
+}
+
+function fillGlobalIds() {
+  gidTimer = null;
+  const tags = [...document.querySelectorAll(".gid-tag[data-iref]:not([data-gid])")];
+  const show = gidLabel;
+  const missing = [...new Set(tags.map((el) => el.dataset.iref).filter((r) => !gids.has(r)))];
+  tags.forEach(show);
+  if (!missing.length) return;
+  api("/v1/image-ids", { method: "POST", body: JSON.stringify({ refs: missing.slice(0, 500) }) })
+    .then((got) => {
+      for (const [r, n] of Object.entries(got)) gids.set(r, n);
+      document.querySelectorAll(".gid-tag[data-iref]:not([data-gid])").forEach(show);
+    })
+    .catch(() => {});
+}
+
+new MutationObserver(() => { if (!gidTimer) gidTimer = setTimeout(fillGlobalIds, 30); })
+  .observe(document.documentElement, { childList: true, subtree: true });
+
+// A chat's message box when one is open (the panel or the full page), else the clipboard.
+function useGlobalId(el) {
+  const token = `@${el.dataset.gid}`;
+  const box = typeof exp !== "undefined" && exp.el?.text;
+  if (box && box.isConnected && typeof insertMention === "function") {
+    insertMention(token);
+    return;
+  }
+  navigator.clipboard?.writeText(token).then(() => {
+    const was = el.textContent;
+    el.textContent = "copied";
+    setTimeout(() => { el.textContent = was; }, 900);
+  }).catch(() => {});
+}
+
 /**
  * Show pictures full size over the page: `items` are {src, caption, title?, likeness?},
  * opened at `start`.
@@ -681,7 +741,7 @@ function renderSource(src, i) {
     return h("div", { class: "source" }, head,
       h("div", { class: "source-media" },
         h("a", { href: assetUrl(asset.asset_id), target: "_blank", rel: "noopener" },
-          h("img", { src: assetUrl(asset.asset_id), alt: asset.filename, class: "source-image", loading: "lazy" })),
+          h("img", { src: assetUrl(asset.asset_id), alt: asset.filename, class: "source-image", loading: "lazy" }), idTag(`asset:${asset.asset_id}`)),
         prompt));
   }
   return h("div", { class: "source" }, head, prompt,
@@ -1124,7 +1184,7 @@ function renderDraw(img) {
     img.status === "done"
       ? h("button", { type: "button", class: "draw-pick", title: selected ? "Selected" : "Select this image",
           onclick: (e) => imageAction(`/v1/generated-images/${encodeURIComponent(img.image_id)}/select`, e.currentTarget) },
-          h("img", { src: thumbUrl(img), alt: label, loading: "lazy" }), lookalikeTag(img.likeness))
+          h("img", { src: thumbUrl(img), alt: label, loading: "lazy" }), lookalikeTag(img.likeness), idTag(`design:${img.image_id}`))
       : h("div", { class: "draw-placeholder", title: img.error || "" }, status,
           img.status === "failed" && h("button", { type: "button", class: "btn ghost small", title: img.error || "Try this draw again (same prompt and seed)",
             onclick: (e) => imageAction(`/v1/generated-images/${encodeURIComponent(img.image_id)}/retry`, e.currentTarget) }, "Retry")),

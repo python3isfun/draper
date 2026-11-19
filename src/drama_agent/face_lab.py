@@ -30,6 +30,7 @@ from .experiment import (
     ExpSession,
     ExpTurn,
     cited_beyond,
+    current_size,
     is_busy,
 )
 from .llm import GenerationRequest
@@ -230,7 +231,7 @@ def plan_test(
     n = len(seeds) if seeds else max(1, min(draws, MAX_DRAWS))
     if n > MAX_DRAWS:
         raise ExpError(f"At most {MAX_DRAWS} seeds per test.")
-    size = size or session.size or DEFAULT_SIZE
+    size = current_size(size or session.size or DEFAULT_SIZE)
     if size not in SIZES.values():
         raise ExpError(f"unsupported size {size}")
     return _next(

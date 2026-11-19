@@ -184,7 +184,7 @@ function libPictures(pictures, title) {
   return h("div", { class: "lib-pics" }, pictures.map((p, i) =>
     h("figure", { class: "lib-pic" },
       h("button", { type: "button", class: "ref-open", "aria-label": `Enlarge ${title}, ${p.view}`, onclick: () => enlarge(items, i) },
-        h("img", { src: p.thumb, alt: `${title}, ${p.view}`, loading: "lazy" }), lookalikeTag(p.likeness)),
+        h("img", { src: p.thumb, alt: `${title}, ${p.view}`, loading: "lazy" }), lookalikeTag(p.likeness), idTag(`design:${p.image_id}`)),
       h("figcaption", { class: "small" }, p.view,
         p.outdated.length > 0 && h("span", { class: "chip warn", title: p.outdated.join("; ") }, "out of date")))));
 }
@@ -507,7 +507,8 @@ function libWorkbench(part, slot, sayView) {
   const develop = async (button) => {
     button.disabled = true;
     try {
-      const s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target }) });
+      // Clicked again before writing anything: the untouched chat opens, not another one.
+      const s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true }) });
       button.disabled = false;
       openBench("chat", s.session_id, label);
     } catch (e) {
@@ -527,7 +528,8 @@ function libWorkbench(part, slot, sayView) {
       // Opens in the panel; a middle click still opens the full page.
       onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench(s.kind === "face" ? "face" : "chat", s.session_id, s.title); },
     }, s.kind === "face" ? `${s.title} (photo)` : s.title)),
-    mine.length > 6 && h("span", { class: "muted" }, `and ${mine.length - 6} more`));
+    mine.length > 6 && h("a", { href: "#", class: "muted", title: "Every chat is listed at the top of the panel",
+      onclick: (e) => { e.preventDefault(); openBench("chat", mine.find((s) => s.kind !== "face")?.session_id || mine[0].session_id, label); } }, `and ${mine.length - 6} more`));
 }
 
 // Draws per new take, and draft or full size (shared with the Casting tab's controls).

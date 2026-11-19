@@ -51,6 +51,7 @@ from ..store import InMemoryRepository, Repository
 from ..worker import JobWorker, recover
 from . import designs as designs_routes
 from . import experiments as experiments_routes
+from . import image_ids as image_ids_routes
 from . import jobs as jobs_routes
 from . import library as library_api
 from . import packages as packages_routes
@@ -235,6 +236,8 @@ def create_app(
     designs_routes.register(app, ctx)
 
     experiments_routes.register(app, ctx)
+
+    image_ids_routes.register(app, ctx)
 
     jobs_routes.register(app, ctx)
 

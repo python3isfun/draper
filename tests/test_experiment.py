@@ -95,7 +95,7 @@ def test_upload_then_chat_edits_the_current_image(tmp_path):
         turn = v["turns"][-1]
         assert turn["status"] == "done", turn["error"]
         assert turn["references"] == [f"asset:{asset}"]
-        assert turn["size"] == "3552x4736"  # "auto": the 3:4 upload's aspect ratio
+        assert turn["size"] == "1728x2304"  # "auto": the 3:4 upload's aspect ratio, at 2K
         assert "<Picture 1> is <Subject 1>" in turn["prompt"]  # rewritten, not as typed
         assert turn["reply"] and turn["prompt_model"] == "fixture-v1"
         prompt, _, _, refs = c.images.calls[-1]
@@ -132,9 +132,10 @@ def test_exact_prompt_is_sent_as_written_and_checked(tmp_path):
 
 def test_new_image_without_a_current_one(tmp_path):
     with Chat(tmp_path) as c:
+        # An earlier 16 MP size (a client's saved choice) draws at the same aspect's 2K size.
         c.send(text="a red bicycle against a white wall", size="4736x3552")
         turn = c.wait()["turns"][-1]
-        assert turn["references"] == [] and turn["size"] == "4736x3552"
+        assert turn["references"] == [] and turn["size"] == "2304x1728"
         assert c.images.calls[-1][3] == []
         assert c.text.calls[-1].context["pictures"] == []
 
@@ -462,3 +463,17 @@ def test_sending_numbers_old_images_first(tmp_path):
         # No GET in between (an API client): sending numbers the old image first.
         r = c.send(text="like #2 but blue")
         assert r.status_code == 202, r.text
+
+
+def test_auto_size_from_an_old_16mp_turn_draws_at_2k() -> None:
+    """Editing an image a chat made at 16 MP draws the follow-up at the same aspect's 2K size."""
+    from drama_agent.experiment import SIZES, _size_for
+
+    s = new_session("t")
+    old = ExpTurn(
+        turn_id="turn_old", session_id=s.session_id, index=1, text="a", status="done",
+        size="4096x4096",
+    )  # fmt: skip
+    assert _size_for("auto", ["turn:turn_old:0"], [old], {}) == SIZES["1:1"]
+    old.size = "3552x4736"
+    assert _size_for("auto", ["turn:turn_old:0"], [old], {}) == SIZES["3:4"]

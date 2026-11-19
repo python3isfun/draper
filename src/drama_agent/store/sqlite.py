@@ -173,6 +173,10 @@ CREATE TABLE IF NOT EXISTS asset_images (
     data        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS asset_images_asset ON asset_images (asset_id);
+CREATE TABLE IF NOT EXISTS image_ids (
+    gid         INTEGER PRIMARY KEY AUTOINCREMENT,  -- the image's global number (@1234)
+    ref         TEXT NOT NULL UNIQUE                -- what it is (image_ids.py)
+);
 CREATE TABLE IF NOT EXISTS shot_plans (
     package_id  TEXT NOT NULL,
     revision_id TEXT NOT NULL,
@@ -739,6 +743,30 @@ class SqliteRepository:
             raise KeyError(session_id)
         end = row[0]
         return list(range(end - n, end))
+
+    # Global image numbers (image_ids.py) ---------------------------------------
+
+    def image_ids(self, refs: list[str]) -> dict[str, int]:
+        """Each picture's global number, handing out the next ones to those without."""
+        if not refs:
+            return {}
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO image_ids (ref) VALUES (?)", [(r,) for r in refs]
+            )
+            out: dict[str, int] = {}
+            for i in range(0, len(refs), 500):
+                chunk = refs[i : i + 500]
+                marks = ",".join("?" * len(chunk))
+                out.update(
+                    self._conn.execute(
+                        f"SELECT ref, gid FROM image_ids WHERE ref IN ({marks})", chunk
+                    ).fetchall()
+                )
+        return out
+
+    def image_ref(self, gid: int) -> str | None:
+        return self._one("SELECT ref FROM image_ids WHERE gid = ?", (gid,))
 
     # Shot keyframes ------------------------------------------------------------
 

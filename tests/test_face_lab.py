@@ -40,7 +40,7 @@ def test_a_photo_becomes_a_prompt_and_nothing_is_drawn(tmp_path):
         assert [m.label for m in req.media] == ["<Photo>"]
         assert "Open mode" in req.instructions
         assert v["session"]["kind"] == "face" and v["session"]["title"] == "base"
-        assert v["session"]["size"] == "3552x4736"
+        assert v["session"]["size"] == "1728x2304"
         kinds = {s["session_id"]: s["kind"] for s in c.http.get("/v1/experiments").json()}
         assert kinds[c.sid] == "face"
         assert [s["kind"] for s in c.http.get("/v1/experiments?kind=face").json()] == ["face"]
@@ -73,11 +73,11 @@ def test_prompt_tests_use_the_given_seeds(tmp_path):
         assert [res["seed"] for res in turn["results"]] == [11, 22]
         assert [call[2] for call in c.images.calls] == [11, 22]
         assert all(call[3] == [] for call in c.images.calls)  # text alone, no pictures
-        assert turn["size"] == "3552x4736" and turn["references"] == []
+        assert turn["size"] == "1728x2304" and turn["references"] == []
         # Without seeds: random ones, as many as asked.
         c.test(prompt=prompt, draws=3, size="4096x4096")
         turn = c.wait()["turns"][-1]
-        assert len(turn["results"]) == 3 and turn["size"] == "4096x4096"
+        assert len(turn["results"]) == 3 and turn["size"] == "2048x2048"  # the 2K 1:1
         # A test leaves the study as it was (no "current image").
         assert c.view()["session"]["current"] is None
 

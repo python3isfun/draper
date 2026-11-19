@@ -482,13 +482,13 @@ function renderTests(v) {
         ),
         h("div", { class: "face-results" },
           photo && h("figure", { class: "exp-image face-original" },
-            h("img", { src: refUrl(photo), alt: "The photo" }), lookalikeTag(photoLikeness(v)),
+            h("img", { src: refUrl(photo), alt: "The photo" }), lookalikeTag(photoLikeness(v)), idTag(photo),
             h("figcaption", {}, h("span", { class: "muted small" }, "photo"))),
           t.results.map((r, n) => {
             const ref = `turn:${t.turn_id}:${n}`;
             return h("figure", { class: "exp-image" },
               h("a", { href: refUrl(ref, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
-                h("img", { src: refUrl(ref), alt: `Seed ${r.seed}`, loading: "lazy" }), lookalikeTag(t.likeness)),
+                h("img", { src: refUrl(ref), alt: `Seed ${r.seed}`, loading: "lazy" }), lookalikeTag(t.likeness), idTag(ref)),
               h("figcaption", {},
                 r.label != null && h("span", { class: "exp-id" }, `#${r.label}`),
                 h("span", { class: "muted small" }, `seed ${r.seed}`),

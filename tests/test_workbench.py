@@ -74,6 +74,11 @@ def test_a_chat_for_a_design_picture_starts_from_its_pick(tmp_path):
         http.post(f"/v1/experiments/{s['session_id']}/turns", json={"text": "grey beard"})
         v = _wait_turn(http, s["session_id"])
         assert v["turns"][-1]["references"][0] == f"turn:{first['turn_id']}:0"
+        # Drawn at the pick's shape (a 3:4 face), not square.
+        from drama_agent.experiment import size_of
+
+        assert first["size"] == size_of(pick["size"]) != "2048x2048"
+        assert v["turns"][-1]["size"] == first["size"]
 
 
 def test_a_slots_chats_are_listed_and_unknown_slots_refused(tmp_path):
@@ -180,3 +185,69 @@ def test_a_face_study_is_only_for_a_face(tmp_path):
         assert (
             http.patch(f"/v1/experiments/{sid}", json={"target": _target(job)}).status_code == 200
         )
+
+
+def test_each_chat_for_a_picture_is_kept_and_an_untouched_one_reused(tmp_path):
+    """Develop clicked again reopens the untouched chat; New chat after a message starts
+    another, and both stay listed with their message counts and their own titles."""
+    with TestClient(_app(tmp_path)) as http:
+        job = _story(http)
+        body = {"target": _target(job), "reuse_empty": True}
+        first = http.post("/v1/experiments", json=body).json()
+        assert http.post("/v1/experiments", json=body).json()["session_id"] == first["session_id"]
+        # Without reuse_empty a new chat is always made.
+        other = http.post("/v1/experiments", json={"target": _target(job)}).json()
+        assert other["session_id"] != first["session_id"]
+        # Once it has a message it is no longer untouched; it's titled by that message.
+        sid = first["session_id"]
+        http.post(f"/v1/experiments/{sid}/turns", json={"text": "grey beard"})
+        _wait_turn(http, sid)
+        again = http.post("/v1/experiments", json=body).json()
+        assert again["session_id"] != sid
+        q = {"package_id": job["package_id"], "requirement_id": FRANK_FACE[0],
+             "deliverable_id": FRANK_FACE[1], "kind": "chat"}  # fmt: skip
+        listed = {s["session_id"]: s for s in http.get("/v1/experiments", params=q).json()}
+        assert listed[sid]["messages"] == 1 and listed[sid]["title"] == "grey beard"
+        assert listed[other["session_id"]]["messages"] == 0
+        assert listed[other["session_id"]]["title"] == "Frank Collins, face"
+        # A renamed chat keeps its name past the first message.
+        http.patch(f"/v1/experiments/{again['session_id']}", json={"title": "Beard ideas"})
+        http.post(f"/v1/experiments/{again['session_id']}/turns", json={"text": "a short beard"})
+        _wait_turn(http, again["session_id"])
+        s = http.get(f"/v1/experiments/{again['session_id']}").json()["session"]
+        assert s["title"] == "Beard ideas"
+
+
+def test_a_new_pick_means_a_new_chat(tmp_path):
+    """An untouched chat started from an earlier pick is not reused: it starts from the
+    picture as it was."""
+    app = _app(tmp_path)
+    with TestClient(app) as http:
+        job = _story(http)
+        body = {"target": _target(job), "reuse_empty": True}
+        first = http.post("/v1/experiments", json=body).json()
+        repo = app.state.repo
+        [turn] = repo.list_exp_turns(first["session_id"])
+        turn.from_image = "img_an_earlier_pick"
+        repo.save_exp_turn(turn)
+        assert http.post("/v1/experiments", json=body).json()["session_id"] != first["session_id"]
+
+
+def test_a_pick_start_saved_without_a_size_gets_its_pictures(tmp_path):
+    """Chats started before pick starts had a size drew square: their next message takes
+    the picture's shape."""
+    from drama_agent.experiment import size_of
+
+    app = _app(tmp_path)
+    with TestClient(app) as http:
+        job = _story(http)
+        repo = app.state.repo
+        pkg = repo.get_package(job["package_id"])
+        pick = selected_image(repo.list_images(pkg.package_id, pkg.revision_id), FRANK_FACE)
+        sid = http.post("/v1/experiments", json={"target": _target(job)}).json()["session_id"]
+        [first] = repo.list_exp_turns(sid)
+        first.size, first.from_image = "", None  # as saved before either existed
+        repo.save_exp_turn(first)
+        http.post(f"/v1/experiments/{sid}/turns", json={"text": "grey beard"})
+        v = _wait_turn(http, sid)
+        assert v["turns"][0]["size"] == v["turns"][-1]["size"] == size_of(pick.size)

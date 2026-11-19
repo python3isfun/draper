@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 from .content_guard import RULES as CONTENT_RULES
 from .content_guard import GuardRefused, mode_rule, screen, text_guard
+from .image_ids import MENTION as GLOBAL_MENTION
 from .imagegen import MAX_REFERENCE_BYTES, MAX_REFERENCES, ImageClient, Reference
 from .llm import GenerationRequest
 from .media import MediaPart, MediaStore
@@ -50,22 +51,35 @@ MAX_PROMPT_CHARS = 6000  # H3 reads at most ~4,096 tokens
 MAX_DRAWS = 4
 HISTORY_TURNS = 8  # earlier messages shown to the prompt writer
 
-# H3 sizes at about 16 MP (both sides multiples of 32), by aspect ratio.
+# H3 sizes at about 4 MP ("2K", both sides multiples of 32), by aspect ratio: a chat is for
+# quick iteration, and a design pick is drawn at about this size too (design/prompts.py).
 SIZES: dict[str, str] = {
-    "1:1": "4096x4096",
-    "3:4": "3552x4736",
-    "4:3": "4736x3552",
-    "2:3": "3360x5024",
-    "3:2": "5024x3360",
-    "9:16": "3072x5472",
-    "16:9": "5472x3072",
-    "21:9": "6272x2688",
+    "1:1": "2048x2048",
+    "3:4": "1728x2304",
+    "4:3": "2304x1728",
+    "2:3": "1664x2496",
+    "3:2": "2496x1664",
+    "9:16": "1536x2720",
+    "16:9": "2720x1536",
+    "21:9": "3136x1344",
 }
 DEFAULT_SIZE = SIZES["1:1"]
+# The earlier 16 MP sizes, which chats and studies made before may have saved.
+_OLD_SIZES: dict[str, str] = {
+    "4096x4096": "1:1", "3552x4736": "3:4", "4736x3552": "4:3", "3360x5024": "2:3",
+    "5024x3360": "3:2", "3072x5472": "9:16", "5472x3072": "16:9", "6272x2688": "21:9",
+}  # fmt: skip
+
+
+def current_size(size: str) -> str:
+    """A saved size as it is now: an earlier 16 MP size becomes the same aspect's 2K one."""
+    return SIZES[_OLD_SIZES[size]] if size in _OLD_SIZES else size
+
 
 TurnStatus = Literal["pending", "running", "done", "failed"]
 # describe: Face Lab's photo-to-prompt step (draws nothing).
-TurnMode = Literal["rewrite", "exact", "upload", "describe", "pick"]
+# import: an image brought in from elsewhere by its global number ("@1234", image_ids.py).
+TurnMode = Literal["rewrite", "exact", "upload", "describe", "pick", "import"]
 PictureVariant = Literal["full", "model", "thumb"]
 
 
@@ -108,6 +122,10 @@ class ExpTurn(BaseModel):
     likeness: bool | None = None
     # Restrictive mode (top-of-page switch) when the message was sent.
     restrictive: bool = False
+    from_image: str | None = None  # "pick": the design image it copies (its image_id)
+    import_ref: str | None = None  # "import": the picture it copies (an image_ids ref)
+    # Global numbers the message mentions ("@1234") and the chat number each came in as.
+    global_mentions: dict[str, int] = Field(default_factory=dict)
     results: list[ExpResult] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
@@ -160,6 +178,8 @@ def pick_turn(
         index=1,
         text=f"Started from the current pick of {label}." if label else "Started from the pick.",
         mode="pick",
+        from_image=pick.image_id,
+        size=size_of(pick.size),
         prompt=pick.prompt,
         likeness=likeness,
         status="done",
@@ -181,6 +201,42 @@ def pick_turn(
     session.current = f"turn:{turn.turn_id}:0"
     session.updated_at = utcnow()
     repo.save_exp_session(session)
+    return turn
+
+
+def import_turn(
+    repo: Any, media: MediaStore, session: ExpSession, found: Any, gid: int, index: int
+) -> ExpTurn:
+    """An image brought into a chat by its global number (an image_ids.Found): a turn that
+    draws nothing, whose one result is a copy with the prompt and likeness it was made
+    with. Unlike a pick start it doesn't become the current image. Not saved; copies files
+    (blocking)."""
+    turn = ExpTurn(
+        turn_id=f"turn_{uuid.uuid4().hex[:12]}",
+        session_id=session.session_id,
+        index=index,
+        text=f"Brought in @{gid}: {found.what}.",
+        mode="import",
+        size=size_of(found.size),
+        import_ref=found.ref,
+        prompt=found.prompt or "",
+        likeness=found.likeness,
+        from_upload=found.from_upload,
+        status="done",
+        finished_at=utcnow(),
+    )
+    base = f"experiments/{session.session_id}/{turn.turn_id}_0"
+    rel = base + (Path(found.file).suffix or ".jpg")
+    dest = media.path(rel)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(media.path(found.file), dest)
+    thumb = None
+    if found.thumb and media.path(found.thumb).is_file():
+        thumb = base + "_thumb.jpg"
+        shutil.copyfile(media.path(found.thumb), media.path(thumb))
+    [n] = repo.allocate_exp_labels(session.session_id, 1)
+    turn.results = [ExpResult(label=n, file=rel, thumb=thumb, content_type=found.content_type,
+                              seed=0)]  # fmt: skip
     return turn
 
 
@@ -217,16 +273,16 @@ _MENTION = re.compile(r"(?<![\w#])#(\d{1,4})(?![\w])")
 _QUOTED = re.compile(r"\"[^\"]*\"|“[^”]*”")
 
 
-def sub_mentions(text: str, repl: Any) -> str:
-    """Replace image mentions (#3) outside quotes with repl(number) (a str, or None to
-    leave the mention as it is)."""
+def sub_mentions(text: str, repl: Any, pattern: re.Pattern[str] = _MENTION) -> str:
+    """Replace image mentions (#3; with image_ids.MENTION, global ones: @1234) outside
+    quotes with repl(number) (a str, or None to leave the mention as it is)."""
 
     def one(m: re.Match[str]) -> str:
         r = repl(int(m[1]))
         return r if r is not None else m[0]
 
     def outside(chunk: str) -> str:
-        return _MENTION.sub(one, chunk)
+        return pattern.sub(one, chunk)
 
     out, at = [], 0
     for q in _QUOTED.finditer(text):
@@ -234,6 +290,21 @@ def sub_mentions(text: str, repl: Any) -> str:
         at = q.end()
     out.append(outside(text[at:]))
     return "".join(out)
+
+
+def global_mentions(text: str) -> list[int]:
+    """Global image numbers a message mentions (@1234), in order of first mention."""
+    seen: list[int] = []
+    sub_mentions(text, lambda n: seen.append(n) if n not in seen else None, GLOBAL_MENTION)
+    return seen
+
+
+def chat_text(text: str, numbers: dict[str, int]) -> str:
+    """A message with each global number it mentions (@1234) as the chat number that image
+    came in as (#5): how everything past the API reads it."""
+    return sub_mentions(
+        text, lambda g: f"#{numbers[str(g)]}" if str(g) in numbers else None, GLOBAL_MENTION
+    )
 
 
 def image_labels(turns: list[ExpTurn]) -> dict[int, str]:
@@ -295,6 +366,13 @@ def apply_labels(turns: list[ExpTurn], labels: list[int]) -> list[ExpTurn]:
     return changed
 
 
+def size_of(dims: str | None) -> str:
+    """The chat size nearest a picture's "WIDTHxHEIGHT" ("" when unknown): what an
+    automatic size takes from a copied-in picture (a pick start, an image brought in)."""
+    w, _, h = (dims or "").partition("x")
+    return nearest_size(int(w), int(h)) if w.isdigit() and h.isdigit() else ""
+
+
 def nearest_size(width: int | None, height: int | None) -> str:
     if not width or not height:
         return DEFAULT_SIZE
@@ -318,9 +396,15 @@ def plan_turn(
     draws: int,
     size: str | None,
     restrictive: bool = False,
+    numbers: dict[int, int] | None = None,
 ) -> ExpTurn:
-    """The next turn of a session (not saved). Raises ExpError."""
+    """The next turn of a session (not saved). `numbers`: the chat number (#5) of each
+    global number the message mentions (@1234), from images brought in before it.
+    Raises ExpError."""
     text = text.strip()
+    by_gid = {str(g): n for g, n in (numbers or {}).items()}
+    if unknown := [g for g in global_mentions(text) if str(g) not in by_gid]:
+        raise ExpError(f"There's no image {', '.join(f'@{g}' for g in unknown)}.")
     if is_busy(turns):
         raise ExpError("Wait for the current image to finish first.")
     if not text and not attachments:
@@ -340,7 +424,9 @@ def plan_turn(
         attachments=attachments,
         draws=max(1, min(draws, MAX_DRAWS)),
         restrictive=restrictive,
+        global_mentions={g: by_gid[g] for g in map(str, global_mentions(text))},
     )
+    local = chat_text(text, turn.global_mentions)
     if not text:
         turn.mode, turn.status, turn.finished_at = "upload", "done", utcnow()
         turn.references = [f"asset:{a}" for a in attachments]
@@ -349,11 +435,11 @@ def plan_turn(
     # message's attachments. (In "rewrite" mode the writer may reorder or drop them, e.g.
     # "go back to #3" makes #3 the base.)
     labels = image_labels(turns)
-    if unknown := [n for n in mentions(text) if n not in labels]:
+    if unknown := [n for n in mentions(local) if n not in labels]:
         raise ExpError(f"There's no image {', '.join(f'#{n}' for n in unknown)} in this chat.")
     refs = [session.current] if session.current else []
-    refs += [labels[n] for n in mentions(text) if labels[n] not in refs]
-    refs += [f"asset:{a}" for a in attachments]
+    refs += [labels[n] for n in mentions(local) if labels[n] not in refs]
+    refs += [f"asset:{a}" for a in attachments if f"asset:{a}" not in refs]
     if len(refs) > MAX_REFERENCES:
         raise ExpError(
             f"At most {MAX_REFERENCES} pictures per message, the current image included."
@@ -362,7 +448,7 @@ def plan_turn(
     turn.from_upload = any(_from_upload(r, turns) for r in refs)
     if mode == "exact":
         # "#3" in an exact prompt becomes the picture it is sent as.
-        prompt = sub_mentions(text, lambda n: f"<Picture {refs.index(labels[n]) + 1}>")
+        prompt = sub_mentions(local, lambda n: f"<Picture {refs.index(labels[n]) + 1}>")
         if len(prompt) > MAX_PROMPT_CHARS:
             raise ExpError(f"The prompt is longer than {MAX_PROMPT_CHARS} characters.")
         turn.prompt = prompt
@@ -392,6 +478,10 @@ def _from_upload(ref: str, turns: list[ExpTurn]) -> bool:
         made = by_id.get(ident)
         if made is None:
             return True
+        if made.mode == "import":  # its lineage lies outside this chat
+            if made.from_upload:
+                return True
+            continue
         todo.extend(made.references)
         todo.extend(made.offered)
     return False
@@ -420,6 +510,16 @@ def picture_kind(ref: str, turns: list[ExpTurn]) -> str:
         return (
             "the story's design picture, from a story with uploaded photos: judge from the "
             "picture and the prompt that made it whether it shows a real person's likeness"
+        )
+    if made is not None and made.mode == "import":
+        match made.likeness:
+            case True:
+                return "brought in from elsewhere in the app; shows a real person's likeness"
+            case False:
+                return "brought in from elsewhere in the app; no real person's likeness"
+        return (
+            "brought in from elsewhere in the app (or an upload): judge from the picture and "
+            "the prompt that made it whether it shows a real person's likeness"
         )
     match likeness_of(ref, turns):
         case True:
@@ -473,6 +573,7 @@ def _size_for(
     size: str, refs: list[str], turns: list[ExpTurn], assets: dict[str, dict[str, Any]]
 ) -> str:
     if size != "auto":
+        size = current_size(size)
         if size not in SIZES.values():
             raise ExpError(f"unsupported size {size}")
         return size
@@ -481,7 +582,7 @@ def _size_for(
     kind, ident, _ = parse_ref(refs[0])
     if kind == "turn":
         made = next((t for t in turns if t.turn_id == ident), None)
-        return made.size if made and made.size else DEFAULT_SIZE
+        return current_size(made.size) if made and made.size else DEFAULT_SIZE
     raw = assets.get(ident) or {}
     return nearest_size(raw.get("width"), raw.get("height"))
 
@@ -681,7 +782,9 @@ class ExperimentRunner:
             for n in range(len(turn.results), turn.draws):
                 seed = turn.seeds[n] if n < len(turn.seeds) else random.randint(1, 2**31 - 1)
                 async with self._gpu:
-                    result = await self.images.generate(turn.prompt, turn.size, seed, refs)
+                    result = await self.images.generate(
+                        turn.prompt, current_size(turn.size), seed, refs
+                    )
                 ext = "png" if result.content_type == "image/png" else "jpg"
                 rel = f"experiments/{turn.session_id}/{turn.turn_id}_{n}.{ext}"
                 await asyncio.to_thread(self._write, rel, result.data)
@@ -784,7 +887,9 @@ class ExperimentRunner:
         current_prompt = None
         for i, ref in enumerate(turn.references, 1):
             kind, ident, _ = parse_ref(ref)
-            if kind == "turn":
+            if kind == "turn" and ident in made and made[ident].mode == "import":
+                what = made[ident].text.removesuffix(".")
+            elif kind == "turn":
                 what = (
                     f"an image made in this chat (message {made[ident].index})"
                     if ident in made
@@ -890,7 +995,7 @@ class ExperimentRunner:
             raise GuardRefused(reason)
         parts, media, current_prompt, turns = self._for_model(turn)
         history = [
-            {"message": t.text, "prompt": t.prompt}
+            {"message": chat_text(t.text, t.global_mentions), "prompt": t.prompt}
             for t in turns
             if t.mode != "upload" and t.status == "done"
         ][-HISTORY_TURNS:]
@@ -898,7 +1003,7 @@ class ExperimentRunner:
             stage=STAGE,  # type: ignore[arg-type]
             instructions=writer_instructions(turn.restrictive),
             context={
-                "message": turn.text,
+                "message": chat_text(turn.text, turn.global_mentions),
                 "pictures": parts,
                 "current_image_prompt": current_prompt,
                 "history": history,
@@ -978,7 +1083,7 @@ class ExperimentRunner:
                     return f"<Picture {i}>"
             return None
 
-        text = sub_mentions(turn.text, picture)
+        text = sub_mentions(chat_text(turn.text, turn.global_mentions), picture)
         if missing := cited_beyond(text, len(turn.references)):
             raise ExpError(
                 f"Couldn't rewrite your message ({exc}), and as written it cites "
