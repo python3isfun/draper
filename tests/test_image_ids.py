@@ -135,3 +135,71 @@ def test_a_brought_in_picture_keeps_its_shape_and_unknown_likeness(tmp_path) -> 
         imp, msg = v["turns"]
         assert imp["likeness"] is None and imp["size"] == "1728x2304"
         assert msg["size"] == "1728x2304"
+
+
+def _design(c, image_id: str, likeness: bool) -> int:
+    from drama_agent.models.images import GeneratedImage
+
+    repo, media = c.app.state.repo, c.app.state.media
+    media.path(f"images/{image_id}.png").parent.mkdir(parents=True, exist_ok=True)
+    media.path(f"images/{image_id}.png").write_bytes(PORTRAIT)
+    repo.save_image(GeneratedImage(
+        image_id=image_id, package_id="pkg_none", revision_id="rev_none",
+        requirement_id="r", deliverable_id="d", prompt="a face", size="3552x4736",
+        seed=1, status="done", file=f"images/{image_id}.png", content_type="image/png",
+        likeness=likeness,
+    ))  # fmt: skip
+    ref = f"design:{image_id}"
+    return c.http.post("/v1/image-ids", json={"refs": [ref]}).json()[ref]
+
+
+def test_a_face_study_describes_a_picture_by_number(tmp_path) -> None:
+    from tests.test_face_lab import Study
+
+    with Study(tmp_path) as c:
+        gid = _design(c, "img_f", likeness=True)
+        r = c.describe(image=gid)
+        assert r.status_code == 202, r.text
+        v = c.wait()
+        [turn] = v["turns"]
+        assert turn["mode"] == "describe" and turn["status"] == "done"
+        assert turn["likeness"] is True  # kept from the picture, whatever the model says
+        assert v["session"]["title"].startswith(f"@{gid}: a design picture")
+        [asset] = turn["attachments"]
+        raw = c.app.state.repo.get_source_asset(asset)
+        assert raw["from_image"] == "design:img_f" and raw["from_likeness"] is True
+        # The copy shows the picture's number.
+        got = c.http.post("/v1/image-ids", json={"refs": [f"asset:{asset}"]}).json()
+        assert got == {f"asset:{asset}": gid}
+        # Described again by number (or again as the study's photo): the same copy, and
+        # the likeness holds.
+        c.describe(image=gid)
+        c.wait()
+        c.describe(hint="the eyes")
+        v = c.wait()
+        assert {a for t in v["turns"] for a in t["attachments"]} == {asset}
+        assert all(t["likeness"] is True for t in v["turns"])
+
+
+def test_a_face_study_refuses_unknown_numbers_and_numbers_in_tests(tmp_path) -> None:
+    from tests.test_face_lab import Study
+
+    with Study(tmp_path) as c:
+        r = c.describe(image=999)
+        assert r.status_code == 422 and "@999" in r.json()["detail"]
+        r = c.describe(image=1, asset_id=c.upload())
+        assert r.status_code == 422
+        r = c.test(prompt="a woman like @3")
+        assert r.status_code == 422 and "describe it" in r.json()["detail"]
+        assert c.view()["turns"] == []
+
+
+def test_a_face_study_uses_an_upload_by_number_as_it_is(tmp_path) -> None:
+    from tests.test_face_lab import Study
+
+    with Study(tmp_path) as c:
+        asset = c.upload()
+        gid = c.http.post("/v1/image-ids", json={"refs": [f"asset:{asset}"]}).json()
+        c.describe(image=gid[f"asset:{asset}"])
+        v = c.wait()
+        assert v["turns"][0]["attachments"] == [asset]

@@ -41,6 +41,10 @@ class SourceAsset(BaseModel):
     height: int | None = None
     # Image: a downscaled JPEG sent to the model (falls back to the original).
     model_image: str | None = None
+    # A copy of a picture made here, for a face study to describe it (image_ids.py ref),
+    # and whether that picture shows a real person's likeness (kept by every description).
+    from_image: str | None = None
+    from_likeness: bool = False
     # Video only.
     duration_ms: int | None = None
     has_audio: bool = False

@@ -10,13 +10,15 @@ like @88, but at night
 ```
 
 `#3` still means image 3 of the chat you're in; `@1234` means the same picture everywhere.
+In a face study, a number picks the photo to describe (below).
 
 ## What you see
 
 - **The tag** (`@1234`) sits at the top right of each picture: chat and face-study images,
   design draws, library pictures, keyframe draws, a sub-shot's reference pictures, cast
   choices and uploaded sources. Click it to put it in the open chat's message box (the
-  workbench panel or the full chat page); with no chat open it's copied to the clipboard.
+  workbench panel or the full chat page), or, with a face study open, in its "Describe a
+  picture by number" box; otherwise it's copied to the clipboard.
 - **Bringing a picture in.** The first time a message mentions `@1234` and that picture is
   not in the chat, the chat gets a "Brought in @1234: ..." step before the message: a copy of
   the picture with its own chat number (`#5`), the prompt that made it, and its likeness.
@@ -49,5 +51,12 @@ like @88, but at night
   size, so an automatic size drawn from it keeps a 3:4 face 3:4. Pick starts saved without
   one get it from their slot's picture on the chat's next message. A WebP or HEIC upload
   comes in as its JPEG copy, since chat images go to the image model as they are.
-- Only image chats take `@n` for now; face studies, design redraw notes and keyframe
-  directions don't.
+- **Face studies** describe a photo, so there a number picks the photo: **Describe a
+  picture by number** in the study's photo card (or `POST /v1/experiments/{id}/describe`
+  with `image`). An upload is used as it is; any other picture becomes an upload-style copy
+  (`SourceAsset.from_image`, reused when the study describes it again) that shows the
+  picture's number. A picture marked as a likeness keeps it: `from_likeness` holds every
+  description of the copy to "real-person likeness" whatever the model judges. Tests draw
+  from the prompt alone, so a test prompt with `@n` is refused with a pointer to describing
+  it.
+- Design redraw notes and keyframe directions don't take `@n` yet.

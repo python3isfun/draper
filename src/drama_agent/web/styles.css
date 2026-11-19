@@ -709,3 +709,5 @@ td.mono { white-space: nowrap; }
 }
 .gid-tag:hover, .gid-tag:focus-visible { opacity: 1; background: var(--accent); outline: none; }
 .gid-tag[hidden] { display: none; }
+.face-num-form { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.face-num { width: 7em; font-family: var(--mono); }

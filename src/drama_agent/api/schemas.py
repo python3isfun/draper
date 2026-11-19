@@ -193,6 +193,7 @@ class UsePickRequest(BaseModel):
 
 class FaceDescribeRequest(BaseModel):
     asset_id: str | None = None  # a new photo; default: the study's photo again
+    image: int | None = Field(None, ge=1)  # or any picture by its global number (@1234)
     hint: str = Field("", max_length=500)  # what to focus on ("the eyes", "older")
     restrictive: bool = False
 

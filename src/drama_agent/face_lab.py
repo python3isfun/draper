@@ -31,6 +31,7 @@ from .experiment import (
     ExpTurn,
     cited_beyond,
     current_size,
+    global_mentions,
     is_busy,
 )
 from .llm import GenerationRequest
@@ -222,6 +223,11 @@ def plan_test(
     if missing := cited_beyond(prompt, 0):
         raise ExpError(
             f"The prompt cites {', '.join(missing)}, but Face Lab tests send no pictures."
+        )
+    if gids := global_mentions(prompt):
+        raise ExpError(
+            f"Tests draw from the prompt alone, so they can't use @{gids[0]}. To start from "
+            "that picture, describe it (Describe a picture by number)."
         )
     seeds = list(seeds or [])
     if any(not 1 <= s <= MAX_SEED for s in seeds):

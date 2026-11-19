@@ -34,7 +34,13 @@ def register(app: FastAPI, ctx: Any) -> None:
         numbers to pictures shown for the first time."""
         if bad := [r for r in req.refs if parse(r) is None]:
             raise HTTPException(422, f"not an image ref: {bad[0]}")
-        return repo.image_ids(list(dict.fromkeys(req.refs)))
+        refs = list(dict.fromkeys(req.refs))
+        # A face study's copy of a picture shows the picture's number.
+        assets = repo.get_source_assets([r[6:] for r in refs if r.startswith("asset:")])
+        same = {f"asset:{a}": raw["from_image"] for a, raw in assets.items()
+                if raw.get("from_image")}  # fmt: skip
+        got = repo.image_ids(list(dict.fromkeys(same.get(r, r) for r in refs)))
+        return {r: got[same.get(r, r)] for r in refs}
 
     def _found(gid: int) -> Found:
         ref = repo.image_ref(gid)

@@ -31,6 +31,7 @@ from ..experiment import (
 )
 from ..face_lab import new_study, plan_describe, plan_test, source_photo
 from ..image_ids import resolve as resolve_image
+from ..media import MediaError
 from ..models import ProductionPackage
 from ..models.package import utcnow
 from .schemas import (
@@ -185,23 +186,65 @@ def register(app: FastAPI, ctx: Any) -> None:
         """Face Lab: write the most descriptive text prompt for a photo (nothing drawn)."""
         session = _exp_session_or_404(session_id)
         turns = _exp_turns(session_id)
-        ids = [i for i in [req.asset_id or source_photo(turns)] if i]
+        if req.image is not None and req.asset_id:
+            raise HTTPException(422, "give a photo or a picture's number, not both")
+        if session.kind != "face":
+            raise HTTPException(422, "This is not a Face Lab study.")
+        if is_busy(turns):
+            raise HTTPException(409, "Wait for the current step to finish first.")
+        asset_id, what = req.asset_id, ""
+        if req.image is not None:
+            asset_id, what = await _photo_of(turns, req.image)
+        ids = [i for i in [asset_id or source_photo(turns)] if i]
         assets = repo.get_source_assets(ids)
         try:
             turn = plan_describe(
                 session,
                 turns,
                 assets,
-                asset_id=req.asset_id,
+                asset_id=asset_id,
                 hint=req.hint,
                 restrictive=req.restrictive,
             )
         except ExpError as exc:
             raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
-        if session.title == "New face study" and req.asset_id:
-            name = (assets.get(req.asset_id) or {}).get("filename") or ""
-            session.title = Path(name).stem[:60] or session.title
+        if (assets.get(turn.attachments[0]) or {}).get("from_likeness"):
+            turn.likeness = True
+        if session.title == "New face study" and asset_id:
+            name = (assets.get(asset_id) or {}).get("filename") or ""
+            session.title = (what or Path(name).stem)[:60] or session.title
         return _start_face_turn(session, turn)
+
+    async def _photo_of(turns: list[ExpTurn], gid: int) -> tuple[str, str]:
+        """A face study's photo for a picture's global number (@1234): an upload as it is,
+        anything else as an upload-style copy (reused if this study has one), which keeps
+        the picture's likeness mark. Returns (asset_id, a title)."""
+        ref = repo.image_ref(gid)
+        found = resolve_image(repo, ref) if ref is not None else None
+        if found is None:
+            gone = "is no longer available" if ref else "doesn't exist"
+            raise HTTPException(422, f"Image @{gid} {gone}.")
+        title = f"@{gid}: {found.what.split(' (story ')[0]}"
+        if ref.startswith("asset:"):  # type: ignore[union-attr]
+            return ref.removeprefix("asset:"), title  # type: ignore[union-attr]
+        mine = repo.get_source_assets(sorted({a for t in turns for a in t.attachments}))
+        for asset_id, raw in mine.items():
+            if raw.get("from_image") == ref:
+                return asset_id, title
+        data = await asyncio.to_thread(ctx.media.path(found.file).read_bytes)
+
+        async def chunks():  # type: ignore[no-untyped-def]
+            yield data
+
+        try:
+            asset = await ctx.media.save_upload(
+                chunks(), f"image-{gid}{Path(found.file).suffix}", len(data)
+            )
+        except MediaError as exc:
+            raise HTTPException(422, f"Image @{gid} can't be used as a photo: {exc}") from exc
+        asset.from_image, asset.from_likeness = ref, found.likeness is True
+        repo.save_source_asset(asset.asset_id, asset.model_dump(mode="json"))
+        return asset.asset_id, title
 
     @app.post("/v1/experiments/{session_id}/tests", status_code=202, response_model=ExpTurn)
     async def test_face_prompt(session_id: str, req: FaceTestRequest) -> ExpTurn:

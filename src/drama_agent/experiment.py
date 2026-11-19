@@ -967,7 +967,8 @@ class ExperimentRunner:
             raise GuardRefused(reason)
         turn.prompt, turn.reply = prompt, out.notes.strip()
         turn.prompt_model = request.model or "unknown"
-        turn.likeness = out.real_person
+        # A photo copied from a picture marked as a likeness stays one (planned as True).
+        turn.likeness = out.real_person or turn.likeness is True
 
     async def _guard(self, turn: ExpTurn) -> None:
         """Raise GuardRefused unless the turn's prompt may be drawn. A prompt the writer

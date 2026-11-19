@@ -261,14 +261,15 @@ function renderFaceHeader(v) {
     },
   });
   const del = h("button", { type: "button", class: "btn ghost small", disabled: faceBusy(v), onclick: deleteFace }, "Delete study");
-  face.el.header.replaceChildren(
+  // Wrapped in h(), which drops false and null (replaceChildren would print them).
+  face.el.header.replaceChildren(h("div", { class: "contents" },
     s.target && h("p", { class: "small exp-target" }, "For ", h("strong", {}, s.target.label || "a face"),
       ". Use as pick on a render makes it that face's pick. ",
       h("button", { type: "button", class: "btn ghost small", title: "Move this study back to Scratch, tied to no face", onclick: () => unlinkSession(s.session_id, () => loadFaceStudy()) }, "Unlink")),
     face.notice && h("p", { class: "small hint" }, face.notice),
     h("div", { class: "exp-head-row" }, title,
       h("span", { class: "muted small" }, `${describes(v).length} description${describes(v).length === 1 ? "" : "s"} · ${tests(v).length} test${tests(v).length === 1 ? "" : "s"}`),
-      h("div", { class: "exp-head-actions" }, del)));
+      h("div", { class: "exp-head-actions" }, del))));
 }
 
 async function deleteFace(e) {
@@ -312,13 +313,37 @@ function renderPhoto(v) {
       } catch (err) { face.error = err.message; renderFace(); }
     },
   });
+  // Any picture in the app as the photo, by its global number (@1234, docs/image-ids.md).
+  const num = h("input", {
+    value: d.num || "", placeholder: "@1234", "aria-label": "A picture's number", class: "face-num",
+    oninput: (e) => { d.num = e.target.value; },
+  });
+  face.numInput = num;
+  const byNumber = h("form", {
+    class: "face-num-form",
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const n = Number(num.value.trim().replace(/^@/, ""));
+      if (!Number.isInteger(n) || n < 1) {
+        face.error = "Write a picture's number, e.g. @1234 (shown at the top right of every picture).";
+        renderFace();
+        return;
+      }
+      const typed = num.value;
+      d.num = "";  // cleared on success; kept to correct after an error (e.g. no such number)
+      await describe({ image: n });
+      if (face.error) { d.num = typed; renderFace(); }
+    },
+  },
+    h("span", { class: "muted small" }, "Describe a picture by number"), num,
+    h("button", { type: "submit", class: "btn small", disabled: busy }, "Describe"));
   const descs = [...describes(v)].reverse();
   // h() flattens nested lists and drops false/null; replaceChildren alone would print them.
   el.replaceChildren(h("div", { class: "contents" },
     h("h3", {}, "Photo"),
     ref
       ? h("a", { href: refUrl(ref, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
-        h("img", { src: refUrl(ref), alt: "The photo being described", class: "face-photo-img" }), lookalikeTag(photoLikeness(v)))
+        h("img", { src: refUrl(ref), alt: "The photo being described", class: "face-photo-img" }), lookalikeTag(photoLikeness(v)), idTag(ref))
       : h("p", { class: "muted" }, "No photo yet."),
     ref && face.labels[ref] != null && h("span", { class: "exp-id" }, `#${face.labels[ref]}`),
     h("div", { class: "face-describe" },
@@ -327,6 +352,7 @@ function renderPhoto(v) {
         h("button", { type: "button", class: "btn small", disabled: busy || !ref, onclick: () => describe({ hint: d.hint }) }, "Describe again"),
         h("button", { type: "button", class: "btn ghost small", disabled: busy, onclick: () => swap.click() }, "Use another photo"),
         swap),
+      byNumber,
     ),
     h("h3", { class: "face-sub" }, "Descriptions"),
     descs.length === 0 && h("p", { class: "muted small" }, "None yet."),

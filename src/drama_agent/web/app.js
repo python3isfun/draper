@@ -85,6 +85,14 @@ function useGlobalId(el) {
     insertMention(token);
     return;
   }
+  // A face study open: its "Describe a picture by number" box.
+  const num = typeof face !== "undefined" && face.numInput;
+  if (num && num.isConnected) {
+    num.value = token;
+    num.dispatchEvent(new Event("input"));
+    num.focus();
+    return;
+  }
   navigator.clipboard?.writeText(token).then(() => {
     const was = el.textContent;
     el.textContent = "copied";
@@ -1581,7 +1589,9 @@ function renderRevisionResult(rev) {
 // Boot
 
 loadMeta();
-loadJobs().then(route);
+// After every script has run: route() uses bench.js, face.js and the rest, which may
+// still be loading when the jobs list comes back (a reload revalidating them).
+document.addEventListener("DOMContentLoaded", () => loadJobs().then(route));
 
 // ---------------------------------------------------------------------------
 // Activity: live agent steps and model calls (also the debugging record later).
