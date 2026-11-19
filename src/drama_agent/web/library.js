@@ -128,10 +128,10 @@ function renderLibScratch() {
       href: `#${s.kind === "face" ? "face" : "exp"}=${encodeURIComponent(s.session_id)}`,
       class: `lib-side-item${bench.sid === s.session_id ? " active" : ""}`,
       onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench(s.kind === "face" ? "face" : "chat", s.session_id, s.title); },
-    }, h("span", {}, s.title, h("span", { class: "muted small" }, ` · ${s.kind === "face" ? "face study" : "chat"} · ${timeAgo(s.updated_at)}`))))));
+    }, h("span", {}, s.title, h("span", { class: "muted small" }, ` · ${s.kind === "face" ? "study" : "chat"} · ${timeAgo(s.updated_at)}`))))));
 }
 
-// Link a scratch chat (or, on a face, a face study) to this picture; it leaves Scratch.
+// Link a scratch chat or study to this picture; it leaves Scratch.
 function libLinkScratch(target, isFace) {
   const free = (lib.scratch || []).filter((s) => s.kind === "chat" || isFace);
   if (!free.length) return null;
@@ -151,7 +151,7 @@ function libLinkScratch(target, isFace) {
       }
     },
   }, h("option", { value: "" }, "Link a scratch chat…"),
-    free.map((s) => h("option", { value: s.session_id }, `${s.title} (${s.kind === "face" ? "face study" : "chat"})`)));
+    free.map((s) => h("option", { value: s.session_id }, `${s.title} (${s.kind === "face" ? "study" : "chat"})`)));
 }
 
 // The characters (or sets) of the story chosen in the story filter (all when none is).
@@ -255,11 +255,16 @@ function libPartTitle(a, part) {
   return `${kind}: ${libVariant(part.origin_entity_id, part.kind === "item" ? "" : a.origin_entity_id)}`;
 }
 
+// A picture by its view, and for an item (one picture per state) its state too:
+// "Ryder · detail".
+const libSlotName = (slot) => (slot.asset_type === "prop" && slot.variant_id
+  ? `${libVariant(slot.variant_id, slot.entity_id)} · ${slot.view}` : slot.view);
+
 function libCrumbs(a, part, slot, shotId) {
   const meta = LIB_KINDS[a.kind];
   const trail = [[`#lib=${meta.path}`, meta.plural], [libHref(a.asset_id), a.name]];
   if (part) trail.push([libHref(a.asset_id, part.asset_id), libPartTitle(a, part)]);
-  if (slot) trail.push([null, slot.view]);
+  if (slot) trail.push([null, libSlotName(slot)]);
   if (shotId) trail.push([null, `Shot ${shotId} · keyframes`]);
   return h("nav", { class: "crumbs small", "aria-label": "Where you are" }, trail.map(([href, label], i) => [
     i > 0 && h("span", { class: "muted", "aria-hidden": "true" }, " › "),
@@ -361,10 +366,10 @@ function renderLibPart(a, part) {
       : h("div", { class: "lib-grid" }, slots.map((slot) => {
           const pick = part.pictures.find((p) => p.deliverable_id === slot.deliverable_id);
           const n = libTakeCount(v, slot);
-          return h("a", { href: libHref(a.asset_id, part.asset_id, slot.deliverable_id), class: "card lib-card", title: `Open the ${slot.view}: its takes and draws` },
-            pick ? h("img", { src: pick.thumb, alt: slot.view, loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
+          return h("a", { href: libHref(a.asset_id, part.asset_id, slot.deliverable_id), class: "card lib-card", title: `Open the ${libSlotName(slot)}: its takes and draws` },
+            pick ? h("img", { src: pick.thumb, alt: libSlotName(slot), loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
             pick && lookalikeTag(pick.likeness),
-            h("strong", {}, slot.view),
+            h("strong", {}, libSlotName(slot)),
             h("span", { class: "muted small" }, `${count(n, "take", "takes")}${pick?.picked ? " · picked" : ""}`),
             pick && pick.outdated.length > 0 && h("span", { class: "chip warn", title: pick.outdated.join("; ") }, "out of date"));
         })),
@@ -472,9 +477,9 @@ function renderLibSlot(a, part, slot) {
   return h("div", { class: "lib-asset" },
     libCrumbs(a, part, slot),
     h("section", { class: "card" },
-      h("div", { class: "section-head" }, h("h2", {}, `${libPartTitle(a, part)} · ${slot.view}`),
+      h("div", { class: "section-head" }, h("h2", {}, `${libPartTitle(a, part)} · ${libSlotName(slot)}`),
         foreign && h("span", { class: "chip", title: "This look comes from a story linked to this character" }, "in its own story")),
-      libPickHero(v, slot, `${libPartTitle(a, part)} · ${slot.view}`),
+      libPickHero(v, slot, `${libPartTitle(a, part)} · ${libSlotName(slot)}`),
       libDesignControls(),
       libWorkbench(part, slot, false)),
     h("h3", {}, "Takes"),
@@ -530,7 +535,13 @@ function libSource(img) {
     return job ? h("a", { href: `#job=${encodeURIComponent(job.job_id)}&tab=keyframes`, title: "Open the story's keyframes" }, label) : label;
   }
   m = src.match(/^experiment (\S+) #(\d+)$/);
-  if (m) return h("a", { href: `#exp=${encodeURIComponent(m[1])}` }, `Chat image #${m[2]}`);
+  if (m) {
+    const study = (lib.chats || []).find((c) => c.session_id === m[1])?.kind === "face";
+    const kind = study ? "face" : "chat";
+    return h("a", { href: `#${study ? "face" : "exp"}=${encodeURIComponent(m[1])}`, title: `Open the ${study ? "study" : "chat"} it came from`,
+      onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench(kind, m[1]); } },
+      `${study ? "Study" : "Chat"} image #${m[2]}`);
+  }
   return src ? `From ${src}` : "Drawn before takes";
 }
 
@@ -870,22 +881,33 @@ function libSlots(part, v) {
 
 // The workbench (docs/workbench.md): develop a picture in a chat that starts from its pick;
 // a result's "Use as pick" makes it this picture's pick. The slot's chats are listed.
+// What a study of this picture describes and how its tests are drawn (face_lab.SUBJECTS).
+const LIB_STUDY = {
+  character_identity: { what: "the face", from: "text alone" },
+  character_look: { what: "the outfit, hair and pose (never the photo's face)", from: "the face's pick" },
+  location: { what: "the set, empty of people", from: "text alone, or the first state's pick" },
+  prop: { what: "the object", from: "text alone, or the first state's pick" },
+};
+
 function libWorkbench(part, slot, sayView) {
   const mine = (lib.chats || []).filter((s) => s.target && s.target.package_id === part.origin_package_id
     && s.target.requirement_id === slot.requirement_id && s.target.deliverable_id === slot.deliverable_id);
-  const label = `${slot.entity}${slot.variant ? ` (${slot.variant})` : ""}, ${slot.view}`;
+  // "Lila Montgomery, evening torn, full body": the variant by its short name, not its line.
+  const label = `${slot.entity}${slot.variant_id ? `, ${libVariant(slot.variant_id, slot.entity_id).toLowerCase()}` : ""}, ${slot.view}`;
   const target = { package_id: part.origin_package_id, requirement_id: slot.requirement_id, deliverable_id: slot.deliverable_id, label };
-  // Face Lab's "From a photo": only for a character's face.
-  const photo = slot.asset_type === "character_identity" && h("input", {
+  const study = LIB_STUDY[slot.asset_type] || LIB_STUDY.character_identity;
+  // A study (as Face Lab, for every kind of picture): a photo described in words, or words
+  // of your own, tested seed by seed; Use as pick on a render.
+  const photo = h("input", {
     type: "file", accept: "image/jpeg,image/png,image/webp", hidden: true,
     onchange: (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) benchFaceFromPhoto(f, target, fromPhoto); },
   });
-  const fromPhoto = photo && h("button", { type: "button", class: "btn small", title: "Upload a reference photo: it is described in words, and you test the wording seed by seed (Face Lab)", onclick: () => photo.click() }, "From a photo");
-  // ... or a face study with no photo: write the description, draw it with H3 or a local
-  // image server (the study's "Drawn with").
-  const fromText = photo && h("button", {
+  const fromPhoto = h("button", { type: "button", class: "btn small",
+    title: `Upload a reference photo: GPT describes ${study.what} in words, and you test the wording seed by seed (drawn from ${study.from}); Use as pick on a render`,
+    onclick: () => photo.click() }, "From a photo");
+  const fromText = h("button", {
     type: "button", class: "btn small",
-    title: "Write a description of the face and draw it from text alone, with MiniMax H3 or your local image server (Face Lab)",
+    title: `Write the description yourself and test it seed by seed (drawn from ${study.from}); Use as pick on a render`,
     onclick: (e) => benchFaceFromText(target, e.currentTarget),
   }, "Create from text");
   const develop = async (button) => {
@@ -901,26 +923,42 @@ function libWorkbench(part, slot, sayView) {
       renderLibrary();
     }
   };
-  // Any other picture: start a chat from a reference photo of your own.
-  const refInput = !photo && h("input", {
-    type: "file", accept: "image/jpeg,image/png,image/webp", hidden: true,
-    onchange: (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) benchChatFromPhoto(f, target, fromRef); },
-  });
-  const fromRef = refInput && h("button", { type: "button", class: "btn small",
-    title: "Upload a reference photo: a chat starts with it as the current image; say what to make of it, then Use as pick", onclick: () => refInput.click() }, "From a reference photo");
-  return h("div", { class: "design-row small" },
-    h("button", { type: "button", class: "btn small", title: "Change this picture in a chat with the image model, starting from its pick (or, with none, from your words)", onclick: (e) => develop(e.currentTarget) }, sayView ? `Develop the ${slot.view} in a chat` : "Develop in a chat"),
-    fromPhoto, photo, fromText, fromRef, refInput,
-    libLinkScratch(target, slot.asset_type === "character_identity"),
-    mine.length > 0 && h("span", { class: "muted" }, "Chats:"),
-    mine.slice(0, 6).map((s) => h("a", {
-      href: `#${s.kind === "face" ? "face" : "exp"}=${encodeURIComponent(s.session_id)}`,
-      title: `${s.kind === "face" ? "Face Lab study" : "Chat"}, updated ${timeAgo(s.updated_at)}`,
-      // Opens in the panel; a middle click still opens the full page.
-      onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench(s.kind === "face" ? "face" : "chat", s.session_id, s.title); },
-    }, s.kind === "face" ? `${s.title} (face study)` : s.title)),
-    mine.length > 6 && h("a", { href: "#", class: "muted", title: "Every chat is listed at the top of the panel",
-      onclick: (e) => { e.preventDefault(); openBench("chat", mine.find((s) => s.kind !== "face")?.session_id || mine[0].session_id, label); } }, `and ${mine.length - 6} more`));
+  return [
+    h("div", { class: "design-row small" },
+      h("button", { type: "button", class: "btn small", title: "Change this picture in a chat with the image model, starting from its pick (or, with none, from your words); attach a photo in the chat to work from it", onclick: (e) => develop(e.currentTarget) }, sayView ? `Develop the ${slot.view} in a chat` : "Develop in a chat"),
+      fromPhoto, photo, fromText,
+      libLinkScratch(target, true)),
+    libHistory(mine)];
+}
+
+// The picture's chats and studies, newest first: each with its newest image, what it is,
+// how much is in it and when it was last used. Each opens in the workbench panel.
+function libHistory(mine) {
+  if (!mine.length) return h("p", { class: "muted small lib-history-empty" }, "No chats or studies for this picture yet.");
+  const all = lib.historyAll;
+  const shown = all ? mine : mine.slice(0, 8);
+  return h("div", { class: "lib-history" },
+    h("div", { class: "muted small" }, `History (${mine.length})`),
+    h("ul", { class: "plain lib-history-list" }, shown.map((s) => {
+      const kind = s.kind === "face" ? "face" : "chat";
+      return h("li", {}, h("a", {
+        href: `#${kind === "face" ? "face" : "exp"}=${encodeURIComponent(s.session_id)}`, class: "lib-history-item",
+        title: `Open this ${kind === "face" ? "study" : "chat"} in the panel`,
+        // Opens in the panel; a middle click still opens the full page.
+        onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench(kind, s.session_id, s.title); },
+      },
+        s.thumb ? h("img", { src: s.thumb, alt: "", loading: "lazy" }) : h("span", { class: "lib-noimg" }),
+        h("span", { class: "lib-history-text" },
+          h("strong", {}, s.title),
+          h("span", { class: "muted small" }, [
+            kind === "face" ? "study" : "chat",
+            s.messages ? `${s.messages} ${kind === "face" ? "step" : "message"}${s.messages === 1 ? "" : "s"}` : "nothing in it yet",
+            s.images ? `${s.images} image${s.images === 1 ? "" : "s"}` : null,
+            timeAgo(s.updated_at),
+          ].filter(Boolean).join(" · ")))));
+    })),
+    mine.length > 8 && h("button", { type: "button", class: "btn ghost small", onclick: () => { lib.historyAll = !all; renderLibrary(); } },
+      all ? "Show fewer" : `Show all ${mine.length}`));
 }
 
 // Draws per new take, and draft or full size (shared with the Casting tab's controls).

@@ -59,6 +59,9 @@ def test_describe_again_with_a_hint_builds_on_the_last_prompt(tmp_path):
         assert req.context == {
             "hint": "more detail on the eyes",
             "previous_prompt": first["prompt"],
+            "subject": "face",  # a study of no picture
+            "anchored": False,
+            "design": None,
         }
         assert "Restrictive mode:" in req.instructions
         assert "more detail on the eyes" in turn["prompt"]

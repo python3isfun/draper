@@ -169,7 +169,7 @@ def test_a_scratch_chat_can_be_linked_to_a_picture_and_unlinked(tmp_path):
         assert http.get("/v1/experiments", params=q).json() == []
 
 
-def test_a_face_study_is_only_for_a_face(tmp_path):
+def test_a_study_takes_its_subject_from_its_picture(tmp_path):
     with TestClient(_app(tmp_path)) as http:
         job = _story(http)
         pkg = http.get(f"/v1/drama-packages/{job['package_id']}").json()
@@ -179,11 +179,15 @@ def test_a_face_study_is_only_for_a_face(tmp_path):
                   "deliverable_id": look["deliverable_ids"][0] if "deliverable_ids" in look
                   else look["deliverables"][0]["deliverable_id"]}  # fmt: skip
         r = http.post("/v1/experiments", json={"kind": "face", "target": target})
-        assert r.status_code == 422
+        assert r.status_code == 201 and r.json()["subject"] == "look"
+        assert r.json()["size"] == "1536x2720"  # 9:16, full length
+        # A scratch study linked to a look becomes a look study.
         sid = http.post("/v1/experiments", json={"kind": "face"}).json()["session_id"]
-        assert http.patch(f"/v1/experiments/{sid}", json={"target": target}).status_code == 422
+        linked = http.patch(f"/v1/experiments/{sid}", json={"target": target}).json()
+        assert linked["subject"] == "look"
         assert (
-            http.patch(f"/v1/experiments/{sid}", json={"target": _target(job)}).status_code == 200
+            http.patch(f"/v1/experiments/{sid}", json={"target": _target(job)}).json()["subject"]
+            == "face"
         )
 
 

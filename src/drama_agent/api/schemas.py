@@ -243,6 +243,18 @@ class ExpSessionItem(ExpSession):
     one), so the history can tell an untouched chat from one in use."""
 
     messages: int = 0
+    # Its newest image (thumbnail URL) and how many it has made, for a picture's history.
+    thumb: str | None = None
+    images: int = 0
+
+
+class StudyAnchor(BaseModel):
+    """The picture a study's tests are drawn from (<Picture 1>): the current pick of the
+    picture its own is drawn from (a look's face, a set's first state)."""
+
+    label: str  # "Lila Montgomery, front face"
+    image_id: str | None = None  # None: that picture has no pick yet
+    thumb: str | None = None
 
 
 class ExpSessionView(BaseModel):
@@ -251,6 +263,7 @@ class ExpSessionView(BaseModel):
     sizes: dict[str, str]  # aspect ratio -> size
     # Image providers a Face Lab test can be drawn with (name -> model), H3 first.
     providers: dict[str, str] = Field(default_factory=dict)
+    anchor: StudyAnchor | None = None  # a study's <Picture 1>, if its tests have one
 
 
 EXPORT_DIR = Path(tempfile.gettempdir()) / "drama-exports"

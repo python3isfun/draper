@@ -12,7 +12,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from ..design.setup import package_has_uploads, story_rating
-from ..design.slots import selected_image
+from ..design.slots import _graph as slot_graph
+from ..design.slots import selected_image, slot_title
 from ..experiment import SIZES as EXP_SIZES
 from ..experiment import (
     ExpError,
@@ -30,7 +31,7 @@ from ..experiment import (
     plan_turn,
     size_of,
 )
-from ..face_lab import new_study, plan_describe, plan_test, source_photo
+from ..face_lab import new_study, plan_describe, plan_test, source_photo, subject_for
 from ..image_ids import resolve as resolve_image
 from ..image_ids import story_likeness
 from ..media import MediaError
@@ -45,6 +46,7 @@ from .schemas import (
     ExpTurnRequest,
     FaceDescribeRequest,
     FaceTestRequest,
+    StudyAnchor,
 )
 
 log = logging.getLogger(__name__)
@@ -65,10 +67,88 @@ def register(app: FastAPI, ctx: Any) -> None:
         providers = {"h3": experiments.images.model_id} | {
             name: client.model_id for name, client in experiments.providers.items()
         }
-        return ExpSessionView(session=shown, turns=turns, sizes=EXP_SIZES, providers=providers)
+        found = _anchor_pick(session)
+        anchor = None
+        if found is not None:
+            label, img = found
+            anchor = StudyAnchor(
+                label=label, image_id=img and img.image_id,
+                thumb=img and f"/v1/generated-images/{img.image_id}/thumb",
+            )  # fmt: skip
+        return ExpSessionView(session=shown, turns=turns, sizes=EXP_SIZES, providers=providers,
+                              anchor=anchor)  # fmt: skip
 
     def _messages(session_id: str) -> int:
         return sum(t.mode not in ("pick", "import") for t in repo.list_exp_turns(session_id))
+
+    def _item(s: ExpSession) -> ExpSessionItem:
+        """A chat or study for a list: its messages, its newest image and how many."""
+        turns = repo.list_exp_turns(s.session_id)
+        made = [(t, n) for t in sorted(turns, key=lambda t: t.index)
+                for n, r in enumerate(t.results) if r.file]  # fmt: skip
+        thumb = None
+        if made:
+            t, n = made[-1]
+            thumb = f"/v1/experiment-turns/{t.turn_id}/results/{n}/thumb"
+        return ExpSessionItem(
+            **s.model_dump(), messages=sum(t.mode not in ("pick", "import") for t in turns),
+            thumb=thumb, images=len(made),
+        )  # fmt: skip
+
+    def _anchor_pick(session: ExpSession) -> tuple[str, Any] | None:
+        """(label, its pick or None) of the picture a study's tests are drawn from, or None
+        when they are drawn from text alone (a face, a first state, a study of no picture)."""
+        t = session.target
+        if session.kind != "face" or t is None or t.keyframe:
+            return None
+        pkg = repo.get_package(t.package_id)
+        if pkg is None:
+            return None
+        parent = slot_graph(pkg).parent.get((t.requirement_id, t.deliverable_id))
+        if parent is None:
+            return None
+        picks = [i for i in repo.list_images(pkg.package_id, pkg.revision_id)
+                 if (i.requirement_id, i.deliverable_id) == parent and i.selected
+                 and i.status == "done" and i.file]  # fmt: skip
+        return slot_title(pkg, parent), (max(picks, key=lambda i: i.created_at) if picks else None)
+
+    async def _anchor(session: ExpSession, turns: list[ExpTurn]) -> tuple[str, bool, str] | None:
+        """(asset id, likeness, label) of a study's <Picture 1>: an upload-style copy of the
+        picture its tests are drawn from (reused while that pick stays). None for a study
+        drawn from text alone; 409 when that picture has no pick yet."""
+        found = _anchor_pick(session)
+        if found is None:
+            return None
+        label, img = found
+        if img is None:
+            raise HTTPException(409, f"Pick an image for {label} first: this study's tests are "
+                                "drawn from it.")  # fmt: skip
+        ref = f"design:{img.image_id}"
+        asset_id = await _copy_as_photo(turns, ref, img.file, f"pick-{img.image_id}",
+                                        img.likeness is True)  # fmt: skip
+        return asset_id, img.likeness is True, label
+
+    async def _copy_as_photo(
+        turns: list[ExpTurn], ref: str, file: str, name: str, likeness: bool
+    ) -> str:
+        """An upload-style copy of a picture (`ref`) for a study, reused if it has one;
+        it keeps the picture's likeness mark."""
+        mine = repo.get_source_assets(sorted({a for t in turns for a in t.attachments}))
+        for asset_id, raw in mine.items():
+            if raw.get("from_image") == ref:
+                return asset_id
+        data = await asyncio.to_thread(ctx.media.path(file).read_bytes)
+
+        async def chunks():  # type: ignore[no-untyped-def]
+            yield data
+
+        try:
+            asset = await ctx.media.save_upload(chunks(), f"{name}{Path(file).suffix}", len(data))
+        except MediaError as exc:
+            raise HTTPException(422, f"{ref} can't be used as a photo: {exc}") from exc
+        asset.from_image, asset.from_likeness = ref, likeness
+        repo.save_source_asset(asset.asset_id, asset.model_dump(mode="json"))
+        return asset.asset_id
 
     @app.get("/v1/experiments", response_model=list[ExpSessionItem])
     async def list_experiments(
@@ -94,11 +174,7 @@ def register(app: FastAPI, ctx: Any) -> None:
                     strict=True)
             )  # fmt: skip
 
-        return [
-            ExpSessionItem(**s.model_dump(), messages=_messages(s.session_id))
-            for s in repo.list_exp_sessions()
-            if kind in (None, s.kind) and wanted(s)
-        ]
+        return [_item(s) for s in repo.list_exp_sessions() if kind in (None, s.kind) and wanted(s)]
 
     def _untouched(target: ExpTarget, pick_id: str | None, kind: str = "chat") -> ExpSession | None:
         """The picture's (or keyframe's) newest chat (or face study) with no message yet,
@@ -122,7 +198,7 @@ def register(app: FastAPI, ctx: Any) -> None:
             raise HTTPException(404, "story not found")
         if target.keyframe:
             if kind == "face":
-                raise HTTPException(422, "a face study can only be for a character's face")
+                raise HTTPException(422, "a study is for a design picture, not a keyframe")
             shot = next((s for s in pkg.shot_list if s.shot_id == target.shot_id), None)
             if shot is None:
                 raise HTTPException(404, f"no shot {target.shot_id} in this story")
@@ -136,8 +212,6 @@ def register(app: FastAPI, ctx: Any) -> None:
             d.deliverable_id == target.deliverable_id for d in reqmt.deliverables
         ):
             raise HTTPException(404, "no such design picture in this story")
-        if kind == "face" and reqmt.asset_type != "character_identity":
-            raise HTTPException(422, "a face study can only be for a character's face")
         return pkg
 
     def _start_frame(pkg: ProductionPackage, target: ExpTarget, wanted: str | None) -> Any:
@@ -175,6 +249,11 @@ def register(app: FastAPI, ctx: Any) -> None:
         if (target := req.target) is not None:
             pkg = _target_story(target, req.kind)
             session.target = target
+            if req.kind == "face":  # how its photos are described, and its tests' size
+                slot = slot_graph(pkg).slot((target.requirement_id, target.deliverable_id))
+                if slot is not None:
+                    subject = subject_for(slot.req.asset_type, slot.view)
+                    session = new_study(title, subject).model_copy(update={"target": target})
             if req.kind == "chat" and target.keyframe:
                 pick = _start_frame(pkg, target, req.from_frame) if req.start_from_pick else None
             elif req.kind == "chat" and req.start_from_pick:
@@ -246,6 +325,9 @@ def register(app: FastAPI, ctx: Any) -> None:
             asset_id, what = await _photo_of(turns, req.image)
         ids = [i for i in [asset_id or source_photo(turns)] if i]
         assets = repo.get_source_assets(ids)
+        if is_busy(turns):
+            raise HTTPException(409, "Wait for the current step to finish first.")
+        anchor = await _anchor(session, turns)
         try:
             turn = plan_describe(
                 session,
@@ -254,12 +336,14 @@ def register(app: FastAPI, ctx: Any) -> None:
                 asset_id=asset_id,
                 hint=req.hint,
                 restrictive=req.restrictive,
+                anchor=anchor and anchor[0],
+                anchor_likeness=bool(anchor and anchor[1]),
             )
         except ExpError as exc:
             raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
         if (assets.get(turn.attachments[0]) or {}).get("from_likeness"):
             turn.likeness = True
-        if session.title == "New face study" and asset_id:
+        if session.title.startswith("New ") and session.title.endswith(" study") and asset_id:
             name = (assets.get(asset_id) or {}).get("filename") or ""
             session.title = (what or Path(name).stem)[:60] or session.title
         return _start_face_turn(session, turn)
@@ -276,24 +360,9 @@ def register(app: FastAPI, ctx: Any) -> None:
         title = f"@{gid}: {found.what.split(' (story ')[0]}"
         if ref.startswith("asset:"):  # type: ignore[union-attr]
             return ref.removeprefix("asset:"), title  # type: ignore[union-attr]
-        mine = repo.get_source_assets(sorted({a for t in turns for a in t.attachments}))
-        for asset_id, raw in mine.items():
-            if raw.get("from_image") == ref:
-                return asset_id, title
-        data = await asyncio.to_thread(ctx.media.path(found.file).read_bytes)
-
-        async def chunks():  # type: ignore[no-untyped-def]
-            yield data
-
-        try:
-            asset = await ctx.media.save_upload(
-                chunks(), f"image-{gid}{Path(found.file).suffix}", len(data)
-            )
-        except MediaError as exc:
-            raise HTTPException(422, f"Image @{gid} can't be used as a photo: {exc}") from exc
-        asset.from_image, asset.from_likeness = ref, found.likeness is True
-        repo.save_source_asset(asset.asset_id, asset.model_dump(mode="json"))
-        return asset.asset_id, title
+        asset_id = await _copy_as_photo(turns, ref, found.file, f"image-{gid}",  # type: ignore[arg-type]
+                                        found.likeness is True)  # fmt: skip
+        return asset_id, title
 
     @app.post("/v1/experiments/{session_id}/tests", status_code=202, response_model=ExpTurn)
     async def test_face_prompt(session_id: str, req: FaceTestRequest) -> ExpTurn:
@@ -304,6 +373,9 @@ def register(app: FastAPI, ctx: Any) -> None:
         if provider is not None and provider not in experiments.providers:
             names = ", ".join(["h3", *experiments.providers])
             raise HTTPException(422, f"no image provider {provider!r}; there are: {names}")
+        if session.kind == "face" and is_busy(turns):
+            raise HTTPException(409, "Wait for the current step to finish first.")
+        anchor = await _anchor(session, turns) if session.kind == "face" else None
         try:
             turn = plan_test(
                 session,
@@ -314,6 +386,9 @@ def register(app: FastAPI, ctx: Any) -> None:
                 size=req.size,
                 restrictive=req.restrictive,
                 provider=provider,
+                anchor=anchor and anchor[0],
+                anchor_likeness=bool(anchor and anchor[1]),
+                anchor_label=anchor[2] if anchor else "",
             )
         except ExpError as exc:
             raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
@@ -346,8 +421,11 @@ def register(app: FastAPI, ctx: Any) -> None:
         if req.unlink:
             session.target = None
         elif req.target is not None:
-            _target_story(req.target, session.kind)
+            pkg = _target_story(req.target, session.kind)
             session.target = req.target
+            if session.kind == "face":  # a study describes and tests as its picture's kind
+                slot = slot_graph(pkg).slot((req.target.requirement_id, req.target.deliverable_id))
+                session.subject = subject_for(slot.req.asset_type, slot.view) if slot else "face"
         session.updated_at = utcnow()
         repo.save_exp_session(session)
         return session

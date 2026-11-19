@@ -23,10 +23,11 @@ Characters › Lila Montgomery › Look: Evening torn › Shot sh_02_01_05 · ke
    "drawing…".
 3. **A picture:** the **Current pick**, large, at the top (which take and draw, or where it
    was brought in from; dashed "No pick yet" showing the newest draw when nothing is
-   picked), the New takes controls (draws, draft or full size), the workbench row (Develop
-   in a chat, From a photo, Create from text, its chats), its **Takes** (the one holding
-   the pick says so), what was **Brought in**, and **New take** (or what must be picked
-   first).
+   picked), the New takes controls (draws, draft or full size), the workbench (Develop in
+   a chat, From a photo, Create from text, and its **History** underneath; see "Developing
+   any picture"), its **Takes** (the one holding the pick says so), what was **Brought
+   in**, and **New take** (or what must be picked first). An item's pictures are named by
+   state ("Ryder · detail").
 4. **A shot** (from a look's or state's Keyframes): the Keyframes tab's shot card, with the
    draws, rounds and provider for new takes. See "Developing a keyframe" below.
 
@@ -124,12 +125,50 @@ under its character or set, with its pictures (one per state) and the shots it's
   by the character, with its first state, their sheet entries, and the requirement its
   detail picture is drawn for (in no shot yet). Its picture page opens; with a photo, a
   chat for that picture opens with the photo as its current image.
-- **From a reference photo**, on every picture page but a face (a face has Face Lab):
-  upload a photo and a chat starts with it as the current image; say what to make of it
-  ("a clean product shot of this on grey") and Use as pick on the result.
+- A picture's own workbench (below) also works from a photo: **From a photo** (a study),
+  or Develop in a chat and attach it.
 - **Cross-reference:** the story's Casting tab lists its **Props** as cards (picture, what
   it does, shots, id), each opening its item page and naming who carries it (or the set
   it dresses), linked. An item page's **See it in the story's Props** opens the Casting tab
   scrolled to that prop, marked. The casting rows (`GET .../casting`) carry each entity's
   `parent_id`, the page it's on.
 - A prop no one carries and no shot uses is on no page; the Props card says so.
+
+## Developing any picture: chat, From a photo, Create from text
+
+Every picture page (a face, a look's full body, a set state's wide and top-down views, a
+prop's states) has the same workbench, with its history underneath:
+
+- **Develop in a chat:** a chat with the image model starting from the pick (or, with
+  none, from your words); attach a photo in the chat to work from it.
+- **From a photo:** a study (Face Lab's, for every kind of picture). GPT describes the
+  photo as that kind of picture, you edit the wording and test it seed by seed, and Use as
+  pick on a render. **Create from text** is the same study, from your own wording.
+- **History:** the picture's chats and studies, newest first, each with its newest image,
+  kind, messages (or steps) and images, and when it was last used; each opens in the
+  panel ("Show all" past eight).
+
+A study's `subject` comes from its picture (`face_lab.subject_for`) and sets how a photo is
+described and the test size:
+
+| Picture | Subject | Described as | Tests drawn from |
+| --- | --- | --- | --- |
+| A face | face | the person, as closely as words allow | text alone (3:4) |
+| A look's full body | look | the outfit, hair and pose; never the photo's face | the face's pick as `<Picture 1>` (9:16) |
+| A set state's wide view | set | the empty set, no people | text alone for the first state, else the first state's wide pick (4:3) |
+| A set state's top-down view | plan | the plan view, same inventory | its wide view's pick (1:1) |
+| A prop state | prop | the one object, every printed word quoted | text alone for the first state, else the first state's pick (1:1) |
+
+A picture drawn from another (the board's `parent`) is tested as an edit of that picture's
+current pick, sent as `<Picture 1>`: so a look keeps the character's face, and a later state
+keeps the set's layout or the object. The study shows it ("Drawn from <Picture 1>"), the
+describe writer is shown it too, with the picture's design brief and must-keep items, and
+writes an edit prompt around it. It's copied in once per pick as an upload-style copy that
+keeps its likeness mark (tests drawn from a likeness carry it). Until that picture has a
+pick, describing and testing are refused (409, "Pick an image for … first"); the local image
+server draws from text alone, so it can't draw these tests.
+
+API: a study is `POST /v1/experiments {kind: "face", target}` for any design picture (its
+`subject` and size follow); linking a scratch study to a picture sets its subject. `GET
+/v1/experiments/{id}` has `anchor` ({label, image_id, thumb}) for a study drawn from another
+picture; the list has each chat's `thumb` and `images`.

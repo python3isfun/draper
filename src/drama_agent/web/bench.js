@@ -16,7 +16,7 @@ function openBench(kind, sid, label) {
   bench.kind = kind;
   bench.sid = sid;
   const host = h("div", { class: "bench-host" });
-  $("#bench-title").textContent = label || (kind === "face" ? "Face study" : "Chat");
+  $("#bench-title").textContent = label || (kind === "face" ? "Study" : "Chat");
   $("#bench-full").href = `#${kind === "face" ? "face" : "exp"}=${encodeURIComponent(sid)}`;
   $("#bench-body").replaceChildren(host);
   $("#bench").hidden = false;

@@ -272,3 +272,143 @@ def test_new_item_through_the_api_on_its_page_and_in_the_storys_props(tmp_path):
             f"/v1/drama-packages/{b.pid}/items", json={"owner_id": "ch_x", "name": "x"}
         )
         assert bad.status_code == 404
+
+
+def _slot_target(b, asset_type, view_suffix=""):
+    pkg = b.repo.get_package(b.pid)
+    req = next(r for r in pkg.asset_requirements.items if r.asset_type == asset_type)
+    d = next(d for d in req.deliverables if d.deliverable_id.endswith(view_suffix))
+    return {"package_id": b.pid, "requirement_id": req.requirement_id,
+            "deliverable_id": d.deliverable_id, "label": d.view}, req  # fmt: skip
+
+
+def _pick(b, requirement_id, deliverable_suffix=""):
+    """Pick a finished draw of a picture (a draft's full-size render takes over the pick
+    once drawn) and return the pick."""
+    import time
+
+    rev = b.repo.get_package(b.pid).revision_id
+    img = next(i for i in b.repo.list_images(b.pid, rev)
+               if i.requirement_id == requirement_id and i.status == "done"
+               and i.deliverable_id.endswith(deliverable_suffix))  # fmt: skip
+    assert b.http.post(f"/v1/generated-images/{img.image_id}/select").status_code in (200, 202)
+    deadline = time.monotonic() + 20
+    while b.http.get(f"/v1/drama-packages/{b.pid}/images").json()["queued"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    return next(i for i in b.repo.list_images(b.pid, rev)
+                if (i.requirement_id, i.deliverable_id) == (img.requirement_id, img.deliverable_id)
+                and i.selected)  # fmt: skip
+
+
+def _number(b, ref):
+    """A picture's global number (@N)."""
+    return b.http.post("/v1/image-ids", json={"refs": [ref]}).json()[ref]
+
+
+def test_an_anchored_test_needs_h3(package):
+    from drama_agent.experiment import ExpError
+    from drama_agent.face_lab import new_study, plan_test
+
+    study = new_study(subject="look")
+    with pytest.raises(ExpError, match="text alone"):
+        plan_test(study, [], prompt="<Picture 1> in a coat.", draws=1, seeds=None, size=None,
+                  restrictive=False, provider="local", anchor="asset_1", anchor_label="face")  # fmt: skip
+    with pytest.raises(ExpError, match="only <Picture 1>"):
+        plan_test(study, [], prompt="<Picture 2> in a coat.", draws=1, seeds=None, size=None,
+                  restrictive=False, anchor="asset_1")  # fmt: skip
+    turn = plan_test(study, [], prompt="<Picture 1> in a coat.", draws=1, seeds=None, size=None,
+                     restrictive=False, anchor="asset_1", anchor_likeness=True)  # fmt: skip
+    assert turn.references == ["asset:asset_1"] and turn.likeness is True
+    assert turn.size == "1536x2720"
+
+
+def _study_wait(b, sid):
+    import time
+
+    deadline = time.monotonic() + 20
+    while True:
+        v = b.http.get(f"/v1/experiments/{sid}").json()
+        if not any(t["status"] in ("pending", "running") for t in v["turns"]):
+            return v
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+
+
+def test_a_look_study_is_drawn_from_the_face_pick(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        target, req = _slot_target(b, "character_look")
+        study = b.http.post("/v1/experiments", json={"kind": "face", "target": target}).json()
+        sid = study["session_id"]
+        assert study["subject"] == "look" and study["title"] == target["label"]
+        view = b.http.get(f"/v1/experiments/{sid}").json()
+        face_req = req.depends_on[0]
+        assert view["anchor"]["image_id"] is None and "front face" in view["anchor"]["label"]
+        prompt = (
+            "The person in <Picture 1> is <Subject 1>. A full-length photograph of <Subject 1>."
+        )
+        # No face pick yet: nothing to draw the look from.
+        r = b.http.post(f"/v1/experiments/{sid}/tests", json={"prompt": prompt})
+        assert r.status_code == 409 and "Pick an image for" in r.json()["detail"]
+        face = _pick(b, face_req)
+        view = b.http.get(f"/v1/experiments/{sid}").json()
+        assert view["anchor"]["image_id"] == face.image_id
+        # A test is an edit of the face pick (<Picture 1>), copied in once.
+        before = len(b.images.calls)
+        r = b.http.post(f"/v1/experiments/{sid}/tests", json={"prompt": prompt, "draws": 1})
+        assert r.status_code == 202, r.text
+        turn = _study_wait(b, sid)["turns"][-1]
+        assert turn["status"] == "done" and len(turn["references"]) == 1
+        assert len(b.images.calls[before][3]) == 1  # sent with one picture
+        copy = turn["attachments"][0]
+        assert b.repo.get_source_asset(copy)["from_image"] == f"design:{face.image_id}"
+        # Describing a photo: the costume writer, shown the face too; it reuses the copy.
+        gid = _number(b, f"design:{face.image_id}")  # any picture serves as the photo
+        r = b.http.post(f"/v1/experiments/{sid}/describe", json={"image": gid})
+        assert r.status_code == 202, r.text
+        described = _study_wait(b, sid)["turns"][-1]
+        assert described["references"] == [f"asset:{copy}"]
+        call = [c for c in b.text.calls if c.stage == "face_describe"][-1]
+        assert "costume designer" in call.instructions and "<Picture 1>" in call.instructions
+        assert call.context["subject"] == "look" and call.context["anchored"]
+        assert call.context["design"]["brief"] == req.design_brief
+        assert [m.label for m in call.media] == ["<Photo>", "<Picture 1>"]
+        assert described["prompt"].startswith("The person in <Picture 1>")
+        # The history lists it with its newest image.
+        [item] = [s for s in b.http.get("/v1/experiments", params={"package_id": b.pid}).json()
+                  if s["session_id"] == sid]  # fmt: skip
+        assert item["images"] == 1 and item["thumb"].endswith("/thumb")
+
+
+def test_set_and_prop_studies(tmp_path):
+    with Board(tmp_path) as b:
+        b.design()
+        wide, _ = _slot_target(b, "location", "_wide")
+        plan, req = _slot_target(b, "location", "_layout")
+        prop, _ = _slot_target(b, "prop")
+        s_wide = b.http.post("/v1/experiments", json={"kind": "face", "target": wide}).json()
+        s_plan = b.http.post("/v1/experiments", json={"kind": "face", "target": plan}).json()
+        s_prop = b.http.post("/v1/experiments", json={"kind": "face", "target": prop}).json()
+        assert (s_wide["subject"], s_plan["subject"], s_prop["subject"]) == ("set", "plan", "prop")
+        assert (s_wide["size"], s_plan["size"]) == ("2304x1728", "2048x2048")
+        # A set's first wide view is drawn from text alone, as a face is.
+        r = b.http.post(f"/v1/experiments/{s_wide['session_id']}/tests",
+                        json={"prompt": "An empty shop, eye-level wide view."})  # fmt: skip
+        assert r.status_code == 202
+        assert b.http.get(f"/v1/experiments/{s_wide['session_id']}").json()["anchor"] is None
+        # Its plan view is drawn from its wide view's pick.
+        anchor = b.http.get(f"/v1/experiments/{s_plan['session_id']}").json()["anchor"]
+        assert anchor["label"].endswith("wide")
+        _pick(b, req.requirement_id, "_wide")
+        _study_wait(b, s_wide["session_id"])
+        r = b.http.post(f"/v1/experiments/{s_plan['session_id']}/tests",
+                        json={"prompt": "<Picture 1> seen from straight above."})  # fmt: skip
+        assert r.status_code == 202, r.text
+        # A prop's describe gets the prop master; never a picture beyond <Picture 1>.
+        gid = _number(b, f"design:{_pick(b, prop['requirement_id']).image_id}")
+        r = b.http.post(f"/v1/experiments/{s_prop['session_id']}/describe", json={"image": gid})
+        assert r.status_code == 202, r.text
+        _study_wait(b, s_prop["session_id"])
+        call = [c for c in b.text.calls if c.stage == "face_describe"][-1]
+        assert "prop master" in call.instructions and not call.context["anchored"]

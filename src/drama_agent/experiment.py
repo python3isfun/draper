@@ -170,6 +170,9 @@ class ExpTarget(BaseModel):
 class ExpSession(BaseModel):
     session_id: str
     kind: Literal["chat", "face"] = "chat"  # face: a Face Lab study (see face_lab.py)
+    # A study's subject (face_lab.SUBJECTS), from the picture it is for: how a photo is
+    # described and what its tests are drawn from. "face" for a study of no picture.
+    subject: Literal["face", "look", "set", "plan", "prop"] = "face"
     target: ExpTarget | None = None  # the design picture it is for; None: a free experiment
     title: str = "New chat"
     size: str = "auto"  # "auto": the current image's aspect ratio
@@ -996,11 +999,28 @@ class ExperimentRunner:
             ),
             None,
         )
+        session = self.repo.get_exp_session(turn.session_id)
+        subject = session.subject if session is not None else "face"
+        media = [MediaPart(label="<Photo>", path=path, mime=mime)]
+        # A study whose tests are drawn from <Picture 1> (the face, a first state): the
+        # writer sees it too, to write the edit around it.
+        anchored = False
+        if turn.references:
+            a_path, a_mime = self.ref_file(turn.references[0], variant="model")
+            if a_path is not None:
+                media.append(MediaPart(label="<Picture 1>", path=a_path, mime=a_mime))
+                anchored = True
         request = GenerationRequest(
             stage=DESCRIBE_STAGE,  # type: ignore[arg-type]
-            instructions=describe_instructions(turn.restrictive, turn.rating),
-            context={"hint": turn.text or None, "previous_prompt": previous},
-            media=[MediaPart(label="<Photo>", path=path, mime=mime)],
+            instructions=describe_instructions(turn.restrictive, turn.rating, subject, anchored),
+            context={
+                "hint": turn.text or None,
+                "previous_prompt": previous,
+                "subject": subject,
+                "anchored": anchored,
+                "design": self._design_of(session),
+            },
+            media=media,
         )
         out = await self.writer_client.generate(request, DescribeOutput)
         if not out.allowed:
@@ -1010,17 +1030,32 @@ class ExperimentRunner:
             raise ExpError("The description came back empty. Try again.")
         if len(prompt) > MAX_PROMPT_CHARS:
             raise ExpError(f"The description is longer than {MAX_PROMPT_CHARS} characters.")
-        if cited := cited_beyond(prompt, 0):  # copied from the edit examples
+        if cited := cited_beyond(prompt, 1 if anchored else 0):  # copied from the examples
             raise ExpError(
-                f"The description cites {', '.join(cited)}, but Face Lab tests send no "
-                "pictures. Retry for a new description."
+                f"The description cites {', '.join(cited)}, but these tests send "
+                f"{'only <Picture 1>' if anchored else 'no pictures'}. Retry for a new "
+                "description."
             )
         if reason := text_guard(prompt, turn.rating):
             raise GuardRefused(reason)
         turn.prompt, turn.reply = prompt, out.notes.strip()
         turn.prompt_model = request.model or "unknown"
-        # A photo copied from a picture marked as a likeness stays one (planned as True).
+        # A photo copied from a picture marked as a likeness stays one (planned as True);
+        # so does a description drawn on a face marked as one (<Picture 1>).
         turn.likeness = out.real_person or turn.likeness is True
+
+    def _design_of(self, session: Any) -> dict[str, Any] | None:
+        """What the story says the study's picture must show (its requirement's design
+        text), for the writer."""
+        t = session.target if session is not None else None
+        if t is None or t.keyframe:
+            return None
+        pkg = self.repo.get_package(t.package_id)
+        req = pkg and next((r for r in pkg.asset_requirements.items
+                            if r.requirement_id == t.requirement_id), None)  # fmt: skip
+        if req is None:
+            return None
+        return {"brief": req.design_brief, "must_keep": req.must_keep}
 
     async def _guard(self, turn: ExpTurn) -> None:
         """Raise GuardRefused unless the turn's prompt may be drawn. A prompt the writer

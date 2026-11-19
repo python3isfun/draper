@@ -187,6 +187,10 @@ function renderFace() {
   renderTests(v);
 }
 
+// A study's subject (face_lab.SUBJECTS): what its photo is described as.
+const STUDY_WHAT = { face: "face", look: "look", set: "set", plan: "set plan", prop: "prop" };
+const studyWhat = (v) => STUDY_WHAT[v.session.subject] || "face";
+
 function mountFace(v) {
   face.mounted = v.session.session_id;
   const d = faceDraft(face.sid);
@@ -195,7 +199,7 @@ function mountFace(v) {
   el.photo = h("div", { class: "card face-photo" });
   el.prompt = h("textarea", {
     rows: 14, class: "mono", "aria-label": "Prompt",
-    placeholder: "The photo's description appears here, or write your own description of the face. Edit it, then render to test it.",
+    placeholder: `The photo's description appears here, or write your own description of the ${studyWhat(v)}. Edit it, then render to test it.${v.anchor ? " Refer to the picture it is drawn from as <Picture 1>." : ""}`,
     oninput: (e) => { d.prompt = e.target.value; d.edited = true; updateFaceCount(); },
   });
   el.prompt.value = d.prompt;
@@ -263,9 +267,9 @@ function renderFaceHeader(v) {
   const del = h("button", { type: "button", class: "btn ghost small", disabled: faceBusy(v), onclick: deleteFace }, "Delete study");
   // Wrapped in h(), which drops false and null (replaceChildren would print them).
   face.el.header.replaceChildren(h("div", { class: "contents" },
-    s.target && h("p", { class: "small exp-target" }, "For ", h("strong", {}, s.target.label || "a face"),
-      ". Use as pick on a render makes it that face's pick. ",
-      h("button", { type: "button", class: "btn ghost small", title: "Move this study back to Scratch, tied to no face", onclick: () => unlinkSession(s.session_id, () => loadFaceStudy()) }, "Unlink")),
+    s.target && h("p", { class: "small exp-target" }, "For ", h("strong", {}, s.target.label || `a ${studyWhat(v)}`),
+      `. Use as pick on a render makes it that ${s.subject === "face" ? "face" : "picture"}'s pick. `,
+      h("button", { type: "button", class: "btn ghost small", title: "Move this study back to Scratch, tied to no picture", onclick: () => unlinkSession(s.session_id, () => loadFaceStudy()) }, "Unlink")),
     face.notice && h("p", { class: "small hint" }, face.notice),
     h("div", { class: "exp-head-row" }, title,
       h("span", { class: "muted small" }, `${describes(v).length} description${describes(v).length === 1 ? "" : "s"} · ${tests(v).length} test${tests(v).length === 1 ? "" : "s"}`),
@@ -298,7 +302,7 @@ function renderPhoto(v) {
   const ref = photoRef(v);
   const busy = faceBusy(v);
   const hint = h("input", {
-    value: d.hint, placeholder: "Optional focus, e.g. more detail on the eyes", "aria-label": "Describe hint",
+    value: d.hint, placeholder: `Optional focus, e.g. ${{ face: "more detail on the eyes", look: "the jacket's buttons and the shoes", set: "the window light and the floor", plan: "where the doors are", prop: "the worn corners and the print" }[v.session.subject] || "more detail"}`, "aria-label": "Describe hint",
     oninput: (e) => { d.hint = e.target.value; },
   });
   const swap = h("input", {
@@ -340,11 +344,12 @@ function renderPhoto(v) {
   const descs = [...describes(v)].reverse();
   // h() flattens nested lists and drops false/null; replaceChildren alone would print them.
   el.replaceChildren(h("div", { class: "contents" },
+    renderStudyAnchor(v),
     h("h3", {}, "Photo"),
     ref
       ? h("a", { href: refUrl(ref, "content"), target: "_blank", rel: "noopener", title: "Open full size" },
         h("img", { src: refUrl(ref), alt: "The photo being described", class: "face-photo-img" }), lookalikeTag(photoLikeness(v)), idTag(ref))
-      : h("p", { class: "muted" }, "No photo. Write the face's description in the Prompt box and render it from text alone, or add a photo to describe."),
+      : h("p", { class: "muted" }, `No photo. Write the ${studyWhat(v)}'s description in the Prompt box and render it${v.anchor ? "" : " from text alone"}, or add a photo to describe.`),
     ref && face.labels[ref] != null && h("span", { class: "exp-id" }, `#${face.labels[ref]}`),
     h("div", { class: "face-describe" },
       hint,
@@ -499,6 +504,20 @@ async function renderTest() {
   await loadFaceStudy();
 }
 
+// A study whose picture is drawn from another (a look from the face, a later state from
+// the first): that picture's pick is <Picture 1> of every test (and shown to the writer).
+function renderStudyAnchor(v) {
+  const a = v.anchor;
+  if (!a) return null;
+  return h("div", { class: "study-anchor" },
+    h("h3", {}, "Drawn from <Picture 1>"),
+    a.image_id
+      ? h("div", { class: "study-anchor-row" },
+          h("img", { src: a.thumb, alt: a.label }), idTag(`design:${a.image_id}`),
+          h("span", { class: "small" }, h("strong", {}, a.label), h("br"), h("span", { class: "muted" }, "its current pick: every test edits it, so the result keeps it")))
+      : h("p", { class: "small warn-text" }, `Pick an image for ${a.label} first: this study's tests are drawn from it.`));
+}
+
 function renderTests(v) {
   const list = [...tests(v)].reverse();
   const photo = photoRef(v);
@@ -532,7 +551,7 @@ function renderTests(v) {
                 h("span", { class: "muted small" }, `seed ${r.seed}`),
                 v.session.target && r.label != null && h("button", {
                   type: "button", class: "btn small", disabled: !!face.used[ref],
-                  title: `Make this the pick of ${v.session.target.label || "the face this study is for"}`,
+                  title: `Make this the pick of ${v.session.target.label || "the picture this study is for"}`,
                   onclick: (e) => faceUsePick(ref, r.label, e.currentTarget),
                 }, face.used[ref] ? "Now the pick" : "Use as pick")));
           }),
@@ -555,7 +574,7 @@ async function faceUsePick(ref, n, button) {
   try {
     await api(`/v1/experiments/${encodeURIComponent(face.view.session.session_id)}/use`, { method: "POST", body: JSON.stringify({ image: n }) });
     face.used[ref] = true;
-    face.notice = `#${n} is now the pick of ${face.view.session.target.label || "the face"}. Looks drawn from the old face are marked out of date; redraw them from the page.`;
+    face.notice = `#${n} is now the pick of ${face.view.session.target.label || "its picture"}. What was drawn from the old pick is marked out of date; redraw it from the page.`;
     if (face.host) benchRefreshPage();
   } catch (e) {
     face.notice = e.message;

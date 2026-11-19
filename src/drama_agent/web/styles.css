@@ -744,3 +744,18 @@ td.mono { white-space: nowrap; }
 
 /* A story prop on the Casting tab; the one opened from its item page is marked. */
 .prop-card.focused { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* A picture's history: its chats and studies, each with its newest image. */
+.lib-history { margin: 8px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+.lib-history-list { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 6px; }
+.lib-history-item { display: flex; gap: 8px; align-items: center; padding: 6px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); text-decoration: none; min-width: 0; }
+.lib-history-item:hover { border-color: var(--accent); background: var(--accent-soft); }
+.lib-history-item img, .lib-history-item .lib-noimg { width: 44px; height: 56px; object-fit: cover; border-radius: 4px; flex: 0 0 44px; background: var(--surface-2); }
+.lib-history-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.lib-history-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.lib-history-empty { margin: 6px 0; }
+
+/* A study's <Picture 1>: the pick its tests are drawn from. */
+.study-anchor { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.study-anchor-row { position: relative; display: flex; gap: 10px; align-items: center; }
+.study-anchor-row img { width: 72px; height: 96px; object-fit: cover; border-radius: 6px; background: var(--surface-2); }
