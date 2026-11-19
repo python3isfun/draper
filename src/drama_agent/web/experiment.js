@@ -20,6 +20,8 @@ const exp = {
   renaming: false,  // the title is being edited: polls leave the header alone
   labels: {},  // image numbers of the open chat, by reference (see labelsOf)
   likeness: {},  // results that show a real person's likeness, by reference
+  used: {},  // results made a design picture's pick from this chat, by reference
+  notice: "",  // what Use as pick did (shown under the chat's title)
 };
 
 const EXP_POLL_MS = 1000;
@@ -83,6 +85,8 @@ async function expRoute(sid) {
     exp.mounted = null;
     exp.error = "";
     exp.renaming = false;
+    exp.used = {};
+    exp.notice = "";
   }
   await loadExpSessions();
   if (!sid) {
@@ -291,7 +295,13 @@ function renderExpHeader(v) {
     input.focus();
     input.select();
   };
+  const target = s.target;
+  const job = target && jobOf(target.package_id);
   exp.el.header.replaceChildren(
+    target && h("p", { class: "small exp-target" }, "For ",
+      job ? h("a", { href: `#job=${encodeURIComponent(job.job_id)}&tab=casting` }, h("strong", {}, target.label || "a design picture")) : h("strong", {}, target.label || "a design picture"),
+      ". Use as pick on a result makes it that picture's pick."),
+    exp.notice && h("p", { class: "small hint" }, exp.notice),
     h("div", { class: "exp-head-row" },
       h("h2", { class: "exp-title", title: "Click to rename", onclick: rename }, s.title),
       h("span", { class: "muted small" }, `${v.turns.length} message${v.turns.length === 1 ? "" : "s"}`),
@@ -338,6 +348,17 @@ function renderTurn(t) {
         ` · ${timeAgo(t.created_at)}`),
     ),
   );
+  if (t.mode === "pick") {
+    // A chat started from a design picture's pick (docs/workbench.md): #1 is that picture.
+    return h("div", { class: "exp-turn" },
+      h("div", { class: "exp-msg bot" }, h("div", { class: "bubble" },
+        h("p", { class: "muted small" }, t.text, " Your next message changes it."),
+        h("div", { class: "exp-results" }, t.results.map((r, n) => expImage(`turn:${t.turn_id}:${n}`, current, "The current pick"))),
+        t.prompt && h("details", { class: "exp-prompt" },
+          h("summary", {}, "The prompt that made it"),
+          h("pre", {}, t.prompt),
+          h("button", { type: "button", class: "btn small", onclick: () => usePrompt(t.prompt) }, "Edit this prompt")))));
+  }
   if (t.mode === "upload") {
     return h("div", { class: "exp-turn" }, user,
       h("div", { class: "exp-msg bot" }, h("div", { class: "bubble muted small" },
@@ -399,9 +420,30 @@ function expImage(ref, current, label, result) {
         ? h("span", { class: "chip accent" }, "current")
         : h("button", { type: "button", class: "btn small", disabled: expBusy(exp.view), onclick: () => patchExp({ current: ref }) }, "Edit this one"),
       result && h("span", { class: "muted small" }, `seed ${result.seed}`),
+      result && exp.view.session.target && h("button", {
+        type: "button", class: "btn small", disabled: !!exp.used[ref],
+        title: `Make this the pick of ${exp.view.session.target.label || "the picture this chat is for"}`,
+        onclick: (e) => usePick(ref, e.currentTarget),
+      }, exp.used[ref] ? "Now the pick" : "Use as pick"),
       result && exp.likeness[ref] && h("span", { class: "chip warn", title: "Shows a real person's likeness: nothing sexualized can be made from it (in Restrictive mode, no romance or swimwear either)" }, "real-person likeness"),
     ),
   );
+}
+
+// Use as pick (docs/workbench.md): the image becomes the pick of the chat's design picture.
+// What was drawn from the old pick is then out of date (Redraw out-of-date on its page).
+async function usePick(ref, button) {
+  const n = exp.labels[ref];
+  if (n == null) return;
+  button.disabled = true;
+  try {
+    await api(`/v1/experiments/${encodeURIComponent(exp.view.session.session_id)}/use`, { method: "POST", body: JSON.stringify({ image: n }) });
+    exp.used[ref] = true;
+    exp.notice = `#${n} is now the pick of ${exp.view.session.target.label || "its picture"}. Pictures and keyframes drawn from the old one are marked out of date; redraw them from its page.`;
+  } catch (e) {
+    exp.notice = e.message;
+  }
+  renderExp();
 }
 
 async function retryTurn(t, button) {

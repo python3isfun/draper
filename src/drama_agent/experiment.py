@@ -10,6 +10,9 @@ prompt:
   prompts as written; nothing expands them).
 - "exact": the message is the prompt, sent as written (to try prompts by hand).
 - "upload": a message with images and no text only sets the current image.
+- "pick": the first turn of a chat started from a design slot's pick (docs/workbench.md):
+  nothing is drawn; its one result is a copy of the pick, with the pick's prompt and
+  likeness, so the chat builds on it like on any result.
 
 With no current image and no attachments, a message makes a new image (text to image).
 When a turn finishes, its first result becomes the current image; any result, or any
@@ -62,7 +65,7 @@ DEFAULT_SIZE = SIZES["1:1"]
 
 TurnStatus = Literal["pending", "running", "done", "failed"]
 # describe: Face Lab's photo-to-prompt step (draws nothing).
-TurnMode = Literal["rewrite", "exact", "upload", "describe"]
+TurnMode = Literal["rewrite", "exact", "upload", "describe", "pick"]
 PictureVariant = Literal["full", "model", "thumb"]
 
 
@@ -110,9 +113,20 @@ class ExpTurn(BaseModel):
     finished_at: datetime | None = None
 
 
+class ExpTarget(BaseModel):
+    """The design picture a chat or study works on (docs/workbench.md): a story's slot, by
+    the requirement and deliverable ids, which stay the same across revisions."""
+
+    package_id: str
+    requirement_id: str
+    deliverable_id: str
+    label: str = ""  # e.g. "Derek Blackwood, face"
+
+
 class ExpSession(BaseModel):
     session_id: str
     kind: Literal["chat", "face"] = "chat"  # face: a Face Lab study (see face_lab.py)
+    target: ExpTarget | None = None  # the design picture it is for; None: a free experiment
     title: str = "New chat"
     size: str = "auto"  # "auto": the current image's aspect ratio
     current: str | None = None  # the image the next message changes (a reference string)
@@ -126,6 +140,48 @@ class ExpError(ValueError):
 
 def new_session(title: str | None = None) -> ExpSession:
     return ExpSession(session_id=f"exp_{uuid.uuid4().hex[:12]}", title=title or "New chat")
+
+
+def pick_turn(
+    repo: Any,
+    media: MediaStore,
+    session: ExpSession,
+    pick: Any,
+    label: str,
+    likeness: bool | None,
+) -> ExpTurn:
+    """Start a chat from a design slot's pick (a GeneratedImage): a first turn that draws
+    nothing, whose one result (#1) is a copy of the pick with its prompt and the given
+    likeness (None: unknown, judged from the picture). It becomes the session's current
+    image. Copies files (blocking)."""
+    turn = ExpTurn(
+        turn_id=f"turn_{uuid.uuid4().hex[:12]}",
+        session_id=session.session_id,
+        index=1,
+        text=f"Started from the current pick of {label}." if label else "Started from the pick.",
+        mode="pick",
+        prompt=pick.prompt,
+        likeness=likeness,
+        status="done",
+        finished_at=utcnow(),
+    )
+    base = f"experiments/{session.session_id}/{turn.turn_id}_0"
+    rel = base + (Path(pick.file).suffix or ".jpg")
+    dest = media.path(rel)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(media.path(pick.file), dest)
+    thumb = None
+    if pick.thumb and media.path(pick.thumb).is_file():
+        thumb = base + "_thumb.jpg"
+        shutil.copyfile(media.path(pick.thumb), media.path(thumb))
+    [n] = repo.allocate_exp_labels(session.session_id, 1)
+    turn.results = [ExpResult(label=n, file=rel, thumb=thumb, content_type=pick.content_type,
+                              seed=0)]  # fmt: skip
+    repo.save_exp_turn(turn)
+    session.current = f"turn:{turn.turn_id}:0"
+    session.updated_at = utcnow()
+    repo.save_exp_session(session)
+    return turn
 
 
 def is_busy(turns: list[ExpTurn]) -> bool:
@@ -358,6 +414,12 @@ def picture_kind(ref: str, turns: list[ExpTurn]) -> str:
         return (
             "uploaded photo (judge whether it shows an identifiable real person, and whether "
             "this message takes their likeness or only clothing, a place or an object)"
+        )
+    made = next((t for t in turns if ref.startswith(f"turn:{t.turn_id}:")), None)
+    if made is not None and made.mode == "pick" and made.likeness is None:
+        return (
+            "the story's design picture, from a story with uploaded photos: judge from the "
+            "picture and the prompt that made it whether it shows a real person's likeness"
         )
     match likeness_of(ref, turns):
         case True:

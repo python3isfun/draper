@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
+from ..design.setup import package_has_uploads
+from ..design.slots import selected_image
 from ..experiment import SIZES as EXP_SIZES
 from ..experiment import (
     ExpError,
@@ -18,6 +21,7 @@ from ..experiment import (
     is_busy,
     known_refs,
     new_session,
+    pick_turn,
     plan_turn,
 )
 from ..face_lab import new_study, plan_describe, plan_test, source_photo
@@ -30,6 +34,8 @@ from .schemas import (
     FaceDescribeRequest,
     FaceTestRequest,
 )
+
+log = logging.getLogger(__name__)
 
 
 def register(app: FastAPI, ctx: Any) -> None:
@@ -47,13 +53,64 @@ def register(app: FastAPI, ctx: Any) -> None:
     @app.get("/v1/experiments", response_model=list[ExpSession])
     async def list_experiments(
         kind: Literal["chat", "face"] | None = None,
+        package_id: str | None = None,
+        requirement_id: str | None = None,
+        deliverable_id: str | None = None,
     ) -> list[ExpSession]:
-        return [s for s in repo.list_exp_sessions() if kind in (None, s.kind)]
+        """Chats and studies, optionally only those for a story or one of its design
+        pictures (docs/workbench.md)."""
+
+        def wanted(s: ExpSession) -> bool:
+            t = s.target
+            asks = (package_id, requirement_id, deliverable_id)
+            if not any(asks):
+                return True
+            return t is not None and all(
+                want in (None, have)
+                for want, have in zip(asks, (t.package_id, t.requirement_id, t.deliverable_id),
+                                      strict=True)
+            )  # fmt: skip
+
+        return [s for s in repo.list_exp_sessions() if kind in (None, s.kind) and wanted(s)]
 
     @app.post("/v1/experiments", status_code=201, response_model=ExpSession)
     async def create_experiment(req: ExpSessionCreate) -> ExpSession:
-        session = new_study(req.title) if req.kind == "face" else new_session(req.title)
+        title = req.title or (req.target.label if req.target else None)
+        session = new_study(title) if req.kind == "face" else new_session(title)
+        pick = None
+        if (target := req.target) is not None:
+            pkg = repo.get_package(target.package_id)
+            if pkg is None:
+                raise HTTPException(404, "story not found")
+            reqmt = next((r for r in pkg.asset_requirements.items
+                          if r.requirement_id == target.requirement_id), None)  # fmt: skip
+            if reqmt is None or not any(
+                d.deliverable_id == target.deliverable_id for d in reqmt.deliverables
+            ):
+                raise HTTPException(404, "no such design picture in this story")
+            session.target = target
+            if req.kind == "chat" and req.start_from_pick:
+                key = (target.requirement_id, target.deliverable_id)
+                found = selected_image(repo.list_images(pkg.package_id, pkg.revision_id), key)
+                pick = found if found is not None and found.file else None
         repo.save_exp_session(session)
+        if pick is not None:
+            # A design picture is marked as a likeness only when drawn from one; a story
+            # with uploaded photos is screened as if each picture might be one (the
+            # package_has_uploads rule). Its pick starts the chat as "unknown", so the
+            # chat's rules judge it like an upload rather than as fictional.
+            likeness = pick.likeness or (
+                None if package_has_uploads(repo, pkg.package_id) else False
+            )
+            try:
+                await asyncio.to_thread(
+                    pick_turn, repo, ctx.media, session, pick,
+                    session.target.label,  # type: ignore[union-attr]
+                    likeness,
+                )  # fmt: skip
+            except OSError:  # the pick's file is gone: the chat starts empty
+                log.warning("chat %s: pick %s not copied", session.session_id, pick.image_id,
+                            exc_info=True)  # fmt: skip
         return session
 
     def _start_face_turn(session: ExpSession, turn: ExpTurn) -> ExpTurn:

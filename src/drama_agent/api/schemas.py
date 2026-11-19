@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from ..experiment import (
     MAX_DRAWS,
     ExpSession,
+    ExpTarget,
     ExpTurn,
 )
 from ..experiment import MAX_PROMPT_CHARS as EXP_MAX_PROMPT_CHARS
@@ -174,6 +175,17 @@ class EditTakeRequest(BaseModel):
 class ExpSessionCreate(BaseModel):
     title: str | None = Field(None, max_length=120)
     kind: Literal["chat", "face"] = "chat"  # face: a Face Lab study
+    # The design picture it is for (docs/workbench.md); a chat starts from its pick.
+    target: ExpTarget | None = None
+    start_from_pick: bool = True
+
+
+class UsePickRequest(BaseModel):
+    """A chat's image (#N) as the pick for the design picture the chat is for."""
+
+    image: int = Field(..., ge=1)
+    # As in ImportImageRequest: None keeps the likeness the chat recorded.
+    likeness: bool | None = None
 
 
 class FaceDescribeRequest(BaseModel):

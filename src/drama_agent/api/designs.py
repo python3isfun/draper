@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 
 from ..content_guard import GuardRefused, screen, upload_guard
 from ..experiment import (
+    ExpSession,
     image_labels,
     likeness_of,
 )
@@ -52,6 +53,7 @@ from .schemas import (
     ImagesView,
     ImportImageRequest,
     NewTakeRequest,
+    UsePickRequest,
 )
 
 
@@ -195,38 +197,36 @@ def register(app: FastAPI, ctx: Any) -> None:
         notes = [f"Pick an image for {slot_title(pkg, k)} first." for k in waiting]
         return _images_view(pkg, notes + left_out)
 
-    @app.post(
-        "/v1/drama-packages/{package_id}/images/import",
-        status_code=201,
-        response_model=GeneratedImage,
-    )
-    async def import_image(package_id: str, req: ImportImageRequest) -> GeneratedImage:
-        """Use an Experiment image as the pick for a deliverable (e.g. a character's face).
-        Develop then draws the dependent deliverables (the looks) from it. Its likeness mark
-        carries over: images drawn from it get the stricter rules, and a likeness face's
-        looks worn in intimate scenes are not drawn."""
-        pkg = _package_or_404(package_id, req.revision_id)
-        job = _package_job(pkg.package_id, req.job_id, pkg.revision_id)
-        session = _exp_session_or_404(req.session_id)
+    async def _use_chat_image(
+        pkg: ProductionPackage,
+        job_id: str | None,
+        session: ExpSession,
+        image: int,
+        requirement_id: str,
+        deliverable_id: str | None,
+        likeness: bool | None,
+    ) -> GeneratedImage:
+        """Copy a chat's image #N into the story as the pick of a design picture."""
+        job = _package_job(pkg.package_id, job_id, pkg.revision_id)
         turns = _exp_turns(session.session_id)
-        ref = image_labels(turns).get(req.image)
+        ref = image_labels(turns).get(image)
         if ref is None:
-            raise HTTPException(404, f"no image #{req.image} in this chat")
+            raise HTTPException(404, f"no image #{image} in this chat")
         reqmt = next(
-            (r for r in pkg.asset_requirements.items if r.requirement_id == req.requirement_id),
+            (r for r in pkg.asset_requirements.items if r.requirement_id == requirement_id),
             None,
         )
         if reqmt is None or not reqmt.deliverables:
-            raise HTTPException(404, f"requirement {req.requirement_id} not found")
-        deliverable = req.deliverable_id or reqmt.deliverables[0].deliverable_id
+            raise HTTPException(404, f"requirement {requirement_id} not found")
+        deliverable = deliverable_id or reqmt.deliverables[0].deliverable_id
         path, mime = experiments.ref_file(ref, variant="full")
         if path is None:
-            raise HTTPException(409, f"image #{req.image} is not available")
+            raise HTTPException(409, f"image #{image} is not available")
         recorded = likeness_of(ref, turns)
-        likeness = (recorded is not False) if req.likeness is None else req.likeness
+        likeness = (recorded is not False) if likeness is None else likeness
         made = next((t for t in turns if ref.startswith(f"turn:{t.turn_id}:")), None)
         ext = "png" if mime == "image/png" else "jpg"
-        rel = f"generated/{pkg.package_id}/import_{session.session_id}_{req.image}.{ext}"
+        rel = f"generated/{pkg.package_id}/import_{session.session_id}_{image}.{ext}"
         data = await asyncio.to_thread(path.read_bytes)
         dest = media.path(rel)
         await asyncio.to_thread(dest.parent.mkdir, parents=True, exist_ok=True)
@@ -241,7 +241,7 @@ def register(app: FastAPI, ctx: Any) -> None:
                 content_type=mime,
                 prompt=made.prompt if made else "",
                 likeness=likeness,
-                imported_from=f"experiment {session.session_id} #{req.image}",
+                imported_from=f"experiment {session.session_id} #{image}",
                 job_id=job and job.job_id,
             )
         except KeyError as exc:
@@ -249,6 +249,33 @@ def register(app: FastAPI, ctx: Any) -> None:
         repo.save_image(img)
         repo.set_selected(img.image_id)
         return repo.get_image(img.image_id)
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/images/import",
+        status_code=201,
+        response_model=GeneratedImage,
+    )
+    async def import_image(package_id: str, req: ImportImageRequest) -> GeneratedImage:
+        """Use an Experiment image as the pick for a deliverable (e.g. a character's face).
+        Develop then draws the dependent deliverables (the looks) from it. Its likeness mark
+        carries over: images drawn from it get the stricter rules, and a likeness face's
+        looks worn in intimate scenes are not drawn."""
+        pkg = _package_or_404(package_id, req.revision_id)
+        session = _exp_session_or_404(req.session_id)
+        return await _use_chat_image(pkg, req.job_id, session, req.image, req.requirement_id,
+                                     req.deliverable_id, req.likeness)  # fmt: skip
+
+    @app.post("/v1/experiments/{session_id}/use", status_code=201, response_model=GeneratedImage)
+    async def use_as_pick(session_id: str, req: UsePickRequest) -> GeneratedImage:
+        """The workbench's Use as pick (docs/workbench.md): a chat's image #N becomes the
+        pick of the design picture the chat is for, in the story's latest revision."""
+        session = _exp_session_or_404(session_id)
+        t = session.target
+        if t is None:
+            raise HTTPException(409, "this chat isn't for a design picture")
+        pkg = _package_or_404(t.package_id, None)
+        return await _use_chat_image(pkg, None, session, req.image, t.requirement_id,
+                                     t.deliverable_id, req.likeness)  # fmt: skip
 
     @app.post(
         "/v1/drama-packages/{package_id}/images/takes",

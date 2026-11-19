@@ -651,3 +651,4 @@ td.mono { white-space: nowrap; }
 .lib-match { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .lib-card .chip { white-space: normal; max-width: 100%; }
 #lib-story { margin-top: 8px; }
+.exp-target { margin: 0 0 6px; }

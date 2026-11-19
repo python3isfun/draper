@@ -391,6 +391,10 @@ async function libFetchDesigns() {
   const designs = {};
   refs.forEach((r, i) => { if (got[i]) designs[imagesKey(r)] = got[i]; });
   lib.designs = designs;
+  // The chats tied to the page's pictures (docs/workbench.md), for each slot's list.
+  const chats = await Promise.all(refs.map((r) =>
+    api(`/v1/experiments?${new URLSearchParams({ package_id: r.package_id })}`).catch(() => [])));
+  lib.chats = chats.flat();
   // While anything on the page is drawing, look again in a moment.
   clearTimeout(lib.designTimer);
   if (Object.values(designs).some((v) => v.queued > 0)) {
@@ -429,12 +433,37 @@ function libDesign(part) {
     const from = parent && v.slots.find((x) => keyOf(x) === parent);
     const blocked = parent && !picked.has(parent);
     const takes = v.options.filter((o) => keyOf(o) === keyOf(slot)).length;
-    return stickyDetails(`lib:${keyOf(slot)}`, `Takes and draws · ${slot.view} · ${count(takes, "take", "takes")}${foreign ? " · in its own story" : ""}`,
+    return [libWorkbench(part, slot, slots.length > 1), stickyDetails(`lib:${keyOf(slot)}`, `Takes and draws · ${slot.view} · ${count(takes, "take", "takes")}${foreign ? " · in its own story" : ""}`,
       renderTakeRows(v, slot),
       blocked
         ? h("p", { class: "muted small" }, `Drawn from ${from ? `${from.entity}${from.variant ? ` (${from.variant})` : ""}, ${from.view}` : "another picture"}: pick an image for it first.`)
-        : renderNewTake(ref, slot, { jobId: job && job.job_id }));
-  });
+        : renderNewTake(ref, slot, { jobId: job && job.job_id }))];
+  }).flat();
+}
+
+// The workbench (docs/workbench.md): develop a picture in a chat that starts from its pick;
+// a result's "Use as pick" makes it this picture's pick. The slot's chats are listed.
+function libWorkbench(part, slot, sayView) {
+  const mine = (lib.chats || []).filter((s) => s.target && s.target.package_id === part.origin_package_id
+    && s.target.requirement_id === slot.requirement_id && s.target.deliverable_id === slot.deliverable_id);
+  const label = `${slot.entity}${slot.variant ? ` (${slot.variant})` : ""}, ${slot.view}`;
+  const develop = async (button) => {
+    button.disabled = true;
+    try {
+      const s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({
+        target: { package_id: part.origin_package_id, requirement_id: slot.requirement_id, deliverable_id: slot.deliverable_id, label } }) });
+      goExp(s.session_id);
+    } catch (e) {
+      button.disabled = false;
+      lib.error = e.message;
+      renderLibrary();
+    }
+  };
+  return h("div", { class: "design-row small" },
+    h("button", { type: "button", class: "btn small", title: "Change this picture in a chat with the image model, starting from its pick", onclick: (e) => develop(e.currentTarget) }, sayView ? `Develop the ${slot.view} in a chat` : "Develop in a chat"),
+    mine.length > 0 && h("span", { class: "muted" }, "Chats:"),
+    mine.slice(0, 6).map((s) => h("a", { href: `#${s.kind === "face" ? "face" : "exp"}=${encodeURIComponent(s.session_id)}`, title: `${s.kind === "face" ? "Face Lab study" : "Chat"}, updated ${timeAgo(s.updated_at)}` }, s.title)),
+    mine.length > 6 && h("span", { class: "muted" }, `and ${mine.length - 6} more`));
 }
 
 // Draws per new take, and draft or full size (shared with the Casting tab's controls).
