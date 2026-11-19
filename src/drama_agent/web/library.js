@@ -14,6 +14,7 @@
 const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "", story: "", timer: null, redrawing: "", scratch: [],
   designs: {}, designTimer: null,
   part: null, slot: null,  // the layer shown: a look, state or item (or the face), one of its pictures
+  shot: null,  // ... or one of the shots it is in, with their keyframes
   adding: false, newDraft: {}, newError: "", stale: false };  // "+ New look"  // design board data per story revision on the page
 // Open editors by asset id; typed text is kept in `drafts` until saved or cancelled.
 const libEdit = { open: new Set(), drafts: {}, errors: {}, notes: {}, saving: new Set() };
@@ -43,9 +44,10 @@ async function libRoute(param) {
   const id = kindOfId(param || "") ? param : null;
   const hash = new URLSearchParams(location.hash.slice(1));
   const [part, slot] = id ? [hash.get("part"), hash.get("part") && hash.get("slot")] : [null, null];
+  const shot = part && !slot ? hash.get("shot") : null;  // a shot's keyframes, from a look or state
   // Another layer of the asset on the page: shown from what is loaded, then refreshed.
   if (id && lib.id === id && lib.view && !lib.stale) {
-    Object.assign(lib, { part, slot, adding: false });
+    Object.assign(lib, { part, slot, shot, adding: false });
     renderLibrary();
     window.scrollTo(0, 0);
     libReload();
@@ -56,7 +58,7 @@ async function libRoute(param) {
     Object.assign(libEdit, { open: new Set(), drafts: {}, errors: {}, notes: {} });
     lib.designs = {};
   }
-  Object.assign(lib, { part, slot, adding: false, stale: false });
+  Object.assign(lib, { part, slot, shot, adding: false, stale: false });
   clearTimeout(lib.timer);
   clearTimeout(lib.designTimer);
   lib.id = id;
@@ -236,7 +238,7 @@ function libVariant(id, ownerId) {
 // (the character itself for its face); "&slot=<deliverable>" one picture of it, with its
 // takes. Each layer links to the next; a breadcrumb leads back.
 
-const libHref = (id, part, slot) => `#lib=${encodeURIComponent(id)}${part ? `&part=${encodeURIComponent(part)}` : ""}${slot ? `&slot=${encodeURIComponent(slot)}` : ""}`;
+const libHref = (id, part, slot, shot) => `#lib=${encodeURIComponent(id)}${part ? `&part=${encodeURIComponent(part)}` : ""}${slot ? `&slot=${encodeURIComponent(slot)}` : ""}${shot ? `&shot=${encodeURIComponent(shot)}` : ""}`;
 
 // Everything on the page that has pictures: the character itself (its face), its looks or
 // states, its items.
@@ -252,11 +254,12 @@ function libPartTitle(a, part) {
   return `${kind}: ${libVariant(part.origin_entity_id, part.kind === "item" ? "" : a.origin_entity_id)}`;
 }
 
-function libCrumbs(a, part, slot) {
+function libCrumbs(a, part, slot, shotId) {
   const meta = LIB_KINDS[a.kind];
   const trail = [[`#lib=${meta.path}`, meta.plural], [libHref(a.asset_id), a.name]];
   if (part) trail.push([libHref(a.asset_id, part.asset_id), libPartTitle(a, part)]);
   if (slot) trail.push([null, slot.view]);
+  if (shotId) trail.push([null, `Shot ${shotId} · keyframes`]);
   return h("nav", { class: "crumbs small", "aria-label": "Where you are" }, trail.map(([href, label], i) => [
     i > 0 && h("span", { class: "muted", "aria-hidden": "true" }, " › "),
     href && i < trail.length - 1 ? h("a", { href }, label) : h("strong", { "aria-current": "page" }, label)]));
@@ -360,7 +363,91 @@ function renderLibPart(a, part) {
             h("strong", {}, slot.view),
             h("span", { class: "muted small" }, `${count(n, "take", "takes")}${pick?.picked ? " · picked" : ""}`),
             pick && pick.outdated.length > 0 && h("span", { class: "chip warn", title: pick.outdated.join("; ") }, "out of date"));
-        })));
+        })),
+    !self && libKeyframes(a, part));
+}
+
+// -- Keyframes of the shots a look (or state, or item) is in ----------------------------
+
+// The shots it is in, in its own story (a linked story's shots are on that story's page).
+function libShotIds(part) {
+  const own = (part.used_in || []).find((u) => u.package_id === part.origin_package_id);
+  return own ? own.shots : [];
+}
+
+// The story's keyframe board (shots.js keeps one story's at a time); null while loading.
+function libFrames(part) {
+  if (!part.origin_revision_id) return null;
+  const pkg = { package_id: part.origin_package_id, revision_id: part.origin_revision_id };
+  if (frames.key !== framesKey(pkg)) loadFrames(pkg);
+  else if (frames.view && frames.view.busy && !frames.timer && !frames.loading) loadFrames(pkg);  // resume polling
+  return frames.key === framesKey(pkg) ? frames.view : null;
+}
+
+// One row per shot: each cut's approved keyframe (or its newest draw, dashed), how many
+// are approved, and a link to the shot's keyframes, where they are drawn and developed.
+function libKeyframes(a, part) {
+  const ids = libShotIds(part);
+  if (!ids.length) return [h("h3", {}, "Keyframes"), h("p", { class: "muted small" }, "In no shot yet.")];
+  const v = libFrames(part);
+  const shots = v ? ids.map((id) => v.shots.find((s) => s.shot_id === id)).filter(Boolean) : [];
+  const approved = shots.reduce((n, s) => n + s.sub_shots.filter((x) => x.approved).length, 0);
+  const total = shots.reduce((n, s) => n + s.sub_shots.length, 0);
+  return [
+    h("div", { class: "section-head" }, h("h3", {}, `Keyframes (${count(ids.length, "shot", "shots")})`),
+      v && h("span", { class: `chip ${approved === total ? "ok" : "warn"}` }, `${approved}/${total} approved`)),
+    !v ? h("p", { class: "muted small" }, frames.error || "Loading keyframes…")
+      : h("div", { class: "kf-rows" }, shots.map((s) => h("a", { href: libHref(a.asset_id, part.asset_id, null, s.shot_id), class: "card kf-row", title: `Open ${s.shot_id}: review and develop its keyframes` },
+          h("div", { class: "kf-row-head" }, h("strong", {}, s.shot_id), h("span", { class: "muted small" }, ` · ${s.place}`),
+            s.sub_shots.some((x) => (x.outdated || []).length) && h("span", { class: "chip warn" }, "out of date"),
+            s.sub_shots.some((x) => x.takes.some((t) => !["done", "failed", "paused"].includes(t.status))) && h("span", { class: "chip info" }, "drawing…")),
+          h("p", { class: "small muted kf-row-action" }, s.action),
+          h("div", { class: "kf-thumbs" }, s.sub_shots.map((x) => libFrameThumb(x, s.sub_shots.length)))))),
+  ];
+}
+
+function libFrameThumb(sub, total) {
+  const [aid, an] = sub.approved || [];
+  const ap = aid && sub.takes.find((t) => t.take_id === aid);
+  const done = sub.takes.flatMap((t) => t.results.filter((d) => d.status === "done").map((d) => [t, d]));
+  const newest = done.reduce((m, x) => (!m || x[0].created_at > m[0].created_at ? x : m), null);
+  const [take, n] = ap ? [ap, an] : newest ? [newest[0], newest[1].n] : [];
+  const label = total > 1 ? `Cut ${sub.index}` : "Keyframe";
+  return h("figure", { class: `kf-thumb${ap ? " approved" : ""}` },
+    take ? h("img", { src: drawUrl(take, n), alt: label, loading: "lazy" }) : h("div", { class: "lib-noimg" }, "none yet"),
+    h("figcaption", { class: "small" }, label, " · ", ap ? "✓ approved" : take ? "not approved" : sub.missing.length ? "waiting" : "not drawn",
+      ` · ${count(sub.takes.length, "round", "rounds")}`));
+}
+
+// A shot's keyframes, from a look's (or state's) page: the Keyframes tab's shot card (plan,
+// scene reading, each cut with its approved keyframe, chats, rounds and a new take).
+function renderLibShot(a, part, shotId) {
+  const v = libFrames(part);
+  const shot = v && v.shots.find((s) => s.shot_id === shotId);
+  const pkg = frames.pkg;
+  const job = jobOf(part.origin_package_id);
+  return h("div", { class: "lib-asset" },
+    libCrumbs(a, part, null, shotId),
+    h("section", { class: "card" },
+      h("div", { class: "section-head" }, h("h2", {}, `Shot ${shotId}`),
+        job && h("a", { class: "btn ghost small", href: `#job=${encodeURIComponent(job.job_id)}&tab=keyframes`, title: "Every shot's keyframes, in the story" }, "All keyframes of the story")),
+      h("p", { class: "muted small" }, "Review each cut's keyframe, approve a draw, draw another round, or develop a draw in a chat: a chat result's Use as keyframe brings it back here, approved."),
+      v && libFrameControls(v),
+      frames.error && h("p", { class: "small warn-text" }, frames.error)),
+    !v ? h("p", { class: "muted" }, "Loading keyframes…")
+      : !shot ? h("p", {}, `No shot ${shotId} in this story any more.`)
+      : renderShotCard(pkg, shot));
+}
+
+// Draws and rounds for new keyframe takes, and the image provider (as on the Keyframes tab).
+function libFrameControls(v) {
+  return h("div", { class: "design-row small" },
+    h("label", {}, "Draws ", numberSelect(frames.draws, 4, (n) => { frames.draws = n; }, "Draws per round")),
+    h("label", {}, " Rounds ", numberSelect(frames.rounds, 3, (n) => { frames.rounds = n; }, "Automatic rounds")),
+    Object.keys(v.providers || {}).length > 1 && h("label", {}, " Drawn with ",
+      h("select", { "aria-label": "Image provider", onchange: (e) => { frames.provider = e.target.value; } },
+        Object.entries(v.providers).map(([name, model]) =>
+          h("option", { value: name, title: model, selected: (frames.provider || v.default_provider) === name }, providerName(name))))));
 }
 
 // Level 3: one picture: its takes and draws, pictures brought in, a new take, the workbench.
@@ -377,6 +464,7 @@ function renderLibSlot(a, part, slot) {
     h("section", { class: "card" },
       h("div", { class: "section-head" }, h("h2", {}, `${libPartTitle(a, part)} · ${slot.view}`),
         foreign && h("span", { class: "chip", title: "This look comes from a story linked to this character" }, "in its own story")),
+      libPickHero(v, slot, `${libPartTitle(a, part)} · ${slot.view}`),
       libDesignControls(),
       libWorkbench(part, slot, false)),
     h("h3", {}, "Takes"),
@@ -389,6 +477,37 @@ function renderLibSlot(a, part, slot) {
     parent && !picked.has(parent)
       ? h("p", { class: "muted small" }, `Drawn from ${from ? `${from.entity}${from.variant ? ` (${from.variant})` : ""}, ${from.view}` : "another picture"}: pick an image for it first.`)
       : renderNewTake(ref, slot, { jobId: job && job.job_id }));
+}
+
+// The picture's current pick, large, at the top of its page: which take and draw it is (or
+// where it was brought in from), and whether it is out of date. With no pick, the newest
+// finished draw stands in (as everywhere else) and says so.
+function libPickHero(v, slot, title) {
+  const done = v.images.filter((i) => keyOf(i) === keyOf(slot) && i.status === "done");
+  const chosen = done.filter((i) => i.selected);
+  const newest = (xs) => xs.reduce((m, i) => (!m || i.created_at > m.created_at ? i : m), null);
+  const img = newest(chosen) || newest(done);
+  if (!img) return h("div", { class: "pick-hero empty" }, h("span", { class: "muted" }, "No picture yet: start with a new take below."));
+  const picked = chosen.length > 0;
+  // A full-size render stands for the draft it finishes.
+  const base = img.finalizes ? v.images.find((i) => i.image_id === img.finalizes) || img : img;
+  const take = base.option_id && v.options.find((o) => o.option_id === base.option_id);
+  const source = take
+    ? `Take ${take.index}${take.label && take.label !== `Take ${take.index}` ? `: ${take.label}` : ""}, draw ${base.draw}${img.finalizes ? " (full size)" : ""}`
+    : libSource(img);
+  const stale = (v.outdated || {})[img.image_id] || [];
+  return h("div", { class: `pick-hero${picked ? "" : " unpicked"}` },
+    h("button", { type: "button", class: "ref-open", "aria-label": `Enlarge the pick of ${title}`,
+      onclick: () => enlarge([{ src: thumbUrl(img, "content"), caption: `${title} · ${picked ? "pick" : "newest draw"}`, likeness: img.likeness, title: img.size }]) },
+      h("img", { src: thumbUrl(img), alt: `${title}, current pick` }), lookalikeTag(img.likeness), idTag(`design:${img.image_id}`)),
+    h("div", { class: "pick-hero-text" },
+      h("span", { class: `chip ${picked ? "ok" : "warn"}` }, picked ? "✓ Current pick" : "No pick yet"),
+      h("strong", {}, source),
+      !picked && h("p", { class: "small muted" }, "Showing the newest draw; looks, states and keyframes are drawn from it until you pick one below."),
+      picked && h("p", { class: "small muted" }, "What is drawn from this picture uses it. Click another draw below to change the pick."),
+      stale.length > 0 && h("p", { class: "small warn-text" }, `Out of date: ${stale.join("; ")}`),
+      h("span", { class: "small muted" }, [img.size, img.model, timeAgo(img.finished_at || img.created_at)].filter(Boolean).join(" · ")),
+      h("a", { href: thumbUrl(img, "content"), target: "_blank", rel: "noopener", class: "small" }, "Open full size")));
 }
 
 // "keyframe take_1:0 (shot sh_01_02_01)" or "experiment exp_1 #3": where a picture came from.
@@ -418,6 +537,7 @@ function renderLibAsset(a) {
   const part = lib.part && libParts(a).find((p) => p.asset_id === lib.part);
   if (lib.part && !part) return h("section", { class: "card" }, libCrumbs(a), h("p", {}, "That look, state or item isn't on this page any more."));
   if (!part) return renderLibTop(a);
+  if (lib.shot) return renderLibShot(a, part, lib.shot);
   if (!lib.slot) return renderLibPart(a, part);
   const { v, slots } = libSlotData(part);
   if (!v) return h("div", { class: "lib-asset" }, libCrumbs(a, part), h("p", { class: "muted" }, "Loading takes…"));

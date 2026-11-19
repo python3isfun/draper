@@ -53,8 +53,11 @@ function closeBench({ refresh = true } = {}) {
 // The page under the panel shows what changed: a new pick, what is now out of date, the
 // picture's chats.
 function benchRefreshPage() {
-  if (lib.kind && lib.id) libReload();
-  if (lib.kind) libLoadScratch();  // a chat may have been made, renamed or deleted
+  const inLib = ["chars", "sets"].includes(document.body.dataset.mode);
+  if (inLib && lib.kind && lib.id) libReload();
+  if (inLib && lib.kind) libLoadScratch();  // a chat may have been made, renamed or deleted
+  // A keyframe on show (the story's Keyframes tab, or a shot on a look's page).
+  if (frames.pkg && (inLib || state.tab === "keyframes")) loadFrames(frames.pkg);
 }
 
 // "From a photo" on a face: upload a reference photo, start a study for that face (or, with

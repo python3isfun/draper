@@ -205,7 +205,8 @@ window.addEventListener("hashchange", route);
 
 async function route() {
   // The workbench panel belongs to the page it was opened on.
-  closeBench({ refresh: false });
+  // (A hash change while the page loads may come before bench.js has run.)
+  if (typeof closeBench === "function") closeBench({ refresh: false });
   const params = new URLSearchParams(location.hash.slice(1));
   if (params.has("lib")) {
     // Characters and Sets: the asset library (library.js).
@@ -1247,6 +1248,7 @@ function renderTakeRows(v, slot) {
       h("div", { class: "take-head" },
         h("strong", {}, o.status === "pending" ? `Take ${o.index}: being written…`
           : o.label && o.label !== `Take ${o.index}` ? `Take ${o.index}: ${o.label}` : `Take ${o.index}`),
+        draws.some((i) => i.selected && i.status === "done") && h("span", { class: "chip ok" }, "✓ has the pick"),
         o.direction && h("span", { class: "chip" }, `“${o.direction}”`),
         o.status === "edited" && h("span", { class: "chip" }, "your prompt"),
         h("button", { type: "button", class: "btn ghost small",

@@ -257,6 +257,7 @@ def create_app(
         package_or_404=_package_or_404,
         package_job=_package_job,
         file_response=_file,
+        experiments=experiments,
     )
 
     # Last: its /v1/drama-packages/{package_id}/{sheet} route matches what the routes

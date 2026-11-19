@@ -277,8 +277,9 @@ def register(app: FastAPI, ctx: Any) -> None:
         pick of the design picture the chat is for, in the story's latest revision."""
         session = _exp_session_or_404(session_id)
         t = session.target
-        if t is None:
-            raise HTTPException(409, "this chat isn't for a design picture")
+        if t is None or t.keyframe:
+            raise HTTPException(409, "this chat isn't for a design picture"
+                                + (" (it's a keyframe's: Use as keyframe)" if t else ""))  # fmt: skip
         pkg = _package_or_404(t.package_id, None)
         return await _use_chat_image(pkg, None, session, req.image, t.requirement_id,
                                      t.deliverable_id, req.likeness)  # fmt: skip

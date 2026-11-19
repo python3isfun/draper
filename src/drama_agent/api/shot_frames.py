@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import uuid
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -11,6 +13,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from ..content_guard import GuardRefused, screen
+from ..design.setup import make_thumb
 from ..images import PICTURE_OUTDATED, story_rating
 from ..media import MediaStore
 from ..models import ProductionPackage
@@ -25,6 +28,7 @@ from ..shot_frames import (
     MAX_ROUNDS,
     MAX_SUB_SHOTS,
     MIN_CLIP_S,
+    FrameDraw,
     NotReady,
     PlanProblems,
     PromptVersion,
@@ -51,6 +55,7 @@ from ..shot_frames import (
     sub_shot_for,
 )
 from ..shot_reading import SceneReading, candidates, scene_shots
+from .schemas import UseKeyframeRequest
 
 
 class KeyframeRequest(BaseModel):
@@ -151,6 +156,7 @@ def register(
     package_or_404: Callable[[str, str | None], ProductionPackage],
     package_job: Callable[..., Any],
     file_response: Callable[[str, str], FileResponse],
+    experiments: Any = None,
 ) -> None:
     def _board(pkg: ProductionPackage) -> KeyframeBoard:
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
@@ -629,6 +635,77 @@ def register(
                     )
                 )
         return out
+
+    @app.post("/v1/experiments/{session_id}/use-keyframe", status_code=201, response_model=ShotTake)
+    async def use_as_keyframe(session_id: str, req: UseKeyframeRequest) -> ShotTake:
+        """A keyframe chat's image #N as a take of the sub-shot the chat is for
+        (docs/library-layers.md): one draw, the chat's image, approved unless `approve` is
+        false, then checked like any draw. It takes the newest take of that sub-shot drawn
+        for the plan in force as its pattern (references, design, size), so it can stand
+        where a drawn keyframe stands: approved, exported, and drawn from by the next cut."""
+        from ..experiment import image_labels, likeness_of
+        from ..shots.runner import judge_view
+
+        session = repo.get_exp_session(session_id)
+        if session is None:
+            raise HTTPException(404, "chat not found")
+        t = session.target
+        if t is None or not t.keyframe:
+            raise HTTPException(409, "this chat isn't for a keyframe")
+        pkg = _writable(t.package_id, None)
+        shot = _shot(pkg, t.shot_id)  # type: ignore[arg-type]
+        _, plan = _plan(pkg, shot)
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        if is_busy(takes, shot.shot_id, t.sub_shot):
+            raise HTTPException(409, f"sub-shot {t.sub_shot} of {shot.shot_id} is still being made")
+        base = max((x for x in takes if x.shot_id == shot.shot_id and x.sub_shot == t.sub_shot
+                    and current_sub(pkg, shot, plan, x) is not None),
+                   key=lambda x: x.created_at, default=None)  # fmt: skip
+        if base is None:
+            raise HTTPException(409, f"draw a take of sub-shot {t.sub_shot} first: a chat's "
+                                "image takes its references from one")  # fmt: skip
+        if req.approve and t.sub_shot and t.sub_shot > 1:
+            prev = approved_take(takes, shot.shot_id, t.sub_shot - 1)
+            if prev is None or (
+                base.references[:1] and base.references[0].ref_id != frame_ref(prev)
+            ):
+                raise HTTPException(409, f"approve a keyframe of sub-shot {t.sub_shot - 1} "
+                                    "and draw a take from it first")  # fmt: skip
+        turns = repo.list_exp_turns(session_id)
+        ref = image_labels(turns).get(req.image)
+        if ref is None:
+            raise HTTPException(404, f"no image #{req.image} in this chat")
+        path, mime = experiments.ref_file(ref, variant="full")
+        if path is None:
+            raise HTTPException(409, f"image #{req.image} is not available")
+        made = next((x for x in turns if ref.startswith(f"turn:{x.turn_id}:")), None)
+        take_id = f"stk_{uuid.uuid4().hex[:12]}"
+        ext = ".png" if mime == "image/png" else ".jpg"
+        rel = f"keyframes/{pkg.package_id}/{take_id}_0{ext}"
+        dest = media.path(rel)
+        await asyncio.to_thread(dest.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(dest.write_bytes, await asyncio.to_thread(path.read_bytes))
+        thumb = await asyncio.to_thread(make_thumb, media, rel)
+        view = await asyncio.to_thread(judge_view, media, rel)  # what the check sees
+        recorded = likeness_of(ref, turns)
+        take = base.model_copy(update={
+            "take_id": take_id, "run_id": take_id, "round": 1, "status": "checking",
+            "prompt": made.prompt if made else "", "prompt_source": "user", "prompt_model": None,
+            "notes": "", "prompt_version": None, "warnings": [], "direction": None,
+            "previous_prompt": None, "fixes": [], "auto": False, "draws": 1, "seeds": [0],
+            "results": [FrameDraw(n=0, seed=0, file=rel, thumb=thumb, view=view,
+                                  content_type=mime, model="chat")],
+            "approved": None, "refused": False, "error": None,
+            # Unknown counts as a likeness, as for a chat image used as a pick.
+            "likeness": base.likeness or recorded is not False,
+            "imported_from": f"experiment {session_id} #{req.image}",
+            "created_at": utcnow(), "finished_at": utcnow(),
+        })  # fmt: skip
+        repo.save_shot_take(take)
+        if req.approve:
+            take = repo.approve_shot_draw(take.take_id, 0)
+        runner.start_check(take.take_id, recheck=False)
+        return take
 
     @app.delete("/v1/shot-takes/{take_id}/approve", response_model=ShotTake)
     async def withdraw_approval(take_id: str) -> ShotTake:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
@@ -31,9 +32,11 @@ from ..experiment import (
 )
 from ..face_lab import new_study, plan_describe, plan_test, source_photo
 from ..image_ids import resolve as resolve_image
+from ..image_ids import story_likeness
 from ..media import MediaError
 from ..models import ProductionPackage
 from ..models.package import utcnow
+from ..shot_frames import plan_of
 from .schemas import (
     ExpSessionCreate,
     ExpSessionItem,
@@ -73,20 +76,22 @@ def register(app: FastAPI, ctx: Any) -> None:
         package_id: str | None = None,
         requirement_id: str | None = None,
         deliverable_id: str | None = None,
+        shot_id: str | None = None,
     ) -> list[ExpSessionItem]:
-        """Chats and studies, most recently active first, optionally only those for a story
-        or one of its design pictures (docs/workbench.md). Each says how many messages it
-        has."""
+        """Chats and studies, most recently active first, optionally only those for a story,
+        one of its design pictures (docs/workbench.md) or one of its shots' keyframes. Each
+        says how many messages it has."""
 
         def wanted(s: ExpSession) -> bool:
             t = s.target
-            asks = (package_id, requirement_id, deliverable_id)
+            asks = (package_id, requirement_id, deliverable_id, shot_id)
             if not any(asks):
                 return True
             return t is not None and all(
                 want in (None, have)
-                for want, have in zip(asks, (t.package_id, t.requirement_id, t.deliverable_id),
-                                      strict=True)
+                for want, have in zip(
+                    asks, (t.package_id, t.requirement_id, t.deliverable_id, t.shot_id),
+                    strict=True)
             )  # fmt: skip
 
         return [
@@ -96,17 +101,10 @@ def register(app: FastAPI, ctx: Any) -> None:
         ]
 
     def _untouched(target: ExpTarget, pick_id: str | None, kind: str = "chat") -> ExpSession | None:
-        """The picture's newest chat (or face study) with no message yet, started from this
-        pick (or, with no pick, from nothing)."""
+        """The picture's (or keyframe's) newest chat (or face study) with no message yet,
+        started from this pick or draw (or, with none, from nothing)."""
         for s in repo.list_exp_sessions():
-            if (
-                s.kind != kind
-                or s.target is None
-                or (
-                    (s.target.package_id, s.target.requirement_id, s.target.deliverable_id)
-                    != (target.package_id, target.requirement_id, target.deliverable_id)
-                )
-            ):
+            if s.kind != kind or s.target is None or s.target.key != target.key:
                 continue
             turns = repo.list_exp_turns(s.session_id)
             if pick_id is None and not turns:
@@ -116,11 +114,22 @@ def register(app: FastAPI, ctx: Any) -> None:
         return None
 
     def _target_story(target: ExpTarget, kind: str = "chat") -> ProductionPackage:
-        """The story of a design picture a chat is for; 404 when it has no such picture,
-        422 for a face study (Face Lab) aimed at anything but a character's face."""
+        """The story of a design picture (or keyframe) a chat is for; 404 when it has no such
+        picture or shot, 422 for a face study (Face Lab) aimed at anything but a character's
+        face."""
         pkg = repo.get_package(target.package_id)
         if pkg is None:
             raise HTTPException(404, "story not found")
+        if target.keyframe:
+            if kind == "face":
+                raise HTTPException(422, "a face study can only be for a character's face")
+            shot = next((s for s in pkg.shot_list if s.shot_id == target.shot_id), None)
+            if shot is None:
+                raise HTTPException(404, f"no shot {target.shot_id} in this story")
+            stored = repo.get_shot_plan(pkg.package_id, pkg.revision_id, shot.shot_id)
+            if plan_of(pkg, shot, stored).sub(target.sub_shot or 0) is None:
+                raise HTTPException(404, f"{target.shot_id} has no sub-shot {target.sub_shot}")
+            return pkg
         reqmt = next((r for r in pkg.asset_requirements.items
                       if r.requirement_id == target.requirement_id), None)  # fmt: skip
         if reqmt is None or not any(
@@ -131,6 +140,33 @@ def register(app: FastAPI, ctx: Any) -> None:
             raise HTTPException(422, "a face study can only be for a character's face")
         return pkg
 
+    def _start_frame(pkg: ProductionPackage, target: ExpTarget, wanted: str | None) -> Any:
+        """The keyframe draw a keyframe chat starts from, as a pick-like picture: the one
+        asked for ("<take_id>:<n>"), else the sub-shot's approved draw, else its newest
+        finished draw; None when it has none."""
+        takes = [t for t in repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+                 if t.shot_id == target.shot_id and t.sub_shot == target.sub_shot]  # fmt: skip
+        found = None
+        if wanted:
+            take_id, _, n = wanted.rpartition(":")
+            take = next((t for t in takes if t.take_id == take_id), None)
+            d = take and next((d for d in take.results if str(d.n) == n), None)
+            if take is None or d is None or d.status != "done" or not d.file:
+                raise HTTPException(404, f"no keyframe draw {wanted} of this sub-shot")
+            found = (take, d)
+        else:
+            ok = [(t, d) for t in takes for d in t.results if d.status == "done" and d.file]
+            found = next(((t, d) for t, d in ok if t.approved == d.n), None) or max(
+                ok, key=lambda x: (x[0].created_at, x[1].n), default=None)  # fmt: skip
+        if found is None:
+            return None
+        take, d = found
+        return SimpleNamespace(
+            image_id=f"frame:{take.take_id}:{d.n}", prompt=take.prompt, size=take.size,
+            file=d.file, thumb=d.thumb, content_type=d.content_type,
+            likeness=story_likeness(repo, pkg.package_id, take.likeness),
+        )  # fmt: skip
+
     @app.post("/v1/experiments", status_code=201, response_model=ExpSession)
     async def create_experiment(req: ExpSessionCreate) -> ExpSession:
         title = req.title or (req.target.label if req.target else None)
@@ -139,7 +175,9 @@ def register(app: FastAPI, ctx: Any) -> None:
         if (target := req.target) is not None:
             pkg = _target_story(target, req.kind)
             session.target = target
-            if req.kind == "chat" and req.start_from_pick:
+            if req.kind == "chat" and target.keyframe:
+                pick = _start_frame(pkg, target, req.from_frame) if req.start_from_pick else None
+            elif req.kind == "chat" and req.start_from_pick:
                 key = (target.requirement_id, target.deliverable_id)
                 found = selected_image(repo.list_images(pkg.package_id, pkg.revision_id), key)
                 pick = found if found is not None and found.file else None
@@ -153,8 +191,10 @@ def register(app: FastAPI, ctx: Any) -> None:
             # with uploaded photos is screened as if each picture might be one (the
             # package_has_uploads rule). Its pick starts the chat as "unknown", so the
             # chat's rules judge it like an upload rather than as fictional.
-            likeness = pick.likeness or (
-                None if package_has_uploads(repo, pkg.package_id) else False
+            likeness = (
+                pick.likeness
+                if target.keyframe  # already judged as a story picture (story_likeness)
+                else pick.likeness or (None if package_has_uploads(repo, pkg.package_id) else False)
             )
             try:
                 await asyncio.to_thread(
@@ -379,7 +419,7 @@ def register(app: FastAPI, ctx: Any) -> None:
             if t.mode != "pick" or t.size:
                 continue
             img = repo.get_image(t.from_image) if t.from_image else None
-            if img is None and session.target is not None:
+            if img is None and session.target is not None and not session.target.keyframe:
                 tg = session.target
                 pkg = repo.get_package(tg.package_id)
                 if pkg is not None:

@@ -183,6 +183,9 @@ class ExpSessionCreate(BaseModel):
     # face study (nothing in it yet) instead of starting another one: "Develop in a chat"
     # or "Create from text" clicked again.
     reuse_empty: bool = False
+    # A keyframe chat: the draw it starts from ("<take_id>:<n>"); else the sub-shot's
+    # approved keyframe, else its newest finished draw.
+    from_frame: str | None = None
 
 
 class UsePickRequest(BaseModel):
@@ -322,3 +325,11 @@ class ToDesignRequest(BaseModel):
     requirement_id: str
     deliverable_id: str
     pick: bool = False  # also make it the picture's pick
+
+
+class UseKeyframeRequest(BaseModel):
+    """A keyframe chat's image (#N) as a take of its sub-shot, approved unless `approve` is
+    false."""
+
+    image: int = Field(..., ge=1)
+    approve: bool = True

@@ -145,13 +145,26 @@ class ExpTurn(BaseModel):
 
 
 class ExpTarget(BaseModel):
-    """The design picture a chat or study works on (docs/workbench.md): a story's slot, by
-    the requirement and deliverable ids, which stay the same across revisions."""
+    """What a chat or study works on (docs/workbench.md): a story's design picture, by the
+    requirement and deliverable ids, which stay the same across revisions; or a keyframe,
+    one sub-shot of a shot (docs/library-layers.md), with `shot_id` and `sub_shot`."""
 
     package_id: str
-    requirement_id: str
-    deliverable_id: str
-    label: str = ""  # e.g. "Derek Blackwood, face"
+    requirement_id: str = ""
+    deliverable_id: str = ""
+    shot_id: str | None = None  # a keyframe: the shot ...
+    sub_shot: int | None = None  # ... and its sub-shot (1-based)
+    label: str = ""  # e.g. "Derek Blackwood, face"; "sh_02_01_05, keyframe 1"
+
+    @property
+    def keyframe(self) -> bool:
+        return self.shot_id is not None
+
+    @property
+    def key(self) -> tuple[str, str, str, str | None, int | None]:
+        """The same picture (or keyframe) in any revision of the story."""
+        return (self.package_id, self.requirement_id, self.deliverable_id, self.shot_id,
+                self.sub_shot)  # fmt: skip
 
 
 class ExpSession(BaseModel):
@@ -189,7 +202,12 @@ def pick_turn(
         turn_id=f"turn_{uuid.uuid4().hex[:12]}",
         session_id=session.session_id,
         index=1,
-        text=f"Started from the current pick of {label}." if label else "Started from the pick.",
+        text=(
+            f"Started from {'a draw' if str(pick.image_id).startswith('frame:') else 'the current pick'}"
+            f" of {label}."
+            if label
+            else "Started from the pick."
+        ),
         mode="pick",
         from_image=pick.image_id,
         size=size_of(pick.size),

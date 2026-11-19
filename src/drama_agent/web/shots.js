@@ -3,7 +3,7 @@
 /*
  * Keyframes tab: each shot's sub-shot plan (the cuts inside its one video generation) and a
  * checked keyframe per sub-shot, drawn from the design picks, for video production. Uses
- * h(), api(), state, renderMain(), stickyDetails() and numberSelect() from app.js. Model
+ * h(), api(), state, framesRender(), stickyDetails() and numberSelect() from app.js. Model
  * text is always inserted as text (h() uses text nodes).
  */
 
@@ -18,28 +18,42 @@ const drawUrl = (take, n, v = "thumb") =>
   `/v1/shot-takes/${encodeURIComponent(take.take_id)}/draws/${n}/${v}`;
 const secs = (ms) => `${(ms / 1000).toFixed(1)} s`;
 
+// The keyframe views also show on a look's or set state's page (library.js): there they
+// redraw the library page, and the story is the one the page shows.
+const framesInLib = () => ["chars", "sets"].includes(document.body.dataset.mode);
+const framesShown = (key) => (framesInLib() ? frames.key === key : state.tab === "keyframes" && state.pkg && framesKey(state.pkg) === key);
+function framesRender() {
+  if (framesInLib()) { if (!typingIn($("#main"))) renderLibrary(); } else renderMain();
+}
+
 async function loadFrames(pkg) {
   const key = framesKey(pkg);
   if (frames.key !== key) Object.assign(frames, { key, view: null, error: "", notes: [] });
+  frames.pkg = { package_id: pkg.package_id, revision_id: pkg.revision_id };
   clearTimeout(frames.timer);
   frames.timer = null;
   frames.loading = true;
   try {
-    const view = await api(`${framesBase(pkg)}?${new URLSearchParams({ revision_id: pkg.revision_id })}`);
+    const [view, chats] = await Promise.all([
+      api(`${framesBase(pkg)}?${new URLSearchParams({ revision_id: pkg.revision_id })}`),
+      // The keyframe chats of this story (each sub-shot lists its own).
+      api(`/v1/experiments?${new URLSearchParams({ package_id: pkg.package_id })}`).catch(() => []),
+    ]);
     if (frames.key !== key) return;
+    frames.chats = chats.filter((c) => c.target && c.target.shot_id);
     const changed = JSON.stringify(view) !== JSON.stringify(frames.view);
     frames.view = view;
     frames.error = "";
-    if (changed && state.tab === "keyframes") renderWhenNotSelecting();
+    if (changed && framesShown(key)) framesInLib() ? framesRender() : renderWhenNotSelecting();
   } catch (e) {
     if (frames.key !== key) return;
     frames.error = e.message;
-    if (state.tab === "keyframes") renderWhenNotSelecting();
+    if (framesShown(key)) framesInLib() ? framesRender() : renderWhenNotSelecting();
   } finally {
     frames.loading = false;
   }
-  if (frames.view && frames.view.busy > 0 && state.tab === "keyframes" && state.pkg && framesKey(state.pkg) === key) {
-    frames.timer = setTimeout(() => loadFrames(state.pkg), 2000);
+  if (frames.view && frames.view.busy > 0 && framesShown(key)) {
+    frames.timer = setTimeout(() => loadFrames(frames.pkg), 2000);
   }
 }
 
@@ -53,10 +67,10 @@ async function frameAction(url, button, body, method = "POST") {
   } catch (e) {
     failed = e.message;
   }
-  await loadFrames(state.pkg);
+  await loadFrames(frames.pkg || state.pkg);
   // The action's own error wins: reloading the board succeeds and would clear it.
   if (failed) frames.error = failed;
-  renderMain();
+  framesRender();
   return out;
 }
 
@@ -90,6 +104,9 @@ function renderFrameDraw(take) {
         d.status === "done" && h("a", { href: drawUrl(take, d.n, "content"), target: "_blank", rel: "noopener", class: "muted small" }, "open"),
         approved && h("button", { type: "button", class: "btn ghost small",
           onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, null, "DELETE") }, "Withdraw"),
+        finished && d.status === "done" && h("button", { type: "button", class: "btn ghost small",
+          title: "Change this draw in a chat with the image model; a result's Use as keyframe brings it back",
+          onclick: (e) => frameChat(take, `${take.take_id}:${d.n}`, e.currentTarget) }, "Develop in a chat"),
         finished && d.status === "done" && renderSendToDesign(take, d),
         (failedItems.length > 0 || (d.check && d.check.summary)) && h("details", { class: "small" },
           h("summary", {}, failedItems.length ? `${failedItems.length} issue${failedItems.length > 1 ? "s" : ""}` : "Check"),
@@ -110,13 +127,13 @@ function renderSendToDesign(take, d) {
   const open = frames.send.key === key;
   const load = async () => {
     frames.send = { key, targets: null, error: "" };
-    renderMain();
+    framesRender();
     try {
       frames.send.targets = await api(`${base}/design-targets`);
     } catch (e) {
       frames.send.error = e.message;
     }
-    if (frames.send.key === key) renderMain();
+    if (frames.send.key === key) framesRender();
   };
   const send = async (t, pick, button) => {
     button.disabled = true;
@@ -125,12 +142,12 @@ function renderSendToDesign(take, d) {
       await load();
     } catch (e) {
       frames.send.error = e.message;
-      renderMain();
+      framesRender();
     }
   };
   const toggle = h("button", { type: "button", class: "btn ghost small", "aria-expanded": String(open),
     title: "Add this draw as a take of a look this shot wears, or of its set",
-    onclick: () => { if (open) { frames.send = { key: null, targets: null, error: "" }; renderMain(); } else load(); } },
+    onclick: () => { if (open) { frames.send = { key: null, targets: null, error: "" }; framesRender(); } else load(); } },
     open ? "Close" : "Send to a look…");
   if (!open) return toggle;
   const { targets, error } = frames.send;
@@ -150,6 +167,73 @@ function renderSendToDesign(take, d) {
     })));
 }
 
+// -- Developing a keyframe in a chat (docs/library-layers.md) ---------------------------
+
+const frameLabel = (shotId, sub) => `${shotId}, keyframe ${sub}`;
+
+// A chat for this sub-shot's keyframe, started from a draw ("<take>:<n>"; none: its
+// approved draw, else its newest), opened in the workbench panel. Clicked again before
+// writing anything, the same chat opens.
+async function frameChat(take, fromFrame, button) {
+  if (button) button.disabled = true;
+  const label = frameLabel(take.shot_id, take.sub_shot);
+  try {
+    const target = { package_id: take.package_id, shot_id: take.shot_id, sub_shot: take.sub_shot, label };
+    const s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true, from_frame: fromFrame }) });
+    openBench("chat", s.session_id, label);
+  } catch (e) {
+    frames.error = e.message;
+    framesRender();
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+// "from chat #3": a take brought back from a chat, linked to it.
+function frameSourceChip(take) {
+  const m = (take.imported_from || "").match(/^experiment (\S+) #(\d+)$/);
+  if (!m) return h("span", { class: "chip" }, take.imported_from);
+  return h("a", { class: "chip", href: `#exp=${encodeURIComponent(m[1])}`, title: "The chat it came from",
+    onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench("chat", m[1], frameLabel(take.shot_id, take.sub_shot)); } }, `from chat #${m[2]}`);
+}
+
+// The sub-shot's approved keyframe, large, at the top of its block: which round and draw
+// (or chat image) it is and its check. With none approved, the newest finished draw, dashed.
+function renderFrameHero(sub) {
+  const [aid, an] = sub.approved || [];
+  const approved = aid && sub.takes.find((t) => t.take_id === aid);
+  const done = sub.takes.flatMap((t) => t.results.filter((d) => d.status === "done").map((d) => [t, d]));
+  const newest = done.reduce((m, x) => (!m || x[0].created_at > m[0].created_at ? x : m), null);
+  const [take, d] = approved ? [approved, approved.results.find((x) => x.n === an)] : newest || [];
+  if (!take || !d) return null;
+  const items = [{ src: drawUrl(take, d.n, "content"), caption: approved ? "Approved keyframe" : "Newest draw", likeness: take.likeness }];
+  return h("div", { class: `pick-hero${approved ? "" : " unpicked"}` },
+    h("button", { type: "button", class: "ref-open", "aria-label": "Enlarge the keyframe", onclick: () => enlarge(items, 0) },
+      h("img", { src: drawUrl(take, d.n), alt: approved ? "approved keyframe" : "newest draw" }), lookalikeTag(take.likeness), idTag(`take:${take.take_id}:${d.n}`)),
+    h("div", { class: "pick-hero-text" },
+      h("span", { class: `chip ${approved ? "ok" : "warn"}` }, approved ? "✓ Approved keyframe" : "Not approved yet"),
+      h("strong", {}, take.imported_from ? frameSourceChip(take) : `Round ${take.round}, draw ${d.n + 1}`),
+      checkBadge(d),
+      d.check && d.check.summary && h("p", { class: "small muted" }, d.check.summary),
+      !approved && h("p", { class: "small muted" }, "The newest draw. Approve a draw below; the export and the next cut use the approved one."),
+      (sub.outdated || []).length > 0 && approved && h("p", { class: "small warn-text" }, `Out of date: ${sub.outdated.join("; ")}`),
+      h("a", { href: drawUrl(take, d.n, "content"), target: "_blank", rel: "noopener", class: "small" }, "Open full size")));
+}
+
+// "Develop in a chat" for the sub-shot (from its approved or newest draw) and its chats.
+function renderFrameBench(pkg, shot, sub) {
+  const mine = (frames.chats || []).filter((c) => c.target.shot_id === shot.shot_id && c.target.sub_shot === sub.index);
+  const any = sub.takes.some((t) => t.results.some((d) => d.status === "done"));
+  return h("div", { class: "design-row small" },
+    h("button", { type: "button", class: "btn small", disabled: !any,
+      title: any ? "Change the keyframe in a chat with the image model, starting from the approved (or newest) draw. A result's Use as keyframe brings it back as an approved take." : "Draw a take first",
+      onclick: (e) => frameChat({ package_id: pkg.package_id, shot_id: shot.shot_id, sub_shot: sub.index }, null, e.currentTarget) }, "Develop in a chat"),
+    mine.length > 0 && h("span", { class: "muted" }, "Chats:"),
+    mine.slice(0, 6).map((c) => h("a", { href: `#exp=${encodeURIComponent(c.session_id)}`, title: `Updated ${timeAgo(c.updated_at)}`,
+      onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench("chat", c.session_id, c.title); } },
+      `${c.title}${c.messages ? ` (${c.messages})` : ""}`)));
+}
+
 function renderFrameTake(take, takes = []) {
   const busy = !["done", "failed", "paused"].includes(take.status);
   // The automatic round after this one, if it has started (same run, next round).
@@ -158,7 +242,7 @@ function renderFrameTake(take, takes = []) {
   const uncheckable = take.status === "done" && take.results.some((d) => d.status === "done" && !d.check);
   return h("div", { class: "take" },
     h("div", { class: "take-head" },
-      h("strong", {}, `Round ${take.round}`),
+      h("strong", {}, take.imported_from ? "From a chat" : `Round ${take.round}`),
       busy && h("span", { class: "chip info" }, take.pausing ? "pausing after this step…" : TAKE_STATUS[take.status]),
       take.status === "paused" && h("span", { class: "chip warn", title: "Stopped by you; Resume goes on with its remaining draws, its check and its rounds" }, "paused"),
       take.status === "failed" && h("span", { class: "chip bad", title: take.error || "" }, take.refused ? "refused" : "failed"),
@@ -170,7 +254,7 @@ function renderFrameTake(take, takes = []) {
       take.direction && h("span", { class: "chip" }, `“${take.direction}”`),
       take.prompt_version && h("span", { class: "chip", title: "The prompt version this take draws" }, `prompt v${take.prompt_version}`),
       take.provider && take.provider !== "h3" && h("span", { class: "chip", title: "The image provider that drew this take" }, providerName(take.provider)),
-      take.prompt_source === "user" && h("span", { class: "chip" }, "your prompt"),
+      take.imported_from ? frameSourceChip(take) : take.prompt_source === "user" && h("span", { class: "chip" }, "your prompt"),
       take.warnings && take.warnings.length > 0 && h("span", { class: "chip warn", title: take.warnings.join("\n") }, `${take.warnings.length} rule finding${take.warnings.length > 1 ? "s" : ""}`),
       take.prompt_source === "template" && h("span", { class: "chip warn" }, "template prompt"),
       h("span", { class: "take-actions" },
@@ -256,7 +340,7 @@ function renderPromptVersions(pkg, shot, sub) {
     const out = await frameAction(`${url}/prompts`, e.currentTarget, { revision_id: pkg.revision_id, sub_shot: sub.index, prompt: box.value, based_on: sel ? sel.v : null, note: frames.notes2[key] || "" });
     settle();
     if (out && !frames.error) { delete frames.prompts[key]; delete frames.notes2[key]; frames.sel[key] = out.v; }
-    renderMain();
+    framesRender();
   } }, `Save as v${nextV}`);
   // Draws for this editor's button (defaults to the board's Draws setting).
   const draws = () => frames.vdraws[key] || frames.draws;
@@ -269,7 +353,7 @@ function renderPromptVersions(pkg, shot, sub) {
     await frameAction(url, e.currentTarget, body);
     settle();
     if (!frames.error) { delete frames.prompts[key]; delete frames.notes2[key]; delete frames.sel[key]; }
-    renderMain();
+    framesRender();
   } }, "");
   const counter = h("span", { class: "muted small" });
   function sync() {
@@ -289,11 +373,11 @@ function renderPromptVersions(pkg, shot, sub) {
   return stickyDetails(`kfv:${key}`, versions.length ? `Prompt · v${sel.v} · ${versions.length} version${versions.length > 1 ? "s" : ""}` : "Prompt",
     versions.length > 0 && h("div", { class: "version-row" },
       h("label", { class: "small" }, "Version ",
-        h("select", { "aria-label": "Prompt version", onchange: (e) => { frames.sel[key] = Number(e.target.value); delete frames.prompts[key]; delete frames.compare[key]; renderMain(); } },
+        h("select", { "aria-label": "Prompt version", onchange: (e) => { frames.sel[key] = Number(e.target.value); delete frames.prompts[key]; delete frames.compare[key]; framesRender(); } },
           [...versions].reverse().map((v) => h("option", { value: v.v, selected: v.v === sel.v },
             `v${v.v} · ${SOURCE_LABEL[v.source] || v.source}${v.based_on ? ` from v${v.based_on}` : ""} · ${timeAgo(v.created_at)}`)))),
       versions.length > 1 && h("label", { class: "small" }, " compare with ",
-        h("select", { "aria-label": "Compare with", onchange: (e) => { frames.compare[key] = e.target.value === "" ? null : Number(e.target.value); renderMain(); } },
+        h("select", { "aria-label": "Compare with", onchange: (e) => { frames.compare[key] = e.target.value === "" ? null : Number(e.target.value); framesRender(); } },
           h("option", { value: "" }, "—"),
           versions.filter((v) => v.v !== sel.v).reverse().map((v) => h("option", { value: v.v, selected: v.v === against }, `v${v.v}`))))),
     sel && sel.note && h("p", { class: "small muted" }, sel.note),
@@ -303,7 +387,7 @@ function renderPromptVersions(pkg, shot, sub) {
     box,
     h("div", { class: "prompt-edit-actions" }, note),
     h("div", { class: "prompt-edit-actions" }, saveBtn, h("label", { class: "small muted", style: "display:inline-flex;align-items:center;gap:4px" }, "draws", drawsSel), drawBtn,
-      draft != null && h("button", { type: "button", class: "btn ghost small", onclick: () => { delete frames.prompts[key]; renderMain(); } }, "Discard edits"),
+      draft != null && h("button", { type: "button", class: "btn ghost small", onclick: () => { delete frames.prompts[key]; framesRender(); } }, "Discard edits"),
       counter),
     frames.verr[key] && h("p", { class: "small warn-text", role: "alert" }, `Not saved or drawn: ${frames.verr[key]}`),
     h("p", { class: "muted small" }, "Edit any version and press Save and draw (⌘/Ctrl+Enter): it is saved as the next version and drawn right away. Saving keeps every version. Drawing a version uses the last take's seeds, so its draws compare one for one; a version is drawn as written, never rewritten. To restore an old version, pick it and draw it, or save it again as the newest."));
@@ -321,7 +405,7 @@ function renderNewFrameTake(pkg, shot, sub) {
       h("button", { type: "button", class: "btn small", title: "The model writes a new prompt version and draws it", onclick: async (e) => {
         const direction = (frames.directions[key] || "").trim();
         await frameAction(url, e.currentTarget, { revision_id: pkg.revision_id, sub_shot: sub.index, draws: frames.draws, max_rounds: frames.rounds, direction: direction || null, provider: frames.provider });
-        if (!frames.error) { frames.directions[key] = ""; renderMain(); }
+        if (!frames.error) { frames.directions[key] = ""; framesRender(); }
       } }, "New take")),
   );
 }
@@ -380,7 +464,7 @@ function renderPlanEditor(pkg, shot) {
       h("div", { class: "plan-row-head" },
         h("strong", {}, `Sub-shot ${i + 1}`),
         h("label", { class: "small" }, " starts at ", start(row, i), " s"),
-        i > 0 && h("button", { type: "button", class: "btn ghost small", onclick: () => { rows.splice(i, 1); renderMain(); } }, "Remove")),
+        i > 0 && h("button", { type: "button", class: "btn ghost small", onclick: () => { rows.splice(i, 1); framesRender(); } }, "Remove")),
       field(row, "framing", "Framing: shot size, angle, who is where"),
       field(row, "camera", "Camera: still, pan, push-in…"),
       field(row, "action", "Action from this cut to the next, with the lines spoken in it", "textarea"),
@@ -391,7 +475,7 @@ function renderPlanEditor(pkg, shot) {
     h("div", { class: "prompt-edit-actions" },
       rows.length < 3 && h("button", { type: "button", class: "btn ghost small", onclick: () => {
         rows.push({ start_s: "", framing: "", camera: "", action: "", pos: { ...rows[rows.length - 1].pos } });
-        renderMain();
+        framesRender();
       } }, "+ Sub-shot"),
       h("button", { type: "button", class: "btn small", onclick: async (e) => {
         const sub_shots = rows.map((r, i) => {
@@ -404,9 +488,9 @@ function renderPlanEditor(pkg, shot) {
           return { start_ms: i === 0 ? 0 : Math.round(Number(r.start_s) * 1000), framing: r.framing, camera: r.camera, action: r.action, people, placement, off_screen };
         });
         await frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id, sub_shots, clip_s: Number(draft.clip_s) || null });
-        if (!frames.error) { delete frames.plans[key]; renderMain(); }
+        if (!frames.error) { delete frames.plans[key]; framesRender(); }
       } }, "Save plan"),
-      h("button", { type: "button", class: "btn ghost small", onclick: () => { delete frames.plans[key]; renderMain(); } }, "Cancel"),
+      h("button", { type: "button", class: "btn ghost small", onclick: () => { delete frames.plans[key]; framesRender(); } }, "Cancel"),
       h("span", { class: "muted small" }, "Each sub-shot ends where the next starts. A clean spec: every line inside one sub-shot, each speaker on screen or placed off frame, every cut a new view, screen sides held across cuts. Changed sub-shots lose their approved keyframes.")));
 }
 
@@ -424,7 +508,7 @@ function renderPlan(pkg, shot) {
           onclick: (e) => frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id }) }, "Plan cuts"),
         h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, onclick: () => {
           frames.plans[shot.shot_id] = { clip_s: Math.min(15, Math.max(4, Math.ceil(shot.clip_ms / 1000))), rows: shot.sub_shots.map((s) => ({ start_s: s.start_ms / 1000, framing: s.framing, camera: s.camera, action: s.action, pos: positionsOf(s) })) };
-          renderMain();
+          framesRender();
         } }, "Edit"))),
     p.error && h("p", { class: "small warn-text" }, p.error),
     p.outdated && h("p", { class: "small warn-text" }, `This plan was written ${p.outdated}.`),
@@ -493,6 +577,8 @@ function renderSubShot(pkg, shot, sub, total) {
       Object.keys(sub.off_screen || {}).length > 0 && ` · off frame: ${Object.entries(sub.off_screen).map(([id, side]) => `${(shot.people.find((p) => p.id === id) || { name: id }).name} (${side})`).join(", ")}`),
     sub.lines.length > 0 && h("ul", { class: "plain small sub-lines" }, sub.lines.map((x) =>
       h("li", {}, h("span", { class: "muted" }, `${(x.start_ms / 1000).toFixed(1)}–${(x.end_ms / 1000).toFixed(1)} s `), h("strong", {}, x.speaker), x.where !== "on screen" ? h("span", { class: "muted" }, ` (${x.where})`) : "", `: “${x.text}”`))),
+    renderFrameHero(sub),
+    renderFrameBench(pkg, shot, sub),
     renderChoices(pkg, shot, sub),
     blocked
       ? h("p", { class: "small warn-text" }, `First: ${sub.missing.join("; ")}.`)
@@ -553,14 +639,14 @@ function renderKeyframes(pkg) {
       h("button", { type: "button", class: "btn", onclick: async (e) => {
         const out = await frameAction(framesBase(pkg), e.currentTarget, { revision_id: pkg.revision_id, draws: frames.draws, max_rounds: frames.rounds, plan: true, provider: frames.provider });
         if (out) frames.notes = out.skipped.map((s) => `${s.shot_id}: ${s.reason}`);
-        renderMain();
+        framesRender();
       } }, "Plan cuts and draw first keyframes for every shot"),
       outdated > 0 && h("button", { type: "button", class: "btn", title: "A new take for each shot's first out-of-date cut; approving it starts the next out-of-date cut", onclick: async (e) => {
         const out = await frameAction(framesBase(pkg), e.currentTarget, { revision_id: pkg.revision_id, draws: frames.draws, max_rounds: frames.rounds, outdated: true, provider: frames.provider });
         if (out) frames.notes = out.skipped.map((s) => `${s.shot_id}: ${s.reason}`);
-        renderMain();
+        framesRender();
       } }, `Redraw out-of-date keyframes (${outdated} shots)`),
-      episodes.length > 1 && h("select", { "aria-label": "Episode", onchange: (e) => { frames.episode = e.target.value; renderMain(); } },
+      episodes.length > 1 && h("select", { "aria-label": "Episode", onchange: (e) => { frames.episode = e.target.value; framesRender(); } },
         h("option", { value: "all", selected: frames.episode === "all" }, "All episodes"),
         episodes.map((ep) => h("option", { value: ep, selected: frames.episode === ep }, ep)))),
     frames.error && h("p", { class: "small warn-text" }, frames.error),

@@ -238,6 +238,9 @@ class ShotTake(BaseModel):
     max_rounds: int = MAX_ROUNDS
     motion: str = ""  # the writer's note on how the sub-shot moves after this frame
     approved: int | None = None  # the approved draw (one per shot and sub-shot)
+    # A take brought in from an image chat ("experiment <session_id> #<n>"): one draw,
+    # the chat's image, not drawn by the runner (docs/library-layers.md).
+    imported_from: str | None = None
     likeness: bool = False
     refused: bool = False
     error: str | None = None

@@ -151,3 +151,75 @@ def test_a_keyframe_draw_becomes_a_take_of_a_look(tmp_path):
                               "deliverable_id": other.deliverables[0].deliverable_id})  # fmt: skip
         assert r.status_code == 422
         assert b.http.get("/v1/shot-takes/nope/draws/0/design-targets").status_code == 404
+
+
+def test_a_keyframe_is_developed_in_a_chat_and_comes_back_approved(tmp_path):
+    with Board(tmp_path) as b:
+        take, shot = _kept_keyframe(b)
+        sid_ = shot["shot_id"]
+        target = {
+            "package_id": b.pid,
+            "shot_id": sid_,
+            "sub_shot": 1,
+            "label": f"{sid_}, keyframe 1",
+        }
+        r = b.http.post("/v1/experiments", json={"target": target, "reuse_empty": True})
+        assert r.status_code == 201, r.text
+        chat = r.json()
+        view = b.http.get(f"/v1/experiments/{chat['session_id']}").json()
+        [start] = view["turns"]
+        assert start["mode"] == "pick" and start["from_image"] == f"frame:{take['take_id']}:0"
+        # Asked again before writing anything: the same chat.
+        again = b.http.post("/v1/experiments", json={"target": target, "reuse_empty": True}).json()
+        assert again["session_id"] == chat["session_id"]
+        # Starting from a chosen draw, and the chats of a shot.
+        other = b.http.post("/v1/experiments", json={
+            "target": target, "from_frame": f"{take['take_id']}:0"}).json()  # fmt: skip
+        listed = b.http.get("/v1/experiments", params={"shot_id": sid_}).json()
+        assert {s["session_id"] for s in listed} == {chat["session_id"], other["session_id"]}
+        # It isn't a design picture: no Use as pick.
+        assert (
+            b.http.post(f"/v1/experiments/{chat['session_id']}/use", json={"image": 1}).status_code
+            == 409
+        )
+        # Use as keyframe: a take of the sub-shot with the chat's image, approved.
+        r = b.http.post(f"/v1/experiments/{chat['session_id']}/use-keyframe", json={"image": 1})
+        assert r.status_code == 201, r.text
+        kt = r.json()
+        assert kt["imported_from"] == f"experiment {chat['session_id']} #1"
+        assert kt["approved"] == 0 and kt["results"][0]["model"] == "chat"
+        assert kt["references"] == take["references"]
+        board = b.wait()
+        sub = next(s for s in board["shots"] if s["shot_id"] == sid_)["sub_shots"][0]
+        assert sub["approved"] == [kt["take_id"], 0]
+        done = next(t for t in sub["takes"] if t["take_id"] == kt["take_id"])
+        assert done["status"] == "done" and done["results"][0]["check"] is not None
+        # Not approved when asked so; the earlier approval stays.
+        r = b.http.post(f"/v1/experiments/{chat['session_id']}/use-keyframe",
+                        json={"image": 1, "approve": False})  # fmt: skip
+        assert r.json()["approved"] is None
+        assert b.wait()["shots"] and b.repo.get_shot_take(kt["take_id"]).approved == 0
+
+
+def test_keyframe_chats_are_checked(tmp_path):
+    with Board(tmp_path) as b:
+        sid_ = b.board()["shots"][0]["shot_id"]
+        url = "/v1/experiments"
+        bad = {"package_id": b.pid, "shot_id": sid_, "sub_shot": 9}
+        assert b.http.post(url, json={"target": bad}).status_code == 404
+        assert (
+            b.http.post(
+                url, json={"target": bad | {"shot_id": "sh_nope", "sub_shot": 1}}
+            ).status_code
+            == 404
+        )
+        ok = {"package_id": b.pid, "shot_id": sid_, "sub_shot": 1}
+        assert b.http.post(url, json={"kind": "face", "target": ok}).status_code == 422
+        # No draw yet: the chat starts empty, and its images can't become a keyframe
+        # before the sub-shot has a take to stand beside.
+        chat = b.http.post(url, json={"target": ok}).json()
+        assert b.http.get(f"{url}/{chat['session_id']}").json()["turns"] == []
+        assert (
+            b.http.post(f"{url}/{chat['session_id']}/use-keyframe", json={"image": 1}).status_code
+            == 409
+        )

@@ -598,6 +598,9 @@ looks and items as cards, then one look (its line, sheet and shots), then one of
 pictures with its takes. **+ New look** (or **+ New state**) adds one by hand; it's drawn
 from the face like any look. On the Keyframes tab, **Send to a look…** adds a keyframe
 draw as a take of a look its shot wears (or of its set), as the pick only when asked.
+A look's page also lists the shots it is in with their keyframes; each opens a page to
+review and develop them: approve, draw rounds, or **Develop in a chat** and bring a chat
+image back with **Use as keyframe**.
 
 ### Experiment: chat with the image model
 

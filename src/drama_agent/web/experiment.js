@@ -179,14 +179,17 @@ async function loadExpSession() {
 
 // A picture's chats are saved, each one: the history row lists them to switch between, with
 // New chat. The list is the server's (GET /v1/experiments for that picture).
-const targetKey = (t) => `${t.package_id}|${t.requirement_id}|${t.deliverable_id}`;
+// A design picture, or a keyframe (a shot's sub-shot).
+const targetKey = (t) => `${t.package_id}|${t.requirement_id}|${t.deliverable_id}|${t.shot_id || ""}|${t.sub_shot || ""}`;
 
 async function loadExpSiblings(target) {
   const key = targetKey(target);
-  const q = new URLSearchParams({ kind: "chat", package_id: target.package_id, requirement_id: target.requirement_id, deliverable_id: target.deliverable_id });
+  const q = new URLSearchParams(target.shot_id
+    ? { kind: "chat", package_id: target.package_id, shot_id: target.shot_id }
+    : { kind: "chat", package_id: target.package_id, requirement_id: target.requirement_id, deliverable_id: target.deliverable_id });
   let list;
   try {
-    list = await api(`/v1/experiments?${q}`);
+    list = (await api(`/v1/experiments?${q}`)).filter((x) => x.target && targetKey(x.target) === key);
   } catch {
     return;  // the row keeps what it had
   }
@@ -222,7 +225,7 @@ function renderExpHistory(s) {
   const list = exp.siblings.key === targetKey(t) ? exp.siblings.list : [];
   const shown = list.some((x) => x.session_id === s.session_id) ? list : [{ ...s, messages: exp.view.turns.filter((x) => !["pick", "import"].includes(x.mode)).length }, ...list];
   return h("div", { class: "exp-history", role: "navigation", "aria-label": "Chats for this picture" },
-    h("span", { class: "muted small" }, `Chats for this picture (${shown.length}):`),
+    h("span", { class: "muted small" }, `Chats for this ${t.shot_id ? "keyframe" : "picture"} (${shown.length}):`),
     h("div", { class: "exp-history-list" }, shown.map((x) => {
       const on = x.session_id === s.session_id;
       return h("button", {
@@ -232,7 +235,7 @@ function renderExpHistory(s) {
         h("span", { class: "exp-history-title" }, x.title),
         h("span", { class: "muted small" }, `${x.messages ? `${x.messages} message${x.messages === 1 ? "" : "s"}` : "no messages yet"} · ${timeAgo(x.updated_at)}`));
     })),
-    h("button", { type: "button", class: "btn small", title: "Start another chat from the picture's current pick; this one stays saved", onclick: (e) => newChatFor(t, e.currentTarget) }, "New chat"));
+    h("button", { type: "button", class: "btn small", title: t.shot_id ? "Start another chat from the keyframe's approved (or newest) draw; this one stays saved" : "Start another chat from the picture's current pick; this one stays saved", onclick: (e) => newChatFor(t, e.currentTarget) }, "New chat"));
 }
 
 async function patchExp(body) {
@@ -375,8 +378,11 @@ function renderExpHeader(v) {
   const job = target && jobOf(target.package_id);
   exp.el.header.replaceChildren(
     target && h("p", { class: "small exp-target" }, "For ",
-      job ? h("a", { href: `#job=${encodeURIComponent(job.job_id)}&tab=casting` }, h("strong", {}, target.label || "a design picture")) : h("strong", {}, target.label || "a design picture"),
-      ". Use as pick on a result makes it that picture's pick. ",
+      job ? h("a", { href: `#job=${encodeURIComponent(job.job_id)}&tab=${target.shot_id ? "keyframes" : "casting"}` }, h("strong", {}, target.label || (target.shot_id ? "a keyframe" : "a design picture")))
+        : h("strong", {}, target.label || (target.shot_id ? "a keyframe" : "a design picture")),
+      target.shot_id
+        ? ". Use as keyframe on a result brings it back as an approved take of that sub-shot (checked like any draw). Mention a look's or set's @number to bring it in. "
+        : ". Use as pick on a result makes it that picture's pick. ",
       h("button", { type: "button", class: "btn ghost small", title: "Move this chat back to Scratch, tied to no picture", onclick: () => unlinkSession(s.session_id, () => loadExpSession()) }, "Unlink")),
     exp.notice && h("p", { class: "small hint" }, exp.notice),
     target && renderExpHistory(s),
@@ -433,7 +439,8 @@ function renderTurn(t) {
     return h("div", { class: "exp-turn" },
       h("div", { class: "exp-msg bot" }, h("div", { class: "bubble" },
         h("p", { class: "muted small" }, t.text, " Your next message changes it."),
-        h("div", { class: "exp-results" }, t.results.map((r, n) => expImage(`turn:${t.turn_id}:${n}`, current, "The current pick", null, t.from_image ? `design:${t.from_image}` : undefined))),
+        h("div", { class: "exp-results" }, t.results.map((r, n) => expImage(`turn:${t.turn_id}:${n}`, current, t.from_image?.startsWith("frame:") ? "The keyframe draw" : "The current pick", null,
+          t.from_image ? (t.from_image.startsWith("frame:") ? `take:${t.from_image.slice(6)}` : `design:${t.from_image}`) : undefined))),
         t.prompt && h("details", { class: "exp-prompt" },
           h("summary", {}, "The prompt that made it"),
           h("pre", {}, t.prompt),
@@ -513,11 +520,17 @@ function expImage(ref, current, label, result, gref = ref) {
         ? h("span", { class: "chip accent" }, "current")
         : h("button", { type: "button", class: "btn small", disabled: expBusy(exp.view), onclick: () => patchExp({ current: ref }) }, "Edit this one"),
       result && h("span", { class: "muted small" }, `seed ${result.seed}`),
-      result && exp.view.session.target && h("button", {
+      result && exp.view.session.target && !exp.view.session.target.shot_id && h("button", {
         type: "button", class: "btn small", disabled: !!exp.used[ref],
         title: `Make this the pick of ${exp.view.session.target.label || "the picture this chat is for"}`,
         onclick: (e) => usePick(ref, e.currentTarget),
       }, exp.used[ref] ? "Now the pick" : "Use as pick"),
+      // A keyframe chat: the start picture too (a chat image may be the draw as it was).
+      exp.view.session.target?.shot_id && h("button", {
+        type: "button", class: "btn small", disabled: !!exp.used[ref],
+        title: `Make this the approved keyframe of ${exp.view.session.target.label || "the sub-shot this chat is for"}`,
+        onclick: (e) => useKeyframe(ref, e.currentTarget),
+      }, exp.used[ref] ? "Now the keyframe" : "Use as keyframe"),
     ),
   );
 }
@@ -545,6 +558,24 @@ async function usePick(ref, button) {
     exp.used[ref] = true;
     exp.notice = `#${n} is now the pick of ${exp.view.session.target.label || "its picture"}. Pictures and keyframes drawn from the old one are marked out of date; redraw them from its page.`;
     if (exp.host) benchRefreshPage();  // the page under the panel shows the new pick
+  } catch (e) {
+    exp.notice = e.message;
+  }
+  renderExp();
+}
+
+// Use as keyframe (docs/library-layers.md): the image becomes an approved take of the
+// sub-shot the chat is for. The keyframes after it that were drawn from the old one are
+// withdrawn, as with any new approval.
+async function useKeyframe(ref, button) {
+  const n = exp.labels[ref];
+  if (n == null) return;
+  button.disabled = true;
+  try {
+    await api(`/v1/experiments/${encodeURIComponent(exp.view.session.session_id)}/use-keyframe`, { method: "POST", body: JSON.stringify({ image: n }) });
+    exp.used[ref] = true;
+    exp.notice = `#${n} is now the approved keyframe of ${exp.view.session.target.label || "its sub-shot"}; it is being checked like any draw.`;
+    if (exp.host) benchRefreshPage();
   } catch (e) {
     exp.notice = e.message;
   }
