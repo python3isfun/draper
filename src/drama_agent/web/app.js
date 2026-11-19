@@ -126,6 +126,8 @@ function go(jobId, tab = "overview") {
 window.addEventListener("hashchange", route);
 
 async function route() {
+  // The workbench panel belongs to the page it was opened on.
+  closeBench({ refresh: false });
   const params = new URLSearchParams(location.hash.slice(1));
   if (params.has("lib")) {
     // Characters and Sets: the asset library (library.js).

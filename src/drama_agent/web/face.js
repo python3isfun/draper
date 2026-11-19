@@ -19,10 +19,17 @@ const face = {
   drafts: {},
   error: "",
   sending: false,
+  // The workbench panel's element when the study is open over a character page
+  // (bench.js); null: the Face Lab tab, in #main.
+  host: null,
+  used: {},  // renders made the face's pick from this study, by reference
+  notice: "",
 };
 
+const faceRoot = () => face.host || $("#main");
+
 const FACE_POLL_MS = 1000;
-const inFace = () => document.body.dataset.mode === "face";
+const inFace = () => (face.host ? face.host.isConnected : document.body.dataset.mode === "face");
 const faceBusy = (v) => v && v.turns.some((t) => t.status === "pending" || t.status === "running");
 
 function faceDraft(sid) {
@@ -51,6 +58,8 @@ async function faceRoute(sid) {
     face.view = null;
     face.mounted = null;
     face.error = "";
+    face.used = {};
+    face.notice = "";
   }
   await loadFaceSessions();
   if (!sid) {
@@ -146,7 +155,7 @@ async function loadFaceStudy() {
   } catch (e) {
     if (face.sid !== sid || !inFace()) return;
     face.mounted = null;
-    $("#main").replaceChildren(h("div", { class: "card placeholder" }, h("p", { class: "form-error" }, e.message)));
+    faceRoot().replaceChildren(h("div", { class: "card placeholder" }, h("p", { class: "form-error" }, e.message)));
     return;
   }
   clearTimeout(face.timer);
@@ -194,7 +203,7 @@ function mountFace(v) {
   el.render = h("button", { type: "button", class: "btn primary face-render", onclick: renderTest }, "Render");
   el.error = h("p", { class: "form-error", role: "alert" });
   el.tests = h("div", { class: "face-tests" });
-  $("#main").replaceChildren(h("div", { class: "face" },
+  faceRoot().replaceChildren(h("div", { class: "face" },
     el.header,
     h("div", { class: "face-grid" },
       el.photo,
@@ -250,9 +259,13 @@ function renderFaceHeader(v) {
     },
   });
   const del = h("button", { type: "button", class: "btn ghost small", disabled: faceBusy(v), onclick: deleteFace }, "Delete study");
-  face.el.header.replaceChildren(h("div", { class: "exp-head-row" }, title,
-    h("span", { class: "muted small" }, `${describes(v).length} description${describes(v).length === 1 ? "" : "s"} · ${tests(v).length} test${tests(v).length === 1 ? "" : "s"}`),
-    h("div", { class: "exp-head-actions" }, del)));
+  face.el.header.replaceChildren(
+    s.target && h("p", { class: "small exp-target" }, "For ", h("strong", {}, s.target.label || "a face"),
+      ". Use as pick on a render makes it that face's pick."),
+    face.notice && h("p", { class: "small hint" }, face.notice),
+    h("div", { class: "exp-head-row" }, title,
+      h("span", { class: "muted small" }, `${describes(v).length} description${describes(v).length === 1 ? "" : "s"} · ${tests(v).length} test${tests(v).length === 1 ? "" : "s"}`),
+      h("div", { class: "exp-head-actions" }, del)));
 }
 
 async function deleteFace(e) {
@@ -266,7 +279,8 @@ async function deleteFace(e) {
   try {
     await api(`/v1/experiments/${encodeURIComponent(face.sid)}`, { method: "DELETE" });
     delete face.drafts[face.sid];
-    goFace(null);
+    if (face.host) closeBench();
+    else goFace(null);
   } catch (err) {
     face.error = err.message;
     renderFace();
@@ -474,7 +488,12 @@ function renderTests(v) {
                 h("img", { src: refUrl(ref), alt: `Seed ${r.seed}`, loading: "lazy" })),
               h("figcaption", {},
                 r.label != null && h("span", { class: "exp-id" }, `#${r.label}`),
-                h("span", { class: "muted small" }, `seed ${r.seed}`)));
+                h("span", { class: "muted small" }, `seed ${r.seed}`),
+                v.session.target && r.label != null && h("button", {
+                  type: "button", class: "btn small", disabled: !!face.used[ref],
+                  title: `Make this the pick of ${v.session.target.label || "the face this study is for"}`,
+                  onclick: (e) => faceUsePick(ref, r.label, e.currentTarget),
+                }, face.used[ref] ? "Now the pick" : "Use as pick")));
           }),
         ),
         t.error && h("div", { class: "exp-error" },
@@ -487,6 +506,20 @@ function renderTests(v) {
       );
     }),
   ));
+}
+
+// Use as pick (docs/workbench.md): a render becomes the pick of the face this study is for.
+async function faceUsePick(ref, n, button) {
+  button.disabled = true;
+  try {
+    await api(`/v1/experiments/${encodeURIComponent(face.view.session.session_id)}/use`, { method: "POST", body: JSON.stringify({ image: n }) });
+    face.used[ref] = true;
+    face.notice = `#${n} is now the pick of ${face.view.session.target.label || "the face"}. Looks drawn from the old face are marked out of date; redraw them from the page.`;
+    if (face.host) benchRefreshPage();
+  } catch (e) {
+    face.notice = e.message;
+  }
+  renderFace();
 }
 
 async function faceRetry(t, button) {

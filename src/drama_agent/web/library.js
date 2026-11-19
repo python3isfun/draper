@@ -447,12 +447,19 @@ function libWorkbench(part, slot, sayView) {
   const mine = (lib.chats || []).filter((s) => s.target && s.target.package_id === part.origin_package_id
     && s.target.requirement_id === slot.requirement_id && s.target.deliverable_id === slot.deliverable_id);
   const label = `${slot.entity}${slot.variant ? ` (${slot.variant})` : ""}, ${slot.view}`;
+  const target = { package_id: part.origin_package_id, requirement_id: slot.requirement_id, deliverable_id: slot.deliverable_id, label };
+  // Face Lab's "From a photo": only for a character's face.
+  const photo = slot.asset_type === "character_identity" && h("input", {
+    type: "file", accept: "image/jpeg,image/png,image/webp", hidden: true,
+    onchange: (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) benchFaceFromPhoto(f, target, fromPhoto); },
+  });
+  const fromPhoto = photo && h("button", { type: "button", class: "btn small", title: "Upload a reference photo: it is described in words, and you test the wording seed by seed (Face Lab)", onclick: () => photo.click() }, "From a photo");
   const develop = async (button) => {
     button.disabled = true;
     try {
-      const s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({
-        target: { package_id: part.origin_package_id, requirement_id: slot.requirement_id, deliverable_id: slot.deliverable_id, label } }) });
-      goExp(s.session_id);
+      const s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target }) });
+      button.disabled = false;
+      openBench("chat", s.session_id, label);
     } catch (e) {
       button.disabled = false;
       lib.error = e.message;
@@ -461,8 +468,14 @@ function libWorkbench(part, slot, sayView) {
   };
   return h("div", { class: "design-row small" },
     h("button", { type: "button", class: "btn small", title: "Change this picture in a chat with the image model, starting from its pick", onclick: (e) => develop(e.currentTarget) }, sayView ? `Develop the ${slot.view} in a chat` : "Develop in a chat"),
+    fromPhoto, photo,
     mine.length > 0 && h("span", { class: "muted" }, "Chats:"),
-    mine.slice(0, 6).map((s) => h("a", { href: `#${s.kind === "face" ? "face" : "exp"}=${encodeURIComponent(s.session_id)}`, title: `${s.kind === "face" ? "Face Lab study" : "Chat"}, updated ${timeAgo(s.updated_at)}` }, s.title)),
+    mine.slice(0, 6).map((s) => h("a", {
+      href: `#${s.kind === "face" ? "face" : "exp"}=${encodeURIComponent(s.session_id)}`,
+      title: `${s.kind === "face" ? "Face Lab study" : "Chat"}, updated ${timeAgo(s.updated_at)}`,
+      // Opens in the panel; a middle click still opens the full page.
+      onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench(s.kind === "face" ? "face" : "chat", s.session_id, s.title); },
+    }, s.kind === "face" ? `${s.title} (photo)` : s.title)),
     mine.length > 6 && h("span", { class: "muted" }, `and ${mine.length - 6} more`));
 }
 

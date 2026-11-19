@@ -22,7 +22,14 @@ const exp = {
   likeness: {},  // results that show a real person's likeness, by reference
   used: {},  // results made a design picture's pick from this chat, by reference
   notice: "",  // what Use as pick did (shown under the chat's title)
+  // The workbench panel's element when the chat is open over a character or set page
+  // (bench.js); null: the Experiment tab, in #main.
+  host: null,
 };
+
+const expRoot = () => exp.host || $("#main");
+// The panel's scrolling body, or null for the page (the Experiment tab).
+const expScroller = () => exp.host && exp.host.closest(".bench-body");
 
 const EXP_POLL_MS = 1000;
 
@@ -33,7 +40,8 @@ restrictiveBox.addEventListener("change", () => {
   try { localStorage.setItem("drama.restrictive", restrictiveBox.checked ? "1" : "0"); } catch { /* storage blocked */ }
 });
 const expBusy = (v) => v && v.turns.some((t) => t.status === "pending" || t.status === "running");
-const inExp = () => document.body.dataset.mode === "exp";
+// Whether the open chat is still on screen: the Experiment tab, or the panel it is in.
+const inExp = () => (exp.host ? exp.host.isConnected : document.body.dataset.mode === "exp");
 
 function expDraft(sid) {
   return (exp.drafts[sid] ||= { text: "", files: [], mode: "rewrite", draws: 1 });
@@ -158,7 +166,7 @@ async function loadExpSession() {
   } catch (e) {
     if (exp.sid !== sid || !inExp()) return;
     exp.mounted = null;
-    $("#main").replaceChildren(h("div", { class: "card placeholder" }, h("p", { class: "form-error" }, e.message)));
+    expRoot().replaceChildren(h("div", { class: "card placeholder" }, h("p", { class: "form-error" }, e.message)));
     return;
   }
   clearTimeout(exp.timer);
@@ -210,7 +218,9 @@ function renderExp() {
   exp.likeness = {};
   for (const t of v.turns) t.results.forEach((_, n) => { if (t.likeness) exp.likeness[`turn:${t.turn_id}:${n}`] = true; });
   if (exp.mounted !== v.session.session_id) mountExp(v);
-  const nearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 120;
+  const sc = expScroller();
+  const nearBottom = sc ? sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 120
+    : window.innerHeight + window.scrollY >= document.body.scrollHeight - 120;
   const before = exp.el.transcript.childElementCount;
   renderExpHeader(v);
   exp.el.transcript.replaceChildren(...v.turns.map(renderTurn));
@@ -219,7 +229,10 @@ function renderExp() {
       "Attach a base image below (or describe a new image), then tell the model what to change."));
   }
   renderComposer(v);
-  if (nearBottom || before !== exp.el.transcript.childElementCount) window.scrollTo(0, document.body.scrollHeight);
+  if (nearBottom || before !== exp.el.transcript.childElementCount) {
+    if (sc) sc.scrollTop = sc.scrollHeight;
+    else window.scrollTo(0, document.body.scrollHeight);
+  }
 }
 
 function mountExp(v) {
@@ -261,7 +274,7 @@ function mountExp(v) {
       el.file, el.options, el.send),
     el.error,
   );
-  $("#main").replaceChildren(h("div", { class: "exp" }, el.header, el.transcript, el.composer));
+  expRoot().replaceChildren(h("div", { class: "exp" }, el.header, el.transcript, el.composer));
 }
 
 function renderExpHeader(v) {
@@ -325,7 +338,8 @@ async function deleteExp() {
   try {
     await api(`/v1/experiments/${encodeURIComponent(exp.sid)}`, { method: "DELETE" });
     delete exp.drafts[exp.sid];
-    goExp(null);
+    if (exp.host) closeBench();
+    else goExp(null);
   } catch (e) {
     exp.error = e.message;
     renderExp();
@@ -440,6 +454,7 @@ async function usePick(ref, button) {
     await api(`/v1/experiments/${encodeURIComponent(exp.view.session.session_id)}/use`, { method: "POST", body: JSON.stringify({ image: n }) });
     exp.used[ref] = true;
     exp.notice = `#${n} is now the pick of ${exp.view.session.target.label || "its picture"}. Pictures and keyframes drawn from the old one are marked out of date; redraw them from its page.`;
+    if (exp.host) benchRefreshPage();  // the page under the panel shows the new pick
   } catch (e) {
     exp.notice = e.message;
   }

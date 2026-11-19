@@ -1,6 +1,6 @@
 # The workbench: Experiment and Face Lab inside Characters and Sets
 
-Status: phase 1 built (19 Nov 2026); phases 2 and 3 to do.
+Status: phases 1 and 2 built (19 Nov 2026); phase 3 to do.
 
 ## Why
 
@@ -101,6 +101,23 @@ content rules see the same likeness mark the story does.
   as pick share one code path (`_use_chat_image` in api/designs.py).
 - A slot with no pick yet starts an empty chat (text to image). A Face Lab study can carry a
   target, but nothing uses it yet (phase 2).
+
+## Phase 2 as built
+
+- **The panel** (`web/bench.js`): Develop in a chat, a picture's listed chats, and From a
+  photo open over the character or set page instead of leaving it. The panel has Open full
+  page (the Experiment or Face Lab tab) and Close (or Escape). On a wide window (1400px
+  and up) the page makes room for it.
+- **The views mount into the panel.** `experiment.js` and `face.js` draw into a host
+  element (`exp.host` / `face.host`) when one is set, and into `#main` otherwise. They
+  scroll the panel, not the page. A poll that lands after the panel closed finds its host
+  detached and draws nothing.
+- **From a photo** sits next to Develop on a character's face. It uploads the photo,
+  starts a study for that face and has the photo described. Each render then has Use as
+  pick.
+- After Use as pick, and when the panel closes, the page reloads its view: the new pick,
+  what is now out of date, and the picture's chats.
+- Leaving the page (any route change) closes the panel.
 
 ## Choices
 

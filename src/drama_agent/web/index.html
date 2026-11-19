@@ -152,10 +152,21 @@
     <main id="main" class="main"></main>
   </div>
 
+  <!-- The workbench panel: a chat or face study over a character or set page (bench.js). -->
+  <aside id="bench" class="bench" hidden aria-label="Workbench">
+    <div class="bench-head">
+      <strong id="bench-title">Chat</strong>
+      <a id="bench-full" href="#exp" class="small">Open full page</a>
+      <button type="button" id="bench-close" class="btn ghost small" aria-label="Close the workbench">Close</button>
+    </div>
+    <div id="bench-body" class="bench-body"></div>
+  </aside>
+
   <script src="app.js"></script>
   <script src="experiment.js"></script>
   <script src="face.js"></script>
   <script src="shots.js"></script>
   <script src="library.js"></script>
+  <script src="bench.js"></script>
 </body>
 </html>
