@@ -70,8 +70,11 @@ def register(app: FastAPI, *, repo: Any, media: Any = None) -> None:
         rows = repo.list_casting(package_id=package_id)
         if not rows and repo.get_package(package_id) is None:
             raise HTTPException(404, "package not found")
-        names = {a.asset_id: a.name for a in repo.list_library_assets()}
-        return [{**c.model_dump(), "asset_name": names.get(c.asset_id, "")} for c in rows]
+        assets = {a.asset_id: a for a in repo.list_library_assets()}
+        # Its page: a character or set is its own; a look, state or item is on its parent's
+        # (`parent_id`; None for an item no one carries and no shot uses).
+        return [{**c.model_dump(), "asset_name": a.name if (a := assets.get(c.asset_id)) else "",
+                 "parent_id": a.parent_id if a else None} for c in rows]  # fmt: skip
 
     @app.get("/v1/drama-packages/{package_id}/casting/matches")
     async def casting_matches(package_id: str) -> list[dict[str, Any]]:

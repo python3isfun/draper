@@ -600,7 +600,10 @@ from the face like any look. On the Keyframes tab, **Send to a look…** adds a 
 draw as a take of a look its shot wears (or of its set), as the pick only when asked.
 A look's page also lists the shots it is in with their keyframes; each opens a page to
 review and develop them: approve, draw rounds, or **Develop in a chat** and bring a chat
-image back with **Use as keyframe**.
+image back with **Use as keyframe**. **+ New item** adds a prop a character carries
+(with an optional reference photo); every picture but a face can also start a chat
+**From a reference photo**. The story's Casting tab lists its Props as cards linked to
+their item pages, and each item page links back.
 
 ### Experiment: chat with the image model
 

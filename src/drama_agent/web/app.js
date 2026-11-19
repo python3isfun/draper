@@ -1421,20 +1421,45 @@ function renderCasting(pkg) {
       h("div", { class: "section-head" }, h("h3", {}, `Sets (${bible.locations.length})`),
         h("span", { class: "muted small" }, "Open one to edit its sheet and draw its states, views and dressing.")),
       h("div", { class: "lib-grid" }, bible.locations.map((x) => card(x.location_id, x.name, "set")))),
-    bible.props.length > 0 && h("section", { class: "card", style: "margin-top:12px" },
-      h("h3", {}, `Props (${bible.props.length})`),
-      h("p", { class: "muted small" }, "A prop belongs to the character who carries it, else to the set it dresses: edit and draw it there."),
-      h("ul", { class: "plain small" }, bible.props.map((p) => {
-        const holder = p.owner_character_id ? bible.characters.find((x) => x.character_id === p.owner_character_id)
-          : null;
-        const where = holder ? byStory[holder.character_id] : null;
-        return h("li", {}, h("strong", {}, p.name), p.story_function ? ` · ${p.story_function}` : "",
-          where ? [" · carried by ", h("a", { href: `#lib=${where.asset_id}` }, holder.name)] : h("span", { class: "muted" }, " · set dressing"));
-      }))),
+    bible.props.length > 0 && h("section", { class: "card", style: "margin-top:12px", id: "casting-props" },
+      h("div", { class: "section-head" }, h("h3", {}, `Props (${bible.props.length})`),
+        h("span", { class: "muted small" }, "A prop is an item of the character who carries it, else of the set it dresses: open it there to edit and draw it. Add one with + New item on a character.")),
+      h("div", { class: "lib-grid" }, bible.props.map((p) => propCard(pkg, p, byStory, c, v)))),
     h("section", { class: "card", style: "margin-top:12px" },
       h("h3", {}, "Style brief"),
       h("dl", { class: "kv", style: "margin-top:8px" },
         kv("Medium", sb.medium), kv("Era / region", sb.era_region), kv("Color & light", sb.color_and_light), kv("Aspect ratio", sb.aspect_ratio))));
+}
+
+// A story prop on the Casting tab: its picture, who carries it (or the set it dresses), the
+// shots it is in, and its item page on that character's or set's page. "#…&prop=<id>" (the
+// item page's "See it in the story's Props") scrolls to it and marks it.
+function propCard(pkg, p, byStory, c, v) {
+  const row = byStory[p.prop_id];
+  const owner = row && row.parent_id && c && c.assets[row.parent_id];
+  const href = row && row.parent_id ? `#lib=${encodeURIComponent(row.parent_id)}&part=${encodeURIComponent(row.asset_id)}` : null;
+  const slots = v ? v.slots.filter((x) => x.asset_type === "prop" && x.entity_id === p.prop_id) : [];
+  const done = v ? v.images.filter((i) => slots.some((x) => keyOf(x) === keyOf(i)) && i.status === "done") : [];
+  const pic = done.find((i) => i.selected) || done.reduce((m, i) => (!m || i.created_at > m.created_at ? i : m), null);
+  const shots = pkg.shot_list.filter((s) => s.prop_state_refs.some((r) => r.prop_id === p.prop_id)).length;
+  const focused = new URLSearchParams(location.hash.slice(1)).get("prop") === p.prop_id;
+  const body = [
+    pic ? h("img", { src: thumbUrl(pic), alt: p.name, loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
+    pic && lookalikeTag(pic.likeness),
+    h("strong", {}, p.name),
+    p.story_function && h("span", { class: "small lib-line" }, p.story_function),
+    h("span", { class: "muted small" }, shots ? `${shots} shot${shots === 1 ? "" : "s"}` : "in no shot yet", h("span", { class: "mono" }, ` · ${p.prop_id}`)),
+  ];
+  const card = h("div", { class: `card lib-card prop-card${focused ? " focused" : ""}`, id: `prop-${p.prop_id}` },
+    href ? h("a", { href, class: "lib-card-link", title: `Open ${p.name}: its pictures, takes and the shots it is in` }, body) : body,
+    owner ? h("span", { class: "small" }, p.owner_character_id ? "carried by " : "dresses ", h("a", { href: `#lib=${encodeURIComponent(owner.asset_id)}` }, owner.name))
+      : h("span", { class: "small muted" }, "carried by no one, in no shot: on no page yet"));
+  // Scrolled to once per visit, not on every redraw while pictures are drawn.
+  if (focused && castingCache.scrolledTo !== location.hash) {
+    castingCache.scrolledTo = location.hash;
+    setTimeout(() => card.isConnected && card.scrollIntoView({ block: "center" }));
+  }
+  return card;
 }
 
 const bullet = (items, mono = false) =>

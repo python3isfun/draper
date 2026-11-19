@@ -16,9 +16,9 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from .models.assets import AssetRequirement, SubjectRef
-from .models.design_sheets import CastLook, SetState
+from .models.design_sheets import CastLook, PropItem, PropSheet, PropVariant, SetState
 from .models.package import ChangeLogEntry, ProductionPackage, utcnow
-from .models.story import CharacterLook, LocationState
+from .models.story import CharacterLook, LocationState, Prop, PropState
 from .pipeline.asset_aggregation import DesignSheets, ReuseUnit, default_design
 
 # Sheet list name -> the ID field of its entries.
@@ -214,9 +214,10 @@ def _slug(text: str) -> str:
 
 
 def _new_id(prefix: str, owner: str, description: str, taken: set[str]) -> str:
-    """ "lk_lila_torn_evening_dress" for Lila's ("ch_lila") new look; a number when taken."""
+    """ "lk_lila_torn_evening_dress" for Lila's ("ch_lila") new look, "prop_red_umbrella"
+    for an item (no owner in its id); a number when taken."""
     key = re.sub(r"^(ch|loc)_", "", owner)
-    base = f"{prefix}_{key}_{_slug(description) or 'new'}"
+    base = f"{prefix}_{f'{key}_' if key else ''}{_slug(description) or 'new'}"
     out, n = base, 2
     while out in taken:
         out, n = f"{base}_{n}", n + 1
@@ -316,3 +317,76 @@ def _validated(model: type[BaseModel], data: dict[str, Any]) -> BaseModel:
     except ValidationError as exc:
         msgs = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())
         raise EditError(msgs) from None
+
+
+@dataclass
+class AddedItem:
+    prop_id: str
+    state_id: str  # its first state
+    requirement_id: str
+    deliverable_ids: list[str]
+
+
+def add_item(
+    pkg: ProductionPackage,
+    owner_id: str,
+    name: str,
+    story_function: str = "",
+    sheet: dict[str, Any] | None = None,
+    state: str = "",
+) -> AddedItem:
+    """Add an item a character carries, by hand, in place: the story bible's prop (owned by
+    the character) with a first state, their design sheet entries, and the asset
+    requirement its detail picture is drawn for. No shot uses it yet. Raises KeyError for
+    an unknown character, EntryLocked when it is locked, EditError for a bad field."""
+    name, story_function = name.strip(), story_function.strip()
+    state = state.strip() or "As it first appears"
+    sheet = _clean(sheet or {})
+    if not name:
+        raise EditError("name the item")
+    bible = pkg.story_bible
+    if not any(c.character_id == owner_id for c in bible.characters):
+        raise KeyError(f"no character {owner_id}")
+    if owner_id in pkg.locked_ids:
+        raise EntryLocked(f"locked: {owner_id}")
+    taken = {p.prop_id for p in bible.props} | {s.prop_state_id for s in bible.prop_states}
+    taken |= {r.requirement_id for r in pkg.asset_requirements.items}
+    pid = _new_id("prop", "", name, taken)
+    sid = _new_id("ps", pid.removeprefix("prop_"), state, taken)
+    fields = {"size_and_scale": "", "materials": "", "color_and_finish": "",
+              "condition_and_wear": "", "handling": ""} | sheet  # fmt: skip
+    item = _validated(PropItem, fields | {"prop_id": pid, "name": name})
+    variant = _validated(PropVariant, {"prop_state_id": sid, "prop_id": pid, "condition": "",
+                                       "changes_from_base": state})  # fmt: skip
+    bible.props.append(Prop(prop_id=pid, name=name, story_function=story_function,
+                            owner_character_id=owner_id))  # fmt: skip
+    bible.prop_states.append(PropState(prop_state_id=sid, prop_id=pid, description=state))
+    if pkg.prop_sheet is None:
+        pkg.prop_sheet = PropSheet()
+    pkg.prop_sheet.props.append(item)  # type: ignore[arg-type]
+    pkg.prop_sheet.states.append(variant)  # type: ignore[arg-type]
+    unit = ReuseUnit("prop", "prop", pid, sid)
+    sheets = DesignSheets(cast=pkg.cast_sheet, sets=pkg.set_sheet, props=pkg.prop_sheet)
+    made = default_design(unit, bible, sheets)
+    assert made is not None  # its bible entries were just added
+    req = AssetRequirement(
+        requirement_id=unit.requirement_id,
+        asset_type="prop",
+        subject_refs=[SubjectRef(entity_type="prop", entity_id=pid, variant_id=sid)],
+        design_brief=made.brief,
+        must_keep=made.must_keep,
+        design_freedom=made.design_freedom,
+        deliverables=made.deliverables,
+        requirement_status="ready",
+    )
+    pkg.asset_requirements.items.append(req)
+    pkg.change_log.append(
+        ChangeLogEntry(
+            revision_id=pkg.revision_id,
+            target_ids=[owner_id],
+            changed_ids=[pid, sid, req.requirement_id],
+            note=f"Added by hand: item {pid}, carried by {owner_id}",
+            at=utcnow(),
+        )
+    )
+    return AddedItem(pid, sid, req.requirement_id, [d.deliverable_id for d in req.deliverables])

@@ -223,3 +223,52 @@ def test_keyframe_chats_are_checked(tmp_path):
             b.http.post(f"{url}/{chat['session_id']}/use-keyframe", json={"image": 1}).status_code
             == 409
         )
+
+
+def test_a_new_item_is_carried_by_its_character(package):
+    from drama_agent.sheet_edit import add_item
+
+    added = add_item(package, "ch_frank", "Red umbrella", "He lends it to her in the rain",
+                     {"materials": "nylon canopy, bamboo handle"})  # fmt: skip
+    assert (added.prop_id, added.state_id) == ("prop_red_umbrella", "ps_red_umbrella_as_it_first")
+    prop = next(p for p in package.story_bible.props if p.prop_id == added.prop_id)
+    assert prop.owner_character_id == "ch_frank" and prop.story_function.startswith("He lends")
+    sheet = next(p for p in package.prop_sheet.props if p.prop_id == added.prop_id)
+    assert sheet.name == "Red umbrella" and sheet.materials.startswith("nylon")
+    req = package.asset_requirements.items[-1]
+    assert req.requirement_id == added.requirement_id and req.used_by == []
+    assert "bamboo handle" in req.design_brief and added.deliverable_ids[0].endswith("_detail")
+    slot = next(s for s in design_slots(package) if s["requirement_id"] == req.requirement_id)
+    assert slot["anchor"]  # its first state is drawn from text, as any prop's
+    assert add_item(package, "ch_frank", "Red umbrella").prop_id == "prop_red_umbrella_2"
+    with pytest.raises(KeyError):
+        add_item(package, "ch_nobody", "x")
+    with pytest.raises(EditError):
+        add_item(package, "ch_frank", "  ")
+    with pytest.raises(EditError):
+        add_item(package, "ch_frank", "x", sheet={"pockets": "2"})
+
+
+def test_new_item_through_the_api_on_its_page_and_in_the_storys_props(tmp_path):
+    with Board(tmp_path) as b:
+        pkg = b.repo.get_package(b.pid)
+        cid = pkg.story_bible.characters[0].character_id
+        r = b.http.post(f"/v1/drama-packages/{b.pid}/items",
+                        json={"owner_id": cid, "name": "Brass lighter", "state": "Polished"})  # fmt: skip
+        assert r.status_code == 201, r.text
+        out = r.json()
+        view = b.http.get(f"/v1/library/characters/{out['lib_asset_id']}").json()
+        item = next(x for x in view["items"] if x["asset_id"] == out["part_asset_id"])
+        assert item["name"] == "Brass lighter" and item["states"][0]["description"] == "Polished"
+        casting = b.http.get(f"/v1/drama-packages/{b.pid}/casting").json()
+        row = next(c for c in casting if c["story_id"] == out["prop_id"])
+        assert row["asset_id"] == out["part_asset_id"] and row["parent_id"] == out["lib_asset_id"]
+        # Drawn like any prop: its first state from text.
+        r = b.http.post(f"/v1/drama-packages/{b.pid}/images/takes",
+                        json={"requirement_id": out["requirement_id"],
+                              "deliverable_id": out["deliverable_ids"][0], "draws": 1})  # fmt: skip
+        assert r.status_code == 202, r.text
+        bad = b.http.post(
+            f"/v1/drama-packages/{b.pid}/items", json={"owner_id": "ch_x", "name": "x"}
+        )
+        assert bad.status_code == 404

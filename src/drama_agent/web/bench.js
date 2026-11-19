@@ -110,6 +110,33 @@ async function benchFaceFromText(target, button) {
   }
 }
 
+// "From a reference photo" on any picture but a face (a face has Face Lab): a chat for
+// that picture whose first message is the photo, so it is the current image; describe what
+// to make of it ("a clean product shot of this, on grey"), then Use as pick.
+async function benchChatFromPhoto(file, target, button) {
+  const say = (msg) => {
+    button.parentElement?.querySelector(".bench-error")?.remove();
+    button.after(h("span", { class: "form-error bench-error" }, msg));
+  };
+  if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return say(`${file.name}: use a JPEG, PNG or WebP photo.`);
+  const label = button.textContent;
+  button.disabled = true;
+  let chat = null;
+  try {
+    button.textContent = "Uploading…";
+    const asset = await uploadFile(file, (p) => { button.textContent = `Uploading (${Math.round(p * 100)}%)…`; }, () => { button.textContent = "Processing…"; });
+    chat = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, start_from_pick: false, title: `${target.label}: from ${file.name}` }) });
+    await api(`/v1/experiments/${encodeURIComponent(chat.session_id)}/turns`, {
+      method: "POST", body: JSON.stringify({ text: "", attachments: [asset.asset_id], restrictive: restrictiveBox.checked }) });
+  } catch (e) {
+    if (!chat) say(e.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+    if (chat) openBench("chat", chat.session_id, target.label);
+  }
+}
+
 $("#bench-close").addEventListener("click", () => closeBench());
 
 // Scratch's buttons (the Characters and Sets sidebar).

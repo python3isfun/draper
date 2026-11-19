@@ -741,3 +741,6 @@ td.mono { white-space: nowrap; }
 .kf-thumb .lib-noimg { width: 120px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
 .kf-thumb.approved img { border: 2px solid var(--ok); }
 .kf-thumb figcaption { color: var(--muted); }
+
+/* A story prop on the Casting tab; the one opened from its item page is marked. */
+.prop-card.focused { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }

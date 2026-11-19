@@ -110,3 +110,26 @@ API:
   it stands where a drawn keyframe stands: approved, exported, and drawn from by the next
   cut. It's refused (409) while the cut is being drawn, before the cut has any take, or,
   for a later cut, when its pattern wasn't drawn from the approved keyframe before it.
+
+## Carried items and the story's Props
+
+A character's **Carried items** are the story's props it owns (`owner_character_id`); a
+prop with no owner is **Dressing** of the set it appears in most. Each is an item page
+under its character or set, with its pictures (one per state) and the shots it's in.
+
+- **+ New item** on a character page: a name, what it does in the story, how it first
+  appears (its first state; default "As it first appears"), optionally what it looks like
+  (the prop sheet's fields) and a reference photo. It's added to the story in place
+  (`POST /v1/drama-packages/{id}/items`, `sheet_edit.add_item`): the bible's prop, owned
+  by the character, with its first state, their sheet entries, and the requirement its
+  detail picture is drawn for (in no shot yet). Its picture page opens; with a photo, a
+  chat for that picture opens with the photo as its current image.
+- **From a reference photo**, on every picture page but a face (a face has Face Lab):
+  upload a photo and a chat starts with it as the current image; say what to make of it
+  ("a clean product shot of this on grey") and Use as pick on the result.
+- **Cross-reference:** the story's Casting tab lists its **Props** as cards (picture, what
+  it does, shots, id), each opening its item page and naming who carries it (or the set
+  it dresses), linked. An item page's **See it in the story's Props** opens the Casting tab
+  scrolled to that prop, marked. The casting rows (`GET .../casting`) carry each entity's
+  `parent_id`, the page it's on.
+- A prop no one carries and no shot uses is on no page; the Props card says so.

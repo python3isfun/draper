@@ -44,8 +44,10 @@ from ..models import (
     ProductionPackage,
 )
 from ..models.images import DesignOption, GeneratedImage
-from ..sheet_edit import EditError, EntryLocked, add_variant, edit_entry
+from ..sheet_edit import EditError, EntryLocked, add_item, add_variant, edit_entry
 from .schemas import (
+    AddItemRequest,
+    AddItemResult,
     AddVariantRequest,
     AddVariantResult,
     DesignTarget,
@@ -533,6 +535,34 @@ def register(app: FastAPI, ctx: Any) -> None:
             package_id=pkg.package_id, revision_id=pkg.revision_id, entry_id=added.entry_id,
             requirement_id=added.requirement_id, deliverable_ids=added.deliverable_ids,
             lib_asset_id=lib, part_asset_id=part,
+        )  # fmt: skip
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/items", status_code=201, response_model=AddItemResult
+    )
+    async def add_package_item(package_id: str, req: AddItemRequest) -> AddItemResult:
+        """A new item a character carries, added by hand in place: the story's prop (owned
+        by the character), its first state, sheet entries and the requirement its detail
+        picture is drawn for. It shows among the character's carried items and in the
+        story's Props. No shot uses it yet."""
+        pkg = _package_or_404(package_id, req.revision_id)
+        _package_job(pkg.package_id, None, pkg.revision_id)  # refuses archived stories
+        _no_running_job(package_id)
+        try:
+            added = add_item(pkg, req.owner_id, req.name, req.story_function, req.sheet,
+                             req.state)  # fmt: skip
+        except KeyError as exc:
+            raise HTTPException(404, str(exc.args[0])) from None
+        except EntryLocked as exc:
+            raise HTTPException(409, str(exc)) from None
+        except EditError as exc:
+            raise HTTPException(422, str(exc)) from None
+        repo.replace_package(pkg)
+        lib, part = _lib_ids(pkg.package_id, "item", added.prop_id)
+        return AddItemResult(
+            package_id=pkg.package_id, revision_id=pkg.revision_id, prop_id=added.prop_id,
+            state_id=added.state_id, requirement_id=added.requirement_id,
+            deliverable_ids=added.deliverable_ids, lib_asset_id=lib, part_asset_id=part,
         )  # fmt: skip
 
     # -- Keyframe draws as takes of a look or a set state ---------------------------------

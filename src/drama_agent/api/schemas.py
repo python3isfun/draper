@@ -333,3 +333,27 @@ class UseKeyframeRequest(BaseModel):
 
     image: int = Field(..., ge=1)
     approve: bool = True
+
+
+class AddItemRequest(BaseModel):
+    """A new item a character carries, added by hand. `sheet` holds prop sheet fields
+    (size_and_scale, materials, color_and_finish, condition_and_wear, distinguishing_marks,
+    handling); `state` is its first state's line (default "As it first appears")."""
+
+    owner_id: str  # the story's character_id
+    name: str = Field(..., min_length=1, max_length=120)
+    story_function: str = Field("", max_length=500)
+    sheet: dict[str, Any] = Field(default_factory=dict)
+    state: str = Field("", max_length=300)
+    revision_id: str | None = None
+
+
+class AddItemResult(BaseModel):
+    package_id: str
+    revision_id: str
+    prop_id: str
+    state_id: str
+    requirement_id: str
+    deliverable_ids: list[str]
+    lib_asset_id: str | None = None  # its character's page ...
+    part_asset_id: str | None = None  # ... and the item on it
