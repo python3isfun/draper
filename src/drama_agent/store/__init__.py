@@ -31,6 +31,8 @@ class Repository(Protocol):
     ) -> ProductionPackage | None: ...
     def save_revision(self, rev: Revision) -> None: ...
     def get_revision(self, revision_id: str) -> Revision | None: ...
+    def list_revisions(self, package_id: str | None = None) -> list[Revision]: ...
+    def carry_forward(self, package_id: str, from_revision: str, to_revision: str) -> int: ...
     def save_evaluation_report(self, package_id: str, revision_id: str, r: QAReport) -> None: ...
     # Trace (live progress + debugging)
     def add_event(self, event: TraceEvent) -> int: ...
@@ -203,6 +205,37 @@ class InMemoryRepository:
 
     def get_revision(self, revision_id: str) -> Revision | None:
         return self.revisions.get(revision_id)
+
+    def list_revisions(self, package_id: str | None = None) -> list[Revision]:
+        """Revisions, oldest first (all packages when package_id is None)."""
+        return [r for r in self.revisions.values() if package_id in (None, r.package_id)]
+
+    def carry_forward(self, package_id: str, from_revision: str, to_revision: str) -> int:
+        """Move a story's design pictures, design options, keyframe takes, prompt versions,
+        cut plans, scene readings and library picture links from one revision to the next
+        (a published revise run). Ids stay the same, so picks and references keep working;
+        what the revision changed is then judged out of date by its fingerprints. Returns
+        the number of rows moved."""
+        moved = 0
+        stores: list[Any] = [self.images, self.options, self.shot_takes, self.asset_images]
+        for store in stores:
+            for key, row in list(store.items()):
+                if row.package_id == package_id and row.revision_id == from_revision:
+                    store[key] = row.model_copy(update={"revision_id": to_revision})
+                    moved += 1
+        for keyed in (self.shot_plans, self.scene_readings):
+            for key, row in list(keyed.items()):
+                if row.package_id == package_id and row.revision_id == from_revision:
+                    del keyed[key]
+                    keyed[(key[0], to_revision, key[2])] = row.model_copy(
+                        update={"revision_id": to_revision}
+                    )
+                    moved += 1
+        for i, pv in enumerate(self.prompt_versions):
+            if pv.package_id == package_id and pv.revision_id == from_revision:
+                self.prompt_versions[i] = pv.model_copy(update={"revision_id": to_revision})
+                moved += 1
+        return moved
 
     def save_evaluation_report(self, package_id: str, revision_id: str, r: QAReport) -> None:
         self.evaluation_reports[(package_id, revision_id)] = r

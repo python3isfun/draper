@@ -35,8 +35,12 @@ with no build step. It lets you:
   prompt), then watch the pipeline steps progress
 - browse the result: story bible, scripts, the timed storyboard with a shot timeline,
   the cast, set and prop sheets, asset requirements (filterable by type), and QA issues with token usage
-- request a targeted revision and see its impact analysis (conflicts, locked objects in
-  scope, impacted objects, stale asset requirements)
+- revise a published story (the Revise tab): name what to change, how, and what is
+  locked. Only the steps that own the targets re-run; everything outside the impacted
+  objects, and everything locked, is put back by the program. A result that passes the
+  checks is published as a new revision. The story's pictures, keyframes, cut plans and
+  readings move to it, and what the revision changed is marked out of date
+  (`pipeline/revise.py`; `GET /v1/revisions/{id}` follows a run)
 - export a package as Markdown or JSON
 
 Model output is always inserted as text, never as HTML.
@@ -760,6 +764,8 @@ src/drama_agent/
     asset_aggregation.py  Derives/merges asset requirements from shots (reuse units,
                           used_by, depends_on are program-owned)
     impact.py        Revision impact analysis and stale-requirement propagation
+    revise.py        The revise run: scoped re-runs, scope and locks put back, publish,
+                     the story's work carried forward
   validation/      Deterministic hard checks (spec §8) and ID index
   llm/             Vendor-neutral ModelClient protocol, MCPHub client, offline fixture
   config.py        .env loading and model client selection
@@ -813,6 +819,4 @@ src/drama_agent/
 
 - Script files as uploads (`type: script` with an `asset_id`); paste scripts as text.
 - Non-speech audio analysis (music, sound effects) for videos.
-- The revision regeneration worker: `POST .../revisions` validates the request, runs the
-  impact analysis and records the revision as `queued`, but nothing regenerates content yet.
 - Upstream retry: a failing step only retries itself. It never re-runs earlier steps.

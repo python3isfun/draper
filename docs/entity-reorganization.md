@@ -297,6 +297,58 @@ derived from what it uses, with any import cycle refused.
   - one test now patches the export folder in `api/schemas`.
 - **Done in a git worktree:** splitting in place took the live server down twice.
 
+## Phase 5 as built (18 Nov 2026): the revise run
+
+`POST /v1/drama-packages/{id}/revisions` now runs the revision (`pipeline/revise.py`,
+`ReviseRunner`, in the server process like the keyframe runner). Follow it with
+`GET /v1/revisions/{id}`.
+
+- **Which steps re-run.** Only the steps that own the targets, plus the steps that depend
+  on them:
+  - a character, place or prop: outline, plus its sheet when the change is visual;
+  - a look or state: its sheet;
+  - an episode, scene, beat or line: script;
+  - a shot or requirement: storyboard;
+  - an outline that touches scenes also re-runs script; script re-runs storyboard;
+  - review always runs last.
+
+  Each re-run step sees its current output and the scope (targets, impacted ids, locked
+  ids). When the storyboard doesn't re-run, the requirements are derived again from the new
+  sheets. Unchanged subjects keep their design briefs.
+- **The program enforces the scope.** After each attempt, entries outside the impacted ids
+  are put back from the base revision, by id (bible entries, episodes and scenes, sheet
+  entries, shots, timing), and so is every locked object. A locked line inside a scene that
+  may change keeps its exact text. The step checks, the hard checks and `check_locks` then
+  gate the result.
+- **Publishing.**
+  - The new revision is saved as published, with a `Revised: <instruction>` change-log
+    entry listing the changed ids.
+  - The story's work moves to it (`carry_forward`): design pictures, options, keyframe
+    takes, prompt versions, cut plans, readings and library picture links. Ids stay the
+    same, so picks and references keep working.
+  - The job points at the new revision.
+  - Publishing waits for running work (pictures being drawn, keyframes, plans, readings),
+    up to 15 minutes. If it is still busy after that, the revision fails and the story
+    stays where it was.
+- **What becomes out of date.**
+  - Design pictures, plans and keyframes follow their design-text fingerprints.
+  - Readings follow their fingerprint.
+  - Shots whose action changed flag their cut plans and keyframes through the new
+    `revised_since` rule (`PLAN_SHOT_REVISED`, `KF_SHOT_REVISED`).
+- **Scope details.**
+  - A shot target reaches only the shot and its neighbours. The other shots of its scene
+    stay as they are.
+  - The storyboard's rewritten design briefs count only for requirements the revision
+    reaches.
+  - The request's locks hold for that run only; the story's own locks don't change.
+  - Only a published story can be revised.
+  - A hand edit saved while the run is going stops the publish (request it again).
+- **Failure.** A result that still fails the checks is kept as an unpublished draft, and the
+  revision is `needs_revision` with its issues. A revision cut off by a server restart is
+  marked failed at startup.
+- **One choice to note.** Earlier revisions keep their text but no longer list pictures:
+  the work follows the story's latest revision.
+
 ## Risks and open questions
 
 1. **Same name is not the same character.** Casting across stories must be confirmed by a

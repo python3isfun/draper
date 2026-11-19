@@ -210,6 +210,15 @@ class Revision(BaseModel):
     # Locked objects inside the scope; regeneration must leave them unchanged.
     locked_in_scope: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
+    # The revise run (pipeline/revise.py): the steps it re-ran, the objects that came out
+    # different from the base revision, the hard issues it could not fix, and why it
+    # failed. `moved` counts the pictures, takes, plans and readings carried forward.
+    steps: list[str] = Field(default_factory=list)
+    changed_ids: list[str] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
+    error: str | None = None
+    moved: int = 0
+    finished_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------

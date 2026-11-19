@@ -188,6 +188,13 @@ CREATE TABLE IF NOT EXISTS shot_plans (
 _NOT_ARCHIVED = "coalesce(json_extract(data, '$.archived'), 0) = 0"
 
 
+# Tables of a story's work kept per revision; a published revise run moves them forward.
+_REVISION_TABLES = (
+    "generated_images", "design_options", "shot_takes", "shot_prompts", "shot_plans",
+    "scene_readings",
+)  # fmt: skip
+
+
 class SqliteRepository:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -366,6 +373,46 @@ class SqliteRepository:
     def get_revision(self, revision_id: str) -> Revision | None:
         raw = self._one("SELECT data FROM revisions WHERE revision_id = ?", (revision_id,))
         return Revision.model_validate_json(raw) if raw else None
+
+    def list_revisions(self, package_id: str | None = None) -> list[Revision]:
+        """Revisions, oldest first (all packages when package_id is None)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM revisions WHERE ? IS NULL OR package_id = ? ORDER BY rowid",
+                (package_id, package_id),
+            ).fetchall()
+        return [Revision.model_validate_json(r[0]) for r in rows]
+
+    def carry_forward(self, package_id: str, from_revision: str, to_revision: str) -> int:
+        """Move a story's design pictures, design options, keyframe takes, prompt versions,
+        cut plans, scene readings and library picture links from one revision to the next
+        (a published revise run). Ids stay the same, so picks and references keep working;
+        what the revision changed is then judged out of date by its fingerprints. Returns
+        the number of rows moved."""
+        moved = 0
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                for table in _REVISION_TABLES:
+                    cur = self._conn.execute(
+                        f"UPDATE {table} SET revision_id = ?, "  # table names are fixed
+                        "data = json_set(data, '$.revision_id', ?) "
+                        "WHERE package_id = ? AND revision_id = ?",
+                        (to_revision, to_revision, package_id, from_revision),
+                    )
+                    moved += cur.rowcount
+                # Library picture links keep their revision in the data only.
+                cur = self._conn.execute(
+                    "UPDATE asset_images SET data = json_set(data, '$.revision_id', ?) "
+                    "WHERE package_id = ? AND json_extract(data, '$.revision_id') = ?",
+                    (to_revision, package_id, from_revision),
+                )
+                moved += cur.rowcount
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            self._conn.execute("COMMIT")
+        return moved
 
     def save_evaluation_report(self, package_id: str, revision_id: str, r: QAReport) -> None:
         self._exec(

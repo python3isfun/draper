@@ -21,6 +21,8 @@ KF_TEXT_CHANGED = "the set, look or prop text changed since it was drawn"
 
 KF_BEFORE_CHANGED = "the keyframe it continues from has changed"
 
+KF_SHOT_REVISED = "a revision changed the shot since it was drawn"
+
 KF_BEFORE_OUTDATED = "the keyframe it continues from is out of date"  # redraw that one first
 
 
@@ -61,6 +63,17 @@ def edited_since(pkg: ProductionPackage, shot: Shot, when: datetime) -> bool:
     )  # fmt: skip
 
 
+def revised_since(pkg: ProductionPackage, shot_id: str, when: datetime) -> bool:
+    """Whether a revise run (pipeline/revise.py) changed the shot after `when`."""
+    return any(
+        e.note.startswith("Revised") and shot_id in e.changed_ids
+        and e.at is not None and e.at > when
+        for e in pkg.change_log
+    )  # fmt: skip
+
+
+PLAN_SHOT_REVISED = "before a revision changed the shot: plan the cuts again"
+
 PLAN_TEXT_CHANGED = (
     "before the set, look or prop text changed: its framing may describe the old design; "
     "plan the cuts again"
@@ -71,6 +84,8 @@ def plan_outdated(pkg: ProductionPackage, shot: Shot, plan: ShotPlan | None) -> 
     """Why a stored cut plan may describe an earlier design, or None."""
     if plan is None or plan.source == "single" or plan.status != "done":
         return None
+    if revised_since(pkg, shot.shot_id, plan.updated_at):
+        return PLAN_SHOT_REVISED
     if plan.design_print is not None:
         return PLAN_TEXT_CHANGED if plan.design_print != design_print(pkg, shot) else None
     return PLAN_TEXT_CHANGED if edited_since(pkg, shot, plan.updated_at) else None
@@ -103,6 +118,8 @@ def keyframe_judge(
                 out.append(KF_TEXT_CHANGED)
         elif edited_since(pkg, shot, t.created_at):
             out.append(KF_TEXT_CHANGED)
+        if revised_since(pkg, t.shot_id, t.created_at):
+            out.append(KF_SHOT_REVISED)
         for r in t.references:
             if r.kind in ("previous_frame", "start_frame", "previous_shot"):
                 now = (previous_shot_frame(pkg, takes, shot) if r.kind == "previous_shot"

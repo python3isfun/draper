@@ -45,6 +45,7 @@ from ..models import (
     ProductionPackage,
 )
 from ..pipeline.orchestrator import Orchestrator
+from ..pipeline.revise import ReviseRunner
 from ..shot_frames import ShotFrameRunner
 from ..store import InMemoryRepository, Repository
 from ..worker import JobWorker, recover
@@ -81,27 +82,22 @@ def create_app(
     Uploads go to `media` (default: a fresh temporary directory)."""
 
     repo = repo or InMemoryRepository()
-
     queue = queue or InMemoryJobQueue()
-
     media = media or MediaStore(tempfile.mkdtemp(prefix="drama-media-"))
-
     orchestrator = Orchestrator(
         repo, client or FixtureModelClient(), checkpoints=queue, media=media
     )
-
     images = image_client or FixtureImageClient()
-
     wakeup = asyncio.Event()
-
     image_wakeup = asyncio.Event()
-
     experiments = ExperimentRunner(repo, media, images, orchestrator.client)
 
     # Keyframes share the Experiment tab's GPU lock: one render at a time from this process.
     # Keyframes can also be drawn with other providers (e.g. Nano Banana), chosen per take.
     keyframes = ShotFrameRunner(repo, media, images, orchestrator.client, gpu=experiments._gpu,
                                 providers=keyframe_providers, default_provider=keyframe_provider)  # fmt: skip
+    # Targeted revisions of a published story; the library mirrors the new revision.
+    revisions = ReviseRunner(repo, orchestrator, after_publish=lambda: sync_library(repo))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -117,6 +113,8 @@ def create_app(
             log.info("marked %d interrupted experiment turns failed", n)
         if n := keyframes.recover():
             log.info("marked %d interrupted keyframe takes failed", n)
+        if n := revisions.recover():
+            log.info("marked %d interrupted revisions failed", n)
         n = recover(repo, queue)
         if n:
             log.info("enqueued %d unfinished jobs without a queue entry", n)

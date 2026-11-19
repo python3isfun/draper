@@ -1430,6 +1430,7 @@ function renderRevise(pkg) {
       r.error = e.message;
     }
     renderMain();
+    if (r.result && revisionBusy(r.result)) followRevision(r.result.revision_id);
   };
 
   const instruction = h("textarea", { rows: 3, required: true, placeholder: "Make the father's motive in episode 2 more believable, without revealing who he is too early", oninput: (e) => { r.instruction = e.target.value; } });
@@ -1440,25 +1441,62 @@ function renderRevise(pkg) {
   return h("div", { class: "stack" },
     h("form", { class: "card", onsubmit: submit },
       h("h3", { style: "margin-bottom:10px" }, "Request a targeted revision"),
-      h("p", { class: "hint" }, `Based on revision ${pkg.revision_id}. The server runs the impact analysis now. Regenerating the content isn't implemented yet.`),
+      h("p", { class: "hint" }, `Based on revision ${pkg.revision_id}. Only the steps that own the targets are re-run; everything outside the impacted objects, and everything locked, is kept as it is. When it passes the checks it is published as a new revision, and the story's pictures, keyframes and cut plans move to it: what the revision changed is marked out of date.`),
       h("datalist", { id: "all-ids" }, ids.map(([id, label]) => h("option", { value: id }, label))),
       picker("targets", "Targets: what to change"),
       picker("locked", "Locked: must not change"),
       h("label", { class: "field" }, h("span", {}, "Instruction"), instruction),
       h("label", { class: "check" }, visual, "This changes how a character, location or prop looks"),
-      h("button", { class: "btn primary", type: "submit" }, "Analyze impact"),
+      h("button", { class: "btn primary", type: "submit", disabled: !!(r.result && revisionBusy(r.result)) }, "Revise"),
       r.error && h("p", { class: "form-error" }, r.error),
     ),
     r.result && renderRevisionResult(r.result),
   );
 }
 
+const revisionBusy = (rev) => rev.status === "queued" || rev.status === "running";
+
+// Follow a revise run until it ends; a published one becomes the page's revision.
+async function followRevision(revisionId) {
+  let seen = "";
+  for (;;) {
+    await new Promise((res) => setTimeout(res, 1500));
+    const r = state.revise;
+    if (!r || r.result?.revision_id !== revisionId) return;  // another request since
+    let rev;
+    try { rev = await api(`/v1/revisions/${encodeURIComponent(revisionId)}`); } catch { continue; }
+    const sig = JSON.stringify(rev);
+    if (sig === seen) continue;
+    seen = sig;
+    r.result = rev;
+    if (revisionBusy(rev)) { renderMain(); continue; }
+    if (rev.status === "published") {
+      r.targets = [];
+      r.instruction = "";
+      if (state.job) await loadJob(state.job.job_id);
+    }
+    renderMain();
+    return;
+  }
+}
+
 function renderRevisionResult(rev) {
   const group = (title, items, tone) =>
     h("div", {}, h("h4", { class: "small muted", style: "margin:10px 0 4px" }, `${title} (${items.length})`),
       items.length ? h("div", { class: "chips" }, items.map((i) => h("span", { class: `chip mono ${tone}` }, i))) : h("span", { class: "muted small" }, "None"));
+  const said = {
+    queued: "Waiting to start.",
+    running: `Re-running ${rev.steps.join(", ") || "the steps"}…`,
+    published: `Published. ${rev.moved} pictures, takes, plans and readings moved to it; what changed is marked out of date.`,
+  }[rev.status];
   return h("section", { class: "card result" },
     h("div", { class: "section-head" }, h("h3", {}, `Revision ${rev.revision_id}`), statusChip(rev.status)),
+    said && h("p", { class: "hint" }, said),
+    rev.error && h("p", { class: "form-error" }, rev.error),
+    rev.steps.length > 0 && group("Steps re-run", rev.steps, ""),
+    rev.changed_ids.length > 0 && group("Changed", rev.changed_ids, "ok"),
+    rev.issues.length > 0 && h("div", {}, h("h4", { class: "small muted", style: "margin:10px 0 4px" }, "Issues left"),
+      h("ul", { class: "small" }, rev.issues.map((i) => h("li", {}, i)))),
     group("Conflicts", rev.conflicts, "bad"),
     group("Locked objects in scope (must stay unchanged)", rev.locked_in_scope, "warn"),
     group("Impacted objects", rev.impacted_ids, "info"),

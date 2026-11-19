@@ -615,20 +615,27 @@ class StoryboardStep(Step):
         state.notes[self.name] = output.notes
         _normalize(state, self.name, state.shots)
         state.timing = output.timing
-        state.asset_requirements = aggregate_asset_requirements(
-            state.story_bible,
-            state.shots,
-            output.style_brief,
-            {o.requirement_id: o for o in output.design_overrides},
-            state.sheets(),
+        finish_storyboard(
+            state, output.style_brief, {o.requirement_id: o for o in output.design_overrides}
         )
-        valid = hc.compute_planned_timing_valid(state.draft_package(), state.request.options)
-        for t in state.timing:
-            t.planned_timing_valid = valid.get(t.episode_id, False)
-            t.spoken_timing_verified = False  # no voice measurement in V1
 
     def check(self, state: PipelineState) -> list[Issue]:
         return hc.run_hard_checks(state.draft_package(), state.request.options)
+
+
+def finish_storyboard(
+    state: PipelineState, style_brief: StyleBrief, overrides: dict[str, AssetRequirement]
+) -> None:
+    """What the program derives from the shots: the asset requirements (written back onto
+    the shots) and each episode's timing flags."""
+    assert state.story_bible is not None
+    state.asset_requirements = aggregate_asset_requirements(
+        state.story_bible, state.shots, style_brief, overrides, state.sheets()
+    )
+    valid = hc.compute_planned_timing_valid(state.draft_package(), state.request.options)
+    for t in state.timing:
+        t.planned_timing_valid = valid.get(t.episode_id, False)
+        t.spoken_timing_verified = False  # no voice measurement in V1
 
 
 class ReviewStep(Step):

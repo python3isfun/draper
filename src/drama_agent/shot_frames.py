@@ -151,7 +151,9 @@ from .shots.runner import (
 from .shots.staleness import (
     KF_BEFORE_CHANGED,
     KF_BEFORE_OUTDATED,
+    KF_SHOT_REVISED,
     KF_TEXT_CHANGED,
+    PLAN_SHOT_REVISED,
     PLAN_TEXT_CHANGED,
     design_ids,
     design_print,
@@ -159,6 +161,7 @@ from .shots.staleness import (
     keyframe_judge,
     outdated_keyframes,
     plan_outdated,
+    revised_since,
 )
 from .shots.takes import (
     _fixes,
@@ -201,6 +204,7 @@ __all__ = [
     "KEYFRAME_SIZES",
     "KF_BEFORE_CHANGED",
     "KF_BEFORE_OUTDATED",
+    "KF_SHOT_REVISED",
     "KF_TEXT_CHANGED",
     "MAJOR_PENALTY",
     "MAX_CLIP_S",
@@ -216,6 +220,7 @@ __all__ = [
     "PASS_SCORE",
     "PLAN_GUIDE",
     "PLAN_ROLE",
+    "PLAN_SHOT_REVISED",
     "PLAN_STAGE",
     "PLAN_TEXT_CHANGED",
     "SHOT_VIEWS",
@@ -294,6 +299,7 @@ __all__ = [
     "planned_sub_shots",
     "previous_shot_frame",
     "prompt_findings",
+    "revised_since",
     "scene_of",
     "score",
     "shot_board",

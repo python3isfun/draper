@@ -34,6 +34,7 @@ def register(app: FastAPI, ctx: Any) -> None:
     _package_or_404 = ctx._package_or_404
     media = ctx.media
     repo = ctx.repo
+    revisions = ctx.revisions
 
     @app.get("/v1/drama-packages/{package_id}", response_model=None)
     async def get_package(
@@ -123,6 +124,14 @@ def register(app: FastAPI, ctx: Any) -> None:
         impact = analyze_impact(pkg, req.target_ids, req.locked_ids, req.visual_change)
         if impact.unknown_targets:
             raise HTTPException(422, f"unknown target_ids: {impact.unknown_targets}")
+        base_rev = repo.get_revision(pkg.revision_id)
+        if base_rev is not None and base_rev.status != "published":
+            # A failed revise run's draft would become the story's newest draft.
+            raise HTTPException(409, "only a published story can be revised")
+        if revisions.running(package_id):
+            raise HTTPException(409, "a revision of this story is already running")
+        if any(j.status in ("queued", "running") for j in repo.jobs_for_package(package_id)):
+            raise HTTPException(409, "the story's job is still running")
 
         rev = Revision(
             revision_id=new_id("rev"),
@@ -136,6 +145,20 @@ def register(app: FastAPI, ctx: Any) -> None:
             status="needs_revision" if impact.conflicts else "queued",
         )
         repo.save_revision(rev)
-        # TODO: run the scoped regeneration worker (re-run only impacted steps with
-        # locked_ids enforced via check_locks), then publish a new package revision.
+        if rev.status == "queued":
+            # The revise run (pipeline/revise.py): re-runs the steps the targets touch,
+            # publishes a new revision and carries the story's pictures and keyframes to it.
+            revisions.start(rev.revision_id)
         return rev
+
+    @app.get("/v1/revisions/{revision_id}", response_model=Revision)
+    async def get_revision(revision_id: str) -> Revision:
+        rev = repo.get_revision(revision_id)
+        if rev is None:
+            raise HTTPException(404, "revision not found")
+        return rev
+
+    @app.get("/v1/revisions", response_model=list[Revision])
+    async def list_revisions(package_id: str) -> list[Revision]:
+        """A story's revisions, newest first."""
+        return list(reversed(repo.list_revisions(package_id)))
