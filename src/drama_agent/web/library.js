@@ -9,7 +9,7 @@
  * out-of-date" redraws this asset's out-of-date pictures (and what is drawn from them).
  */
 
-const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "", timer: null, redrawing: "",
+const lib = { kind: null, id: null, list: null, view: null, error: "", filter: "", story: "", timer: null, redrawing: "",
   designs: {}, designTimer: null };  // design board data per story revision on the page
 // Open editors by asset id; typed text is kept in `drafts` until saved or cancelled.
 const libEdit = { open: new Set(), drafts: {}, errors: {}, notes: {}, saving: new Set() };
@@ -75,23 +75,44 @@ function renderLibSide() {
   $("#lib-title").textContent = meta.plural;
   const list = $("#lib-list");
   if (!lib.list) return list.replaceChildren(h("li", { class: "muted small" }, "Loading…"));
+  renderLibStories();
   const f = lib.filter.trim().toLowerCase();
-  const shown = lib.list.filter((a) => !f || a.name.toLowerCase().includes(f));
+  const shown = libShown().filter((a) => !f || a.name.toLowerCase().includes(f));
   list.replaceChildren(...shown.map((a) =>
     h("li", {}, h("a", { href: `#lib=${a.asset_id}`, class: `lib-side-item${a.asset_id === lib.id ? " active" : ""}` },
       a.cover ? h("img", { src: a.cover.thumb, alt: "", loading: "lazy" }) : h("span", { class: "lib-noimg" }),
       h("span", {}, a.name, h("span", { class: "muted small" }, ` · ${count(a.children, meta.one, meta.many)}`))))));
-  if (!shown.length) list.replaceChildren(h("li", { class: "muted small" }, f ? "No match." : "Nothing yet."));
+  if (!shown.length) list.replaceChildren(h("li", { class: "muted small" }, f || lib.story ? "No match." : "Nothing yet."));
+}
+
+// The characters (or sets) of the story chosen in the story filter (all when none is).
+const libShown = () => (lib.list || []).filter((a) => !lib.story || (a.story_list || []).some((s) => s.package_id === lib.story));
+
+// The story filter's choices: every story the list's assets are cast in, by title.
+function renderLibStories() {
+  const sel = $("#lib-story");
+  if (!sel) return;
+  const stories = new Map();
+  for (const a of lib.list || []) for (const s of a.story_list || []) stories.set(s.package_id, s.title);
+  if (lib.story && !stories.has(lib.story)) lib.story = "";
+  const opts = [...stories].sort((x, y) => x[1].localeCompare(y[1]));
+  sel.replaceChildren(h("option", { value: "" }, "All stories"),
+    ...opts.map(([pid, title]) => h("option", { value: pid }, title || pid)));
+  sel.value = lib.story;
 }
 
 // Every character (or set) as a card with its cover.
 function renderLibGrid() {
   const meta = LIB_KINDS[lib.kind];
   if (!lib.list) return h("p", { class: "muted" }, "Loading…");
+  const shown = libShown();
+  const story = lib.story && shown[0]?.story_list.find((s) => s.package_id === lib.story)?.title;
   return h("section", {},
     h("div", { class: "section-head" }, h("h2", {}, meta.plural),
-      h("span", { class: "muted small" }, `${lib.list.length} in the library, from every story. Edit them in their story for now.`)),
-    h("div", { class: "lib-grid" }, lib.list.map((a) =>
+      h("span", { class: "muted small" }, lib.story
+        ? `${shown.length} in ${story || "this story"}.`
+        : `${lib.list.length} in the library, from every story. Edit them in their story for now.`)),
+    h("div", { class: "lib-grid" }, shown.map((a) =>
       h("a", { href: `#lib=${a.asset_id}`, class: "card lib-card" },
         a.cover ? h("img", { src: a.cover.thumb, alt: a.name, loading: "lazy" }) : h("div", { class: "lib-noimg big" }, "no picture yet"),
         h("strong", {}, a.name),
@@ -195,6 +216,9 @@ function renderLibAsset(a) {
 document.addEventListener("DOMContentLoaded", () => {
   const input = $("#lib-filter");
   if (input) input.addEventListener("input", (e) => { lib.filter = e.target.value; renderLibSide(); });
+  // The story filter narrows the sidebar and, on the list page, the grid.
+  const story = $("#lib-story");
+  if (story) story.addEventListener("change", (e) => { lib.story = e.target.value; renderLibrary(); });
 });
 
 // -- Editing (saved to the story the asset came from) --------------------------------

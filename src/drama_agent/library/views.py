@@ -104,6 +104,14 @@ def asset_list(repo: Any, kind: str) -> list[dict[str, Any]]:
     """Every character (or set) in name order, with its pictures and how much it owns."""
     child = "look" if kind == "character" else "set_state"
     out = []
+    titles: dict[str, str] = {}
+
+    def title(pid: str) -> str:
+        if pid not in titles:
+            pkg = repo.get_package(pid)
+            titles[pid] = pkg.story_bible.title if pkg is not None else pid
+        return titles[pid]
+
     shown = [a for a in repo.list_library_assets(kind=kind)
              if a.merged_into is None and not a.archived]  # fmt: skip
     for a in sorted(shown, key=lambda x: x.name.lower()):
@@ -114,6 +122,10 @@ def asset_list(repo: Any, kind: str) -> list[dict[str, Any]]:
         covers = entry["pictures"] or next((p for c in children if (p := _pictures(repo, c))), [])
         entry["cover"] = covers[0] if covers else None
         entry["items"] = len(repo.list_library_assets(kind="item", parent_id=a.asset_id))
-        entry["stories"] = len(repo.list_casting(asset_id=a.asset_id))
+        # The stories it is cast in (its own, and any linked to it), for the story filter.
+        pids = sorted({c.package_id for c in repo.list_casting(asset_id=a.asset_id)}
+                      | {a.origin_package_id})  # fmt: skip
+        entry["story_list"] = [{"package_id": p, "title": title(p)} for p in pids]
+        entry["stories"] = len(pids)
         out.append(entry)
     return out

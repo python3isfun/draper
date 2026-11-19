@@ -103,6 +103,8 @@ def test_the_library_api_reads_characters_sets_and_casting(tmp_path):
         assert {c["name"] for c in chars} == {c.name for c in pkg.story_bible.characters}
         one = next(c for c in chars if c["pictures"])
         assert one["cover"] and one["children"] >= 1 and one["stories"] == 1
+        # The story filter's data: the stories each one is cast in, with their titles.
+        assert one["story_list"] == [{"package_id": b.pid, "title": pkg.story_bible.title}]
         view = b.http.get(f"/v1/library/characters/{one['asset_id']}").json()
         assert view["looks"] and all(lk["pictures"] for lk in view["looks"])
         story = view["used_in"][0]

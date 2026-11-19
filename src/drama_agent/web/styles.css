@@ -650,3 +650,4 @@ td.mono { white-space: nowrap; }
 .lib-card-link { display: flex; flex-direction: column; gap: 4px; color: var(--text); text-decoration: none; }
 .lib-match { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .lib-card .chip { white-space: normal; max-width: 100%; }
+#lib-story { margin-top: 8px; }
