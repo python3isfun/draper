@@ -476,14 +476,23 @@ the clip from, so dramer stores and sends it instead of working it out again:
   hold each likeness), the props, each person's picture and the set. Any other shot: its
   keyframes, each person's picture (the reading's choice, else the storyboard look), the set,
   the props, the pictures chosen for later cuts, then the faces. Keyframes are references the
-  video matches, not start frames. A consumer with a smaller limit than `max_references`
-  drops from the end;
+  video matches, not start frames. At most `max_references` (9, what dramer sends H3 with a
+  clip) are listed; those that didn't fit are in `references_left_out`, and a consumer with a smaller
+  limit drops from the end;
 - `cast`: each person, the place and each prop with a note (a person as the reading found
   them in their first cut, else their storyboard look);
 - `ready`, and `not_ready` saying why not: the plan's problems, each cut with no approved
-  keyframe, and any line the shot list cues that the script no longer has;
+  keyframe, any line the shot list cues that the script no longer has, and keyframe work
+  still running on it (`keyframe_work_running`);
 - `spec.carried`: the lines spoken in the shot before that run over the cut into this one
   (also noted in `continuity_notes`).
+
+At the top, `pace` is the story's pace and `readiness` says how far the keyframe pass has got:
+shots and shots ready, cuts planned and cuts with an approved keyframe, shots with keyframe
+work still running (a plan being written, a keyframe drawn or checked), and a `note` for
+production: still running (don't render from this revision yet), complete, or what is missing.
+People in each cut's `people`, `placement` and `off_screen` are named as on the cast sheet,
+whatever name the planner used.
 
 **The sub-shot spec** (`05_assets/shot_keyframes/sub_shots.json`, `spec_version` 1) is the
 earlier form, kept for older importers. Draper runs first: its plan
@@ -509,7 +518,33 @@ matches, not a start frame). A clean spec:
   frame right, on screen or off.
 
 The planner covers dialogue speaker by speaker (a cut to the speaker shortly before their
-line) unless the storyboard asks to hold a two-shot.
+line) unless the storyboard asks to hold a two-shot. It plans at the story's **pace** (below):
+the long setup goes to whoever acts or speaks, a listener has something to do, most sub-shots
+move the camera, and a reaction is held no longer than the pace allows. A plan that holds a
+listener longer while someone off screen speaks goes back to the planner once with that
+problem (the better of the two plans is kept); it is flagged on the board and in the export,
+and never refused on a save.
+
+### Pace
+
+A story's pace (job option `pace`, under Options; changeable on the story's Overview, like the
+rating; `GET/PUT /v1/drama-packages/{id}/pace`) sets how the storyboard and the cut plans keep
+the clips moving (`pace.py`). Every pace holds the same rules; the pace sets the numbers:
+
+| Pace | Longest reaction | Shots that move the camera | Action per shot |
+| --- | --- | --- | --- |
+| `brisk` (default) | 1.5 s | at least three in four | 45 to 70 words |
+| `measured` | 2.5 s | at least half | 40 to 60 words |
+| `slow_burn` | 4 s | at least one in three | 35 to 55 words |
+
+The storyboard step writes each shot's action as physical business (hands, props, movement,
+not a state of mind), gives the screen to whoever acts or speaks, moves the camera (a locked-off
+camera says why), and reads each shot against its neighbours for continuity: an object used or
+dropped was picked up, a framing names only who is on screen from the first frame, and the
+background behind each person holds while they keep their places. The creative review reports
+breaks in continuity (`shot_continuity`) and pacing (`pacing`) shot by shot. A changed pace
+applies to the next storyboard revision and the next cut plan; shots already planned are not
+changed.
 
 Keyframes are production assets: the restrictive content rules always apply, and a shot in
 a scene staged as implied or simulated intimacy is never drawn from a pick that shows a real
@@ -822,6 +857,7 @@ src/drama_agent/
                    views, matching, reuse)
   shot_reading.py  Reading a scene: each person's state per cut and the closest picture
   shot_specs.py    The export's shot_specs.json for video production
+  pace.py          A story's pace: the storyboard's and the planner's pacing rules
   sheet_edit.py    Hand edits to cast, set and prop entries
   experiment.py    Experiment tab: image chat sessions, the GPT prompt rewriter, the runner
   face_lab.py      Face Lab: photo-to-prompt descriptions and seeded prompt tests

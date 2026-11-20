@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from ..llm import GenerationRequest
 from ..models import ProductionPackage
 from ..models.storyboard import Shot
+from ..pace import DEFAULT_PACE, planner_rules
 from .common import _names
 from .models import COVERAGE_MS, MAX_SUB_SHOTS, MIN_SUB_SHOT_MS, SubShot
 from .plans import clip_ms, make_sub_shots, shot_lines
@@ -46,7 +47,7 @@ your description. Make it clean and complete.
 reframe or a push-in is a camera move inside one sub-shot, not a cut.
 - **Dialogue between people is covered speaker by speaker**: cut to the speaker (a single \
 or an over-the-shoulder) shortly before their line starts, and stay on them until it ends; \
-a reaction can follow in the gap between lines. Keep a two-shot for a line only when the \
+a short reaction can follow in the gap between lines (see Pace for how short). Keep a two-shot for a line only when the \
 storyboard's framing or notes ask to hold both people.
 - **A clip of {coverage_s:g} s or more in which two or more people on screen speak is 2 \
 or 3 sub-shots** (e.g. the two-shot for the first line, then a single of the person who answers), \
@@ -98,14 +99,12 @@ class PlanOutput(BaseModel):
     notes: str = ""
 
 
-def plan_instructions() -> str:
-    return (
-        PLAN_ROLE
-        + "\n\n"
-        + PLAN_GUIDE.format(
-            max_sub=MAX_SUB_SHOTS, min_s=MIN_SUB_SHOT_MS / 1000, coverage_s=COVERAGE_MS / 1000
-        )
+def plan_instructions(pace: object = DEFAULT_PACE) -> str:
+    """The planner's instructions at the story's pace (pace.py)."""
+    guide = PLAN_GUIDE.format(
+        max_sub=MAX_SUB_SHOTS, min_s=MIN_SUB_SHOT_MS / 1000, coverage_s=COVERAGE_MS / 1000
     )
+    return f"{PLAN_ROLE}\n\n{guide}\n\n{planner_rules(pace)}"
 
 
 def plan_context(pkg: ProductionPackage, shot: Shot, clip: int | None = None) -> dict[str, Any]:

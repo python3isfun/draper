@@ -31,6 +31,8 @@ from ..models import (
 )
 from ..models.design_sheets import CastSheet, PropSheet, SetSheet
 from ..models.package import STAGE_GROUPS, StageName
+from ..pace import rule as pace_rule
+from ..pace import storyboard_rules
 from ..prompts import ORCHESTRATOR_PROMPT_VERSION
 from ..validation import PackageIndex
 from ..validation import hard_checks as hc
@@ -349,6 +351,10 @@ class Step:
     sees_sheets = True  # whether the design sheets are in this step's context
     sees_storyboard = False  # whether shots, timing and asset requirements are
 
+    def rules(self, request: JobRequest) -> str:
+        """Instructions of this step that depend on the request's options."""
+        return ""
+
     def apply(self, state: PipelineState, output: Any) -> None:
         raise NotImplementedError
 
@@ -597,6 +603,17 @@ class PropsStep(_SheetStep):
             p.name = names.get(p.prop_id, p.name)
 
 
+# Continuity between neighbouring shots: the storyboard keeps it, the review checks it.
+NEIGHBOUR_CONTINUITY = (
+    "an object a person holds, uses, drops or puts down must have been picked up, and stays "
+    'where it was left; a framing that names its people ("three-shot") puts them all on '
+    "screen from the first frame, so someone who enters later is not in the framing and the "
+    "action brings them in; what is behind each person (wall, window, door, car) stays the "
+    "same while they keep their places, unless the camera's side changes for a reason the "
+    "shot states"
+)
+
+
 class StoryboardStep(Step):
     name = "storyboard"
     output_model = StoryboardOutput
@@ -607,8 +624,12 @@ class StoryboardStep(Step):
         "Timing goes only in start_ms, duration_ms and dialogue cues; sound and action "
         "descriptions are prose. Each visible character wears exactly one look per shot: "
         "when clothing changes on screen (torn, removed, put on), end the shot on the change "
-        "and start the next shot in the new look."
+        "and start the next shot in the new look. Read each shot against the one before "
+        f"and after it for continuity: {NEIGHBOUR_CONTINUITY}."
     )
+
+    def rules(self, request: JobRequest) -> str:
+        return storyboard_rules(request.options.pace)
 
     def apply(self, state: PipelineState, output: StoryboardOutput) -> None:
         assert state.story_bible is not None
@@ -649,9 +670,21 @@ class ReviewStep(Step):
         "describe scores as ad-performance predictions. spoken_timing_verified is always "
         "false until a voice-measurement step exists; it is not an issue. An asset "
         "requirement's source_refs can only point to uploaded images or videos, so empty "
-        "source_refs are correct when the job has none."
+        "source_refs are correct when the job has none. Read every shot against the shots "
+        "either side of it and report each break in continuity as a major issue on the later "
+        'shot (check "shot_continuity"), with both shots in the evidence. Continuity means: '
+        f"{NEIGHBOUR_CONTINUITY}."
     )
     sees_storyboard = True
+
+    def rules(self, request: JobRequest) -> str:
+        r = pace_rule(request.options.pace)
+        return (
+            f'Report pacing (check "pacing", minor) against the story\'s {r.label.lower()} '
+            "pace, with the shots it concerns: shots whose action is reactions rather than "
+            f"physical business, fewer than {r.words[0]} words of action, and the camera "
+            f"moving in too few shots (the pace asks for {r.moving} of them)."
+        )
 
     def apply(self, state: PipelineState, output: CreativeReviewOutput) -> None:
         # Hard checks already passed at the storyboard gate and review does not modify the

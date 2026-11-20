@@ -20,6 +20,7 @@ from ..models import ProductionPackage
 from ..models.images import GeneratedImage
 from ..models.package import utcnow
 from ..models.storyboard import Shot
+from ..pace import story_pace
 from ..shot_frames import (
     DEFAULT_DRAWS,
     KF_BEFORE_OUTDATED,
@@ -164,7 +165,8 @@ def register(
         images = repo.list_images(pkg.package_id, pkg.revision_id)
         versions = repo.list_prompt_versions(pkg.package_id, pkg.revision_id)
         readings = repo.list_scene_readings(pkg.package_id, pkg.revision_id)
-        shots = shot_board(pkg, images, takes, plans, versions, readings)
+        shots = shot_board(pkg, images, takes, plans, versions, readings,
+                           story_pace(repo, pkg.package_id))  # fmt: skip
         for shot in shots:  # a take asked to pause says so until it does
             for sub in shot["sub_shots"]:
                 for t in sub["takes"]:

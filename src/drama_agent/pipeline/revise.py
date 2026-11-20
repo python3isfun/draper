@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from ..models import Issue, ProductionPackage, Revision, RevisionRequest
 from ..models.package import STAGES, ChangeLogEntry, utcnow
+from ..pace import story_pace
 from ..tracing import NullRecorder, Tracer
 from ..validation import PackageIndex
 from ..validation import hard_checks as hc
@@ -383,6 +384,8 @@ class ReviseRunner:
         state.request.options.content_rating = story_rating(  # type: ignore[assignment]
             self.repo, rev.package_id
         )
+        # And its pace, which may have been changed there too.
+        state.request.options.pace = story_pace(self.repo, rev.package_id)
         content_ran = False
         for name in rev.steps:
             step = _STEPS[name]
@@ -478,6 +481,7 @@ class ReviseRunner:
                     for p in (
                         orch.base_prompt,
                         step.directive,
+                        step.rules(state.request),
                         REVISE_RULES,
                         mode_rules(state.request),
                         OUTPUT_RULES,

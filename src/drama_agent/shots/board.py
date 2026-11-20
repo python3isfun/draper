@@ -28,10 +28,12 @@ def shot_board(
     plans: list[ShotPlan],
     versions: list[PromptVersion] | None = None,
     readings: list[SceneReading] | None = None,
+    pace: str | None = None,
 ) -> list[dict[str, Any]]:
     """Every shot with its sub-shot plan and its scene's reading, and per sub-shot what it
     draws from (each person's chosen picture, state and why), what is missing, its prompt
-    versions, its takes and its approved keyframe."""
+    versions, its takes and its approved keyframe. With the story's `pace`, a plan's
+    problems include a listener held longer than it allows."""
     names = _names(pkg)
     stored = {p.shot_id: p for p in plans}
     judge = keyframe_judge(pkg, images, takes)
@@ -122,7 +124,7 @@ def shot_board(
                 "status": own.status if own else "done",
                 "source": plan.source,
                 # Where the plan isn't a clean spec for video production yet.
-                "problems": plan_problems(pkg, shot, plan),
+                "problems": plan_problems(pkg, shot, plan, pace),
                 # A stored plan written before a design edit (its framing may describe it).
                 "outdated": plan_outdated(pkg, shot, own),
                 "notes": own.notes if own else "",

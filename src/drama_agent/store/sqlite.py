@@ -173,9 +173,11 @@ CREATE TABLE IF NOT EXISTS asset_images (
     data        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS asset_images_asset ON asset_images (asset_id);
-CREATE TABLE IF NOT EXISTS story_ratings (
-    package_id  TEXT PRIMARY KEY,  -- a story whose rating was changed after it was made
-    rating      TEXT NOT NULL      -- G, PG, PG-13 or R
+CREATE TABLE IF NOT EXISTS story_settings (
+    package_id  TEXT NOT NULL,     -- a story whose setting was changed after it was made
+    name        TEXT NOT NULL,     -- rating (G, PG, PG-13, R) or pace (pace.py)
+    value       TEXT NOT NULL,
+    PRIMARY KEY (package_id, name)
 );
 CREATE TABLE IF NOT EXISTS image_ids (
     gid         INTEGER PRIMARY KEY AUTOINCREMENT,  -- the image's global number (@1234)
@@ -237,6 +239,14 @@ class SqliteRepository:
         if "next_label" not in cols:
             self._conn.execute(
                 "ALTER TABLE exp_sessions ADD COLUMN next_label INTEGER NOT NULL DEFAULT 1"
+            )
+        # Ratings changed before story_settings were kept in story_ratings (left in place).
+        if self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'story_ratings'"
+        ).fetchone():
+            self._conn.execute(
+                "INSERT OR IGNORE INTO story_settings (package_id, name, value) "
+                "SELECT package_id, 'rating', rating FROM story_ratings"
             )
 
     def close(self) -> None:
@@ -772,17 +782,19 @@ class SqliteRepository:
     def image_ref(self, gid: int) -> str | None:
         return self._one("SELECT ref FROM image_ids WHERE gid = ?", (gid,))
 
-    # A story's rating, when changed after it was made (design/setup.story_rating). Kept
-    # apart from the jobs, which a running pipeline saves from its own copy.
+    # A story's settings changed after it was made (story_settings.py): its rating, its pace.
+    # Kept apart from the jobs, which a running pipeline saves from its own copy.
 
-    def get_story_rating(self, package_id: str) -> str | None:
-        return self._one("SELECT rating FROM story_ratings WHERE package_id = ?", (package_id,))
+    def get_story_setting(self, package_id: str, name: str) -> str | None:
+        return self._one(
+            "SELECT value FROM story_settings WHERE package_id = ? AND name = ?", (package_id, name)
+        )
 
-    def set_story_rating(self, package_id: str, rating: str) -> None:
+    def set_story_setting(self, package_id: str, name: str, value: str) -> None:
         self._exec(
-            "INSERT INTO story_ratings (package_id, rating) VALUES (?, ?) "
-            "ON CONFLICT (package_id) DO UPDATE SET rating = excluded.rating",
-            (package_id, rating),
+            "INSERT INTO story_settings (package_id, name, value) VALUES (?, ?, ?) "
+            "ON CONFLICT (package_id, name) DO UPDATE SET value = excluded.value",
+            (package_id, name, value),
         )
 
     # Shot keyframes ------------------------------------------------------------

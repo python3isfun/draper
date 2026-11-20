@@ -518,6 +518,7 @@ $("#new-job").addEventListener("submit", async (ev) => {
         story_scope: f.get("story_scope"),
         reference_mode: f.get("reference_mode"),
         content_rating: f.get("content_rating"),
+        pace: f.get("pace"),
         genre: f.get("genre").trim() || null,
         audience: f.get("audience").trim() || null,
       },
@@ -882,7 +883,7 @@ function renderOverview(pkg, L) {
       h("h1", {}, b.title),
       h("p", { class: "logline" }, b.logline),
       h("dl", { class: "kv" },
-        kv("Genre", b.genre), kv("Audience", b.audience_assumption), kv("Rating", ratingPicker(pkg)), kv("Emotional goal", b.emotional_goal),
+        kv("Genre", b.genre), kv("Audience", b.audience_assumption), kv("Rating", ratingPicker(pkg)), kv("Pace", pacePicker(pkg)), kv("Emotional goal", b.emotional_goal),
         kv("Core conflict", b.core_conflict), kv("Synopsis", b.series_synopsis),
         b.future_direction && kv("Future direction", b.future_direction),
       ),
@@ -948,27 +949,46 @@ const RATINGS = {
 };
 
 function ratingPicker(pkg) {
-  // The rating that applies now (set here, else the newest job's), not the viewed job's.
-  const url = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/rating`;
+  return storySetting(pkg, "rating", "Rating", RATINGS,
+    "Caps what this story's script may stage and what its images may show. A real person's likeness never gets anything sexualized, at any rating.",
+    "Saved. Images follow it from now on; written scenes are unchanged.");
+}
+
+// A story's pace (pace.py): how its storyboard and cut plans keep the clips moving.
+const PACES = {
+  brisk: "Brisk: something moves in every clip; reactions held at most 1.5 s",
+  measured: "Measured: a beat may breathe; reactions held at most 2.5 s",
+  slow_burn: "Slow burn: held moments, still with movement; reactions held at most 4 s",
+};
+
+function pacePicker(pkg) {
+  return storySetting(pkg, "pace", "Pace", PACES,
+    "How the storyboard and the cut plans keep the clips moving: who holds the screen, how often the camera moves, how much physical action each shot gets.",
+    "Saved. The next storyboard revision and cut plans follow it; shots already planned are unchanged.");
+}
+
+// A setting of the story that can change after it was made (its rating, its pace): the
+// value that applies now (set here, else the newest job's), not the viewed job's.
+function storySetting(pkg, key, label, choices, title, saved) {
+  const url = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/${key}`;
   let now = null;
   const note = h("span", { class: "muted small" });
   const select = h("select", {
-    "aria-label": "Rating", disabled: true,
-    title: "Caps what this story's script may stage and what its images may show. A real person's likeness never gets anything sexualized, at any rating.",
+    "aria-label": label, disabled: true, title,
     onchange: async () => {
       select.disabled = true;
       try {
-        now = (await api(url, { method: "PUT", body: JSON.stringify({ rating: select.value }) })).rating;
-        note.textContent = " Saved. Images follow it from now on; written scenes are unchanged.";
+        now = (await api(url, { method: "PUT", body: JSON.stringify({ [key]: select.value }) }))[key];
+        note.textContent = ` ${saved}`;
       } catch (err) {
-        select.value = now;  // the last saved rating
+        select.value = now;  // the last saved value
         note.textContent = ` ${err.message}`;
       } finally {
         select.disabled = false;
       }
     },
-  }, Object.entries(RATINGS).map(([r, label]) => h("option", { value: r }, label)));
-  api(url).then((out) => { now = out.rating; select.value = now; select.disabled = false; })
+  }, Object.entries(choices).map(([v, text]) => h("option", { value: v }, text)));
+  api(url).then((out) => { now = out[key]; select.value = now; select.disabled = false; })
     .catch((err) => { note.textContent = ` ${err.message}`; });
   return h("span", { class: "rating-pick" }, select, note);
 }

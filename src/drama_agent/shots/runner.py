@@ -20,6 +20,7 @@ from ..models import ProductionPackage
 from ..models.images import GeneratedImage
 from ..models.package import utcnow
 from ..models.storyboard import Shot
+from ..pace import story_pace
 from ..shot_reading import SceneReading
 from .approvals import stale_approvals
 from .common import KEYFRAME_SIZES, NotReady, intimate_scene, shot_of
@@ -35,11 +36,12 @@ from .models import (
     PromptVersion,
     ShotPlan,
     ShotTake,
+    SubShot,
     TakeStatus,
     score,
 )
 from .planner import PlanOutput, plan_context, plan_instructions, planned_sub_shots
-from .plans import TOO_LONG, check_plan
+from .plans import TOO_LONG, advisory, check_plan
 from .references import sub_shot_references
 from .staleness import design_print, keyframe_judge
 from .takes import next_round, plan_take
@@ -56,6 +58,12 @@ from .writer import (
     worth_repair,
     writer_instructions,
 )
+
+
+def _rank(problems: list[str]) -> tuple[int, int]:
+    """How bad a plan's problems are: those a save would refuse, then all of them."""
+    return sum(not advisory(p) for p in problems), len(problems)
+
 
 # ---------------------------------------------------------------------------
 # Runner
@@ -281,29 +289,38 @@ class ShotFrameRunner:
                 raise RuntimeError("the package revision is gone")
             shot = shot_of(pkg, plan.shot_id)
             context = plan_context(pkg, shot, plan.clip_ms)
+            pace = story_pace(self.repo, pkg.package_id)
+            # The better of the plan and its retry: fewer problems that aren't advisory, then
+            # fewer problems. A retry asked for a judgement (a listener held) never costs a
+            # plan that was otherwise clean.
+            kept: tuple[list[SubShot], list[str], PlanOutput] | None = None
             for attempt in range(2):  # once more with the problems of a plan that isn't clean
                 request = GenerationRequest(
                     stage=PLAN_STAGE,  # type: ignore[arg-type]
-                    instructions=plan_instructions(),
+                    instructions=plan_instructions(pace),
                     context=context,
                     attempt=attempt,
                 )
                 out = await self.text.generate(request, PlanOutput)
                 try:
                     subs = planned_sub_shots(pkg, shot, out, plan.clip_ms, strict=False)
-                    problems = check_plan(pkg, shot, subs)
+                    problems = check_plan(pkg, shot, subs, pace)
                 except ValueError as exc:  # not a plan at all: retry, then give up
-                    if attempt:
+                    if attempt and kept is None:
                         raise
+                    if attempt:
+                        break  # the first plan stands
                     subs, problems = None, [str(exc)]
+                if subs is not None and (kept is None or _rank(problems) <= _rank(kept[1])):
+                    kept = (subs, problems, out)
                 # Dialogue held in one cut is the planner's to fix (the check already spares a
                 # storyboard that holds the two-shot); a shot too long for H3 isn't.
                 fixable = [p for p in problems if not p.startswith(TOO_LONG)]
-                if subs is not None and (not fixable or attempt):
-                    # Clean, or still not after the retry: kept, and flagged until fixed.
-                    plan.sub_shots = subs
-                    break
+                if kept is not None and (not fixable or attempt):
+                    break  # clean, or still not after the retry: kept, and flagged until fixed
                 context = context | {"previous_plan": out.model_dump(), "problems": fixable}
+            assert kept is not None
+            plan.sub_shots, _, out = kept
             plan.notes, plan.source = out.notes.strip(), "model"
             plan.model = request.model or getattr(self.text, "model_id", None)
             if pkg is not None:

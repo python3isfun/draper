@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..experiment import (
     MAX_DRAWS,
@@ -28,6 +28,7 @@ from ..models import (
     TraceEvent,
 )
 from ..models.images import DesignOption, GeneratedImage
+from ..pace import Pace, pace_name
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -215,6 +216,15 @@ class FaceTestRequest(BaseModel):
 
 class RatingBody(BaseModel):
     rating: ContentRating  # an MPA film rating: G, PG, PG-13 or R
+
+
+class PaceBody(BaseModel):
+    pace: Pace  # brisk, measured or slow_burn (pace.py), in any case or spelling
+
+    @field_validator("pace", mode="before")
+    @classmethod
+    def _pace(cls, value: object) -> object:
+        return pace_name(value) if isinstance(value, str) else value
 
 
 class ExpSessionPatch(BaseModel):

@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ..pace import DEFAULT_PACE, Pace, pace_name
+
 SourceType = Literal["text", "image", "video", "script"]
 SourceUse = Literal[
     "story_seed",
@@ -95,6 +97,9 @@ class JobOptions(BaseModel):
     # G/PG: a kiss at most; PG-13: intimacy implied (cut away), no nudity; R: simulated
     # intimacy and partial nudity, staged for a closed set. Images follow it too.
     content_rating: ContentRating = DEFAULT_RATING
+    # How the storyboard and cut plans keep the clips moving (pace.py); jobs stored before
+    # it had none and are brisk.
+    pace: Pace = DEFAULT_PACE
     variants: int = Field(default=1, ge=1)
     # Automatic revision attempts per stage (spec section 8 suggests 2).
     revision_budget_per_stage: int = Field(default=2, ge=0, le=5)
@@ -105,6 +110,15 @@ class JobOptions(BaseModel):
         """Jobs stored before the MPA ratings say general/teen/mature; any case is read. An
         unknown rating stays as it is, so it is refused."""
         return _known_rating(value) or value
+
+    @field_validator("pace", mode="before")
+    @classmethod
+    def _pace(cls, value: object) -> object:
+        """A pace in any case or spelling ("Slow burn"); none is the default; an unknown
+        one stays as it is, so it is refused."""
+        if value is None:
+            return DEFAULT_PACE
+        return pace_name(value) if isinstance(value, str) else value
 
     @property
     def episode_duration_ms(self) -> int:

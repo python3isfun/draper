@@ -7,13 +7,20 @@ video prompt from them. Draper decides all of it, because it holds what decides 
 cut plan, the approved keyframes, the scene reading, and the pictures each keyframe was
 drawn from.
 
-The references are in priority order, so a consumer with a smaller limit drops from the
-end. A shot whose every cut has an approved keyframe is keyframe-first: the keyframes
+The references are in priority order and at most VIDEO_MAX_REFERENCES (the pictures
+dramer sends H3 with a clip); those that didn't fit are listed in `references_left_out`,
+and a consumer with a smaller limit drops from the end. Adding the cap and the new fields
+kept `spec_version` 2: they only add to it, and dramer's importer reads nothing but 2. A shot whose every cut has an approved keyframe is keyframe-first: the keyframes
 show the people, the set and the props as each cut is, so after them come the faces (to
 hold each likeness), the props (seen closer), and only then each person's design picture
 and the set. Any other shot sends each person's picture, the set and the props first, then
 the faces. The keyframes are references, not start frames: the video model matches each
 cut to its keyframe.
+
+`readiness` says how far the keyframe pass has got: how many cuts have an approved
+keyframe, how many shots are ready, and whether keyframe work (a plan being written, a
+keyframe being drawn or checked) is still running, so production knows not to render from
+a revision that isn't finished. `pace` is the story's pace (pace.py).
 
 All file paths are relative to the export's root folder.
 """
@@ -25,7 +32,6 @@ from typing import Any
 from .models import ProductionPackage
 from .models.images import GeneratedImage
 from .shot_frames import (
-    MAX_REFERENCES,
     FrameRef,
     ShotPlan,
     chosen_pictures,
@@ -38,6 +44,8 @@ from .shot_frames import (
 from .shot_reading import PersonState, SceneReading
 
 SHOT_SPECS_VERSION = 2
+# The most pictures video production sends with one clip (dramer cuts H3's to 9).
+VIDEO_MAX_REFERENCES = 9
 SHOT_SPECS_PATH = "03_storyboard/shot_specs.json"
 IMAGES = "05_assets/reference_images"
 KEYFRAMES = "05_assets/shot_keyframes"
@@ -65,11 +73,13 @@ def shot_specs(
     images: list[GeneratedImage],
     exported: dict[str, str],
     outdated: dict[tuple[str, int], list[str]] | None = None,
+    working: set[str] | None = None,
+    pace: str | None = None,
 ) -> dict[str, Any]:
     """The shot specs of every shot in shot-list order. `keyframes` maps (shot, sub-shot)
     to its approved keyframe's file in shot_keyframes/; `readings` each scene's fresh
     reading (or None); `exported` each exported design image to its file in
-    reference_images/."""
+    reference_images/; `working` the shots whose plan or keyframes are being made now."""
     bible = pkg.story_bible
     looks = {x.look_id: x for x in bible.looks}
     loc_states = {x.location_state_id: x for x in bible.location_states}
@@ -112,7 +122,7 @@ def shot_specs(
                                  "delivery": line.delivery})  # fmt: skip
 
             plan = plan_of(pkg, shot, stored.get(shot.shot_id))
-            problems = plan_problems(pkg, shot, plan)
+            problems = plan_problems(pkg, shot, plan, pace)
             frames = {sub.index: keyframes.get((shot.shot_id, sub.index)) for sub in plan.sub_shots}
             # A plan nobody made (one cut, the storyboard's) is kept only with a keyframe.
             kept = plan.source != "single" or any(frames.values())
@@ -163,6 +173,7 @@ def shot_specs(
                 if r["file"] not in seen:
                     seen.add(r["file"])
                     refs.append(r)
+            refs, left_out = refs[:VIDEO_MAX_REFERENCES], refs[VIDEO_MAX_REFERENCES:]
 
             # Who and what is in the shot, each with a note: a person as the reading found
             # them in their first cut, else their storyboard look.
@@ -218,6 +229,8 @@ def shot_specs(
             not_ready += [f"[Shot {i}]'s keyframe is out of date: {'; '.join(why)}"
                           for i, f in frames.items()
                           if f and (why := (outdated or {}).get((shot.shot_id, i)))]  # fmt: skip
+            if shot.shot_id in (working or set()):
+                not_ready.append("its keyframe work is still running")
             st = set_states.get(shot.location_state_id)
             out.append({
                 "shot_id": shot.shot_id,
@@ -225,6 +238,7 @@ def shot_specs(
                 "scene_id": shot.scene_id,
                 "ready": not not_ready,
                 "not_ready": not_ready,
+                "keyframe_work_running": shot.shot_id in (working or set()),
                 "keyframe_first": all_frames,
                 "planned_by": plan.source,
                 "spec": {
@@ -241,8 +255,34 @@ def shot_specs(
                     "sub_shots": sub_shots if kept else None,
                 },
                 "references": refs,
+                "references_left_out": left_out,
                 "cast": cast,
             })  # fmt: skip
     order = {s.shot_id: i for i, s in enumerate(pkg.shot_list)}
     out.sort(key=lambda s: order.get(s["shot_id"], len(order)))
-    return {"spec_version": SHOT_SPECS_VERSION, "max_references": MAX_REFERENCES, "shots": out}
+    return {"spec_version": SHOT_SPECS_VERSION, "max_references": VIDEO_MAX_REFERENCES,
+            "pace": pace, "readiness": readiness(out), "shots": out}  # fmt: skip
+
+
+def readiness(shots: list[dict[str, Any]]) -> dict[str, Any]:
+    """How far the keyframe pass has got, over the shot specs, with one sentence for
+    production: still running (don't render yet), complete, or what is missing."""
+    cuts = [sub for s in shots for sub in (s["spec"]["sub_shots"] or [])]
+    framed = sum(1 for sub in cuts if sub["keyframe"])
+    unplanned = sum(1 for s in shots if s["spec"]["sub_shots"] is None)
+    ready = sum(1 for s in shots if s["ready"])
+    running = sum(1 for s in shots if s["keyframe_work_running"])
+    if not shots:
+        note = "There are no shots: the storyboard has not been made."
+    elif running:
+        note = (f"The keyframe pass is still running on {running} shot(s): don't render from "
+                "this revision yet; export again when it is done.")  # fmt: skip
+    elif ready == len(shots):
+        note = "Every shot is ready: planned, with an approved keyframe for every cut."
+    else:
+        note = (f"The keyframe pass is not complete: {ready} of {len(shots)} shots are ready "
+                f"({framed} approved keyframes over {len(cuts)} planned cuts, {unplanned} "
+                "shots not planned). Each shot's not_ready says what it lacks.")  # fmt: skip
+    return {"shots": len(shots), "shots_ready": ready, "shots_planned": len(shots) - unplanned,
+            "cuts_planned": len(cuts), "cuts_with_keyframe": framed,
+            "keyframe_work_running": running, "note": note}  # fmt: skip

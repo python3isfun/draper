@@ -177,6 +177,7 @@ class Orchestrator:
                         for p in (
                             self.base_prompt,
                             step.directive,
+                            step.rules(state.request),
                             mode_rules(state.request),
                             OUTPUT_RULES,
                         )

@@ -21,10 +21,12 @@ from ..models import (
     SourceAsset,
 )
 from ..models.design_sheets import SHEET_SCHEMAS
+from ..pace import story_pace
 from ..pipeline.impact import analyze_impact
 from ..pipeline.orchestrator import new_id
 from ..render import render_markdown
 from .schemas import (
+    PaceBody,
     RatingBody,
     _new_export_file,
 )
@@ -68,7 +70,23 @@ def register(app: FastAPI, ctx: Any) -> None:
         from its own copy."""
         if repo.get_package(package_id) is None:
             raise HTTPException(404, "package not found")
-        repo.set_story_rating(package_id, req.rating)
+        repo.set_story_setting(package_id, "rating", req.rating)
+        return req
+
+    @app.get("/v1/drama-packages/{package_id}/pace", response_model=PaceBody)
+    async def get_pace(package_id: str) -> PaceBody:
+        """The story's pace as it applies now (pace.story_pace)."""
+        if repo.get_package(package_id) is None:
+            raise HTTPException(404, "package not found")
+        return PaceBody(pace=story_pace(repo, package_id))
+
+    @app.put("/v1/drama-packages/{package_id}/pace", response_model=PaceBody)
+    async def set_pace(package_id: str, req: PaceBody) -> PaceBody:
+        """Change a story's pace (brisk, measured, slow_burn). It applies to the next
+        storyboard revision and the next cut plan; shots already planned are not changed."""
+        if repo.get_package(package_id) is None:
+            raise HTTPException(404, "package not found")
+        repo.set_story_setting(package_id, "pace", req.pace)
         return req
 
     @app.get("/v1/drama-packages/{package_id}/export", response_class=FileResponse)
@@ -97,6 +115,7 @@ def register(app: FastAPI, ctx: Any) -> None:
                 keyframes=repo.list_shot_takes(pkg.package_id, pkg.revision_id),
                 plans=repo.list_shot_plans(pkg.package_id, pkg.revision_id),
                 readings=repo.list_scene_readings(pkg.package_id, pkg.revision_id),
+                pace=story_pace(repo, pkg.package_id),
             )
         except BaseException:
             tmp.unlink(missing_ok=True)

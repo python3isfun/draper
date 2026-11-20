@@ -466,8 +466,10 @@ def build_export(
     keyframes: list[ShotTake] | None = None,
     plans: list[ShotPlan] | None = None,
     readings: list[SceneReading] | None = None,
+    pace: str | None = None,
 ) -> str:
-    """Write the hand-off zip to `dest`; returns the download file name."""
+    """Write the hand-off zip to `dest`; returns the download file name. `pace` is the
+    story's pace as it applies now (pace.story_pace), recorded in the shot specs."""
     takes = {o.option_id: o for o in options or []}
 
     def take_of(img: GeneratedImage) -> DesignOption | None:
@@ -708,8 +710,12 @@ def build_export(
         stale = outdated_keyframes(pkg, images, keyframes or [], plans or [])
         outdated = {(t.shot_id, t.sub_shot): stale[t.take_id] for t in keyframes or []
                     if t.take_id in stale}  # fmt: skip
+        # Shots whose plan is being written or whose keyframes are being drawn or checked.
+        working = {t.shot_id for t in keyframes or [] if t.busy}
+        working |= {p.shot_id for p in plans or [] if p.busy}
         text(SHOT_SPECS_PATH,
-             _json(shot_specs(pkg, stored, files, n, fresh, images, exported, outdated)))  # fmt: skip
+             _json(shot_specs(pkg, stored, files, n, fresh, images, exported, outdated,
+                              working, pace)))  # fmt: skip
 
         # Design takes: the chosen take per deliverable, and every other option
         slot_names = {

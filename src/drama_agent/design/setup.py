@@ -20,13 +20,11 @@ def story_rating(repo: Any, package_id: str | None) -> str:
     may stage and what its images may show: the one set on its Overview, else its newest
     job's. PG-13 for a picture outside any story."""
     from ..models.request import DEFAULT_RATING, as_rating
+    from ..story_settings import story_setting
 
-    if not package_id:
-        return DEFAULT_RATING
-    if changed := repo.get_story_rating(package_id):
-        return as_rating(changed)
-    jobs = repo.jobs_for_package(package_id)  # newest first
-    return jobs[0].request.options.content_rating if jobs else DEFAULT_RATING
+    return story_setting(
+        repo, package_id, "rating", lambda o: o.content_rating, as_rating, DEFAULT_RATING
+    )
 
 
 def package_has_uploads(repo: Any, package_id: str) -> bool:
