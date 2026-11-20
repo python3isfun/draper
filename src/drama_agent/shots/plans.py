@@ -93,6 +93,8 @@ TOO_LONG = "the storyboard shot runs"  # the start of the problem a plan can't f
 ONE_CUT = "dialogue held in one cut"  # the start of the coverage problem
 
 LISTENER = "a listener held"  # the start of the pace problem (check_plan with a pace)
+# The start of the problem of a plan whose sub-shots aren't the number the shot asks for.
+CUT_COUNT = "the plan has"
 
 # A storyboard that says to hold the two-shot (in its framing, camera or notes).
 _HOLD_TWO_SHOT = re.compile(r"\bhold(?:s|ing)?\b[^.;]{0,30}\btwo[- ]shot\b", re.IGNORECASE)
@@ -101,8 +103,16 @@ _HOLD_TWO_SHOT = re.compile(r"\bhold(?:s|ing)?\b[^.;]{0,30}\btwo[- ]shot\b", re.
 def advisory(problem: str) -> bool:
     """A problem flagged on the board and in the export but never refused on a save: a shot
     too long for H3 (no plan fixes it), dialogue held in one cut (a person may hold the
-    two-shot on purpose) and a listener held longer than the pace allows (a judgement)."""
-    return problem.startswith((TOO_LONG, ONE_CUT, LISTENER))
+    two-shot on purpose), a listener held longer than the pace allows (a judgement) and a
+    cut count other than the one asked for."""
+    return problem.startswith((TOO_LONG, ONE_CUT, LISTENER, CUT_COUNT))
+
+
+def cut_count_problem(subs: list[Any], cuts: int | None) -> str | None:
+    """Where a plan doesn't have the number of sub-shots the director asked for."""
+    if cuts is None or len(subs) == cuts:
+        return None
+    return f"{CUT_COUNT} {len(subs)} sub-shots; this shot asks for exactly {cuts}"
 
 
 def holds_two_shot(shot: Shot) -> bool:
@@ -128,7 +138,11 @@ def coverage_cut(lines: list[dict[str, Any]], clip: int) -> int | None:
 
 
 def check_plan(
-    pkg: ProductionPackage, shot: Shot, subs: list[SubShot], pace: str | None = None
+    pkg: ProductionPackage,
+    shot: Shot,
+    subs: list[SubShot],
+    pace: str | None = None,
+    cuts: int | None = None,
 ) -> list[str]:
     """Where a sub-shot plan isn't a clean spec for video production (empty if it is):
     the clip's length, every line wholly inside the clip and inside one sub-shot (no cut in
@@ -138,7 +152,8 @@ def check_plan(
     speaker by speaker when the clip is long enough and a cut can fall between their lines
     (unless the storyboard holds the two-shot). With a `pace` (pace.py), also a listener held
     longer than it allows while someone off screen speaks: the planner is asked to fix it once.
-    See `advisory` for the problems that are flagged but never refused."""
+    With `cuts` (the count the shot asks for), also a plan with another count; a shot asked
+    for one cut isn't told to cover its dialogue speaker by speaker. See `advisory` for the problems that are flagged but never refused."""
     names = _names(pkg)
     out: list[str] = []
     clip = subs[-1].end_ms
@@ -148,7 +163,7 @@ def check_plan(
     if clip % 1000 or not MIN_CLIP_S * 1000 <= clip <= MAX_CLIP_S * 1000:
         out.append(f"the clip runs {clip / 1000:g} s, but H3 renders whole seconds from "
                    f"{MIN_CLIP_S} to {MAX_CLIP_S}")  # fmt: skip
-    cuts = [s.start_ms for s in subs[1:]]
+    cut_at = [s.start_ms for s in subs[1:]]
     in_shot = set(shot.character_ids)
     spoken: list[dict[str, Any]] = []  # the lines that start inside the clip
     for x in shot_lines(pkg, shot):
@@ -160,7 +175,7 @@ def check_plan(
         if x["end_ms"] > clip:
             out.append(f"{said} runs to {x['end_ms'] / 1000:g} s, past the clip's end at "
                        f"{clip / 1000:g} s")  # fmt: skip
-        if mid := [c for c in cuts if x["start_ms"] < c < x["end_ms"]]:
+        if mid := [c for c in cut_at if x["start_ms"] < c < x["end_ms"]]:
             out.append(f"the cut at {mid[0] / 1000:g} s falls in the middle of {said} "
                        f"({x['start_ms'] / 1000:g}-{x['end_ms'] / 1000:g} s)")  # fmt: skip
         sub = next(s for s in subs if s.start_ms <= x["start_ms"] < s.end_ms)
@@ -173,6 +188,7 @@ def check_plan(
         len(subs) == 1
         and clip >= COVERAGE_MS
         and not holds_two_shot(shot)
+        and cuts != 1  # the director's one cut, like holding the two-shot
         and (cut := coverage_cut(on_screen_lines, clip))
     ):
         out.append(f"{ONE_CUT}: two people speak in this {clip / 1000:g} s clip, so cover "
@@ -208,17 +224,19 @@ def check_plan(
                        f"{', '.join(names.get(w, w) for w in away)} speaks off screen; at this "
                        f"pace a reaction holds at most {limit:g} s: put the speaker on screen "
                        "for their line")  # fmt: skip
+    if wrong := cut_count_problem(subs, cuts):
+        out.append(wrong)
     return out
 
 
 def plan_problems(
     pkg: ProductionPackage, shot: Shot, plan: ShotPlan, pace: str | None = None
 ) -> list[str]:
-    """Where a shot's plan in force isn't a clean spec (with the story's `pace`, also a
-    listener held longer than it allows). An unplanned shot (the single plan) is only
-    flagged for what planning would answer or nothing can: dialogue held in one cut, and a
-    shot too long for H3."""
-    problems = check_plan(pkg, shot, plan.sub_shots, pace)
+    """Where a shot's plan in force isn't a clean spec (with a pace, the shot's own or else
+    the story's `pace`, also a listener held longer than it allows). An unplanned shot (the
+    single plan) is only flagged for what planning would answer or nothing can: dialogue
+    held in one cut, and a shot too long for H3."""
+    problems = check_plan(pkg, shot, plan.sub_shots, plan.pace or pace, plan.cuts)
     return problems if plan.source != "single" else [p for p in problems if advisory(p)]
 
 

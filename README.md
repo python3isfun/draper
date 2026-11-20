@@ -32,7 +32,9 @@ A static single-page app (`src/drama_agent/web/`) served by the same FastAPI pro
 with no build step. It lets you:
 
 - submit a seed or script, and/or upload images and videos (each with an optional
-  prompt), then watch the pipeline steps progress
+  prompt), on the **New job** page, then watch the pipeline steps progress. The sidebar
+  shows only the current job (or the last one open), with **New job** and **All jobs** (the
+  list of every job, also what opens with no job) as pages of their own
 - browse the result: story bible, scripts, the timed storyboard with a shot timeline,
   the cast, set and prop sheets, asset requirements (filterable by type), and QA issues with token usage
 - revise a published story (the Revise tab): name what to change, how, and what is
@@ -41,6 +43,16 @@ with no build step. It lets you:
   checks is published as a new revision. The story's pictures, keyframes, cut plans and
   readings move to it, and what the revision changed is marked out of date
   (`pipeline/revise.py`; `GET /v1/revisions/{id}` follows a run)
+- bring a story up to date in one go (**Update all** in the job's header,
+  `web/update.js`): a window first lists what would be done and waits for a confirmation,
+  then runs the steps in order with their progress: redraw the out-of-date design
+  pictures and wait for the image queue; re-plan the out-of-date cut plans the model wrote
+  (each keeps its own pace and cut count; plans you wrote are left to you); draw every
+  keyframe that can be drawn without an approval (first keyframes, the next cut after an
+  approved one, out-of-date keyframes). It never approves anything: the closing report
+  lists the cuts waiting for your approval, the shots waiting for design picks and what
+  failed. Closing the window keeps it running; reloading the page stops the steps not
+  started yet
 - export a package as Markdown or JSON
 
 Model output is always inserted as text, never as HTML.
@@ -557,6 +569,14 @@ background behind each person holds while they keep their places. The creative r
 breaks in continuity (`shot_continuity`) and pacing (`pacing`) shot by shot. A changed pace
 applies to the next storyboard revision and the next cut plan; shots already planned are not
 changed.
+
+**Per shot.** Next to **Plan cuts**, a shot can have its own **Pace** (else the story's) and
+**Cuts**: exactly 1, 2 or 3 sub-shots, or auto (the planner decides). The planner is told
+both; a plan with another number of cuts goes back to it once, and the closer plan is kept.
+They are saved with the shot's plan, so a later re-plan uses them again until changed, and
+the shot's own pace judges its listener holds. `POST .../keyframes/{shot_id}/plan` takes
+`pace` and `cuts` (null: the story's pace, the planner's count; left out: as the plan has
+them); `shot_specs.json` gives each shot's `pace`.
 
 Keyframes are production assets: the restrictive content rules always apply, and a shot in
 a scene staged as implied or simulated intimacy is never drawn from a pick that shows a real

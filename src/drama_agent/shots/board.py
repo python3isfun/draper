@@ -129,6 +129,11 @@ def shot_board(
                 "outdated": plan_outdated(pkg, shot, own),
                 "notes": own.notes if own else "",
                 "error": own.error if own else None,
+                # The shot's own pace (None: the story's, `story_pace`) and cut count (None:
+                # the planner decides), for the next plan.
+                "pace": plan.pace,
+                "story_pace": pace,
+                "cuts": plan.cuts,
             },
             "sub_shots": subs,
             "busy": (own is not None and own.busy) or any(t.busy for t in mine),

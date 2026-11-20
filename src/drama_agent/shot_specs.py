@@ -241,6 +241,8 @@ def shot_specs(
                 "keyframe_work_running": shot.shot_id in (working or set()),
                 "keyframe_first": all_frames,
                 "planned_by": plan.source,
+                # The pace this shot was planned at: its own, else the story's.
+                "pace": plan.pace or pace,
                 "spec": {
                     "summary": shot.narrative_function,
                     "action": shot.visual_action,

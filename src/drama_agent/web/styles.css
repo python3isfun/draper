@@ -182,6 +182,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 .banner.bad { background: var(--bad-soft); color: var(--bad); }
 .banner.warn { background: var(--warn-soft); color: var(--warn); }
 .banner.info { background: var(--info-soft); color: var(--info); }
+.banner.ok { background: var(--ok-soft); color: var(--ok); }
 .banner ul { margin: 6px 0 0; padding-left: 18px; }
 .banner.compact { margin: 0 0 12px; font-size: 12px; line-height: 1.45; }
 .banner code { font-size: 11px; }
@@ -764,3 +765,52 @@ td.mono { white-space: nowrap; }
 .plan-history { display: grid; gap: 8px; margin-top: 8px; }
 .plan-version { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 8px 10px; }
 .plan-version ol { margin: 6px 0 0; padding-left: 18px; }
+
+/* A wrapping row of small buttons (Revise: every shot of an episode) */
+.row-wrap { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: -4px 0 12px; }
+
+/* Drama sidebar: only the current job; New job and All jobs are pages of their own */
+.current-job h2 { margin-bottom: 10px; }
+.current-job .design-row { margin-top: 10px; }
+a.job-item { display: block; color: inherit; text-decoration: none; }
+.new-job-page { max-width: 760px; display: flex; flex-direction: column; gap: 12px; }
+#jobs-section { max-width: 900px; }
+a.btn { display: inline-block; text-decoration: none; color: var(--text, inherit); }
+a.btn.primary { color: #fff; }
+.current-job .design-row .btn, #jobs-section .section-head .btn.primary { width: auto; flex: 1; text-align: center; }
+#jobs-section .section-head .btn.primary { flex: none; }
+
+/* A shot's pace and cut count for its next plan */
+.plan-setting { width: auto; padding: 2px 6px; font-size: 12px; }
+
+/* Update all: a window over the page with the plan, each step's progress and the report */
+.update-backdrop { position: fixed; inset: 0; z-index: 900; display: flex; align-items: flex-start; justify-content: center;
+  padding: 6vh 16px 16px; background: rgb(0 0 0 / 0.45); overflow-y: auto; }
+.update-backdrop[hidden] { display: none; }
+.update-window { width: min(720px, 100%); background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: 0 12px 40px rgb(0 0 0 / 0.25); display: flex; flex-direction: column; max-height: 88vh; }
+.update-title-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px 6px; }
+.update-title-row h2 { margin: 0; font-size: 18px; }
+.update-body { padding: 4px 18px 12px; overflow-y: auto; }
+.update-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); }
+.update-actions .btn.primary { width: auto; }
+.update-steps { display: flex; flex-direction: column; gap: 10px; margin: 10px 0; padding: 0; }
+.update-step { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--surface-2); }
+.update-step.off { opacity: 0.55; }
+.update-step.running { border-color: var(--info); }
+.update-step.failed { border-color: var(--bad); }
+.update-step-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.update-step-body p, .update-step p { margin: 6px 0 0; }
+.update-counts { margin: 6px 0; padding-left: 18px; }
+.update-list { margin: 6px 0 0; }
+.update-list li { padding: 2px 0; overflow-wrap: anywhere; }
+.update-bar { height: 6px; margin-top: 8px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.update-bar > div { height: 100%; background: var(--info); transition: width 0.4s; }
+.update-bar > div.indeterminate { width: 30%; animation: update-slide 1.4s ease-in-out infinite; }
+@keyframes update-slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .update-bar > div.indeterminate { animation: none; width: 100%; opacity: 0.5; } }
+.update-report h3 { margin: 14px 0 4px; }
+.update-report-part h4 { margin: 12px 0 2px; font-size: 13px; display: flex; align-items: center; gap: 4px; }
+.update-steps { list-style: none; }
+label.update-step-head { cursor: pointer; margin: 0; }
+.update-step-head input[type="checkbox"] { width: auto; margin: 0; flex: none; }

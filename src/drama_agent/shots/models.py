@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from ..models.package import utcnow
+from ..pace import Pace
 from ..shot_reading import PersonState
 
 WRITE_STAGE = "shot_frames"
@@ -123,6 +124,10 @@ class ShotPlan(BaseModel):
     source: Literal["single", "model", "user"] = "single"
     # The clip length asked for when planning (None: the storyboard's, see clip_ms).
     clip_ms: int | None = None
+    # This shot's own pace (None: the story's) and how many sub-shots it is cut into (None:
+    # the planner decides). Asked for when planning; kept for the next re-plan.
+    pace: Pace | None = None
+    cuts: int | None = Field(None, ge=1, le=MAX_SUB_SHOTS)
     sub_shots: list[SubShot] = Field(default_factory=list)
     notes: str = ""
     model: str | None = None

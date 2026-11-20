@@ -8,7 +8,7 @@
  */
 
 const frames = { key: null, view: null, error: "", notes: [], timer: null, loading: false,
-  draws: 2, rounds: 3, provider: null, directions: {}, prompts: {}, plans: {}, history: {}, episode: "all",
+  draws: 2, rounds: 3, provider: null, directions: {}, prompts: {}, plans: {}, planOpts: {}, history: {}, episode: "all",
   sel: {}, notes2: {}, compare: {}, diffs: new Map(), vdraws: {}, verr: {},
   send: { key: null, targets: null, error: "" } };  // "Send to a look": the draw it is open on
 
@@ -504,8 +504,14 @@ function renderPlan(pkg, shot) {
       p.status === "writing" ? h("span", { class: "chip info" }, "planning…") : h("span", { class: "muted small" }, source),
       p.status === "failed" && h("span", { class: "chip bad", title: p.error || "" }, "plan failed"),
       !editing && h("span", { class: "take-actions" },
-        h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, title: "Ask the text model where the cuts go",
-          onclick: (e) => frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id }) }, "Plan cuts"),
+        planSettings(pkg, shot),
+        h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, title: "Ask the text model where the cuts go, at this shot's pace and cut count",
+          onclick: async (e) => {
+            const o = planOpts(pkg, shot);
+            await frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget,
+              { revision_id: pkg.revision_id, pace: o.pace || null, cuts: o.cuts ? Number(o.cuts) : null });
+            if (!frames.error) delete frames.planOpts[historyKey(pkg, shot)];
+          } }, "Plan cuts"),
         p.history > 0 && h("button", { type: "button", class: "btn ghost small", "aria-expanded": String(!!frames.history[historyKey(pkg, shot)]),
           title: "Earlier cut plans of this shot, each with the keyframes approved for it", onclick: () => toggleHistory(pkg, shot) },
           `History (${p.history})`),
@@ -522,6 +528,30 @@ function renderPlan(pkg, shot) {
     editing && renderPlanEditor(pkg, shot),
     renderHistory(pkg, shot),
   );
+}
+
+// A shot's own pace and cut count for its next plan (ShotPlan.pace, .cuts): what its plan
+// has, until changed here (kept per story revision, like the history); sent with "Plan cuts".
+const PACE_LABELS = { brisk: "Brisk", measured: "Measured", slow_burn: "Slow burn" };
+
+function planOpts(pkg, shot) {
+  return frames.planOpts[historyKey(pkg, shot)] || { pace: shot.plan.pace || "", cuts: shot.plan.cuts ? String(shot.plan.cuts) : "" };
+}
+
+function planSettings(pkg, shot) {
+  const o = planOpts(pkg, shot);
+  const set = (k) => (e) => { frames.planOpts[historyKey(pkg, shot)] = { ...planOpts(pkg, shot), [k]: e.target.value }; };
+  const story = PACE_LABELS[shot.plan.story_pace] || "story's";
+  return [
+    h("select", { class: "plan-setting", "aria-label": "Pace of this shot", disabled: shot.busy, onchange: set("pace"),
+      title: "This shot's pace for its next plan: how long a reaction may hold, how often the camera moves" },
+      h("option", { value: "", selected: !o.pace }, `Pace: story's (${story})`),
+      Object.entries(PACE_LABELS).map(([v, label]) => h("option", { value: v, selected: o.pace === v }, `Pace: ${label}`))),
+    h("select", { class: "plan-setting", "aria-label": "Sub-shots in this shot", disabled: shot.busy, onchange: set("cuts"),
+      title: "How many sub-shots the next plan cuts this shot into (at most 3, each at least 1 s)" },
+      h("option", { value: "", selected: !o.cuts }, "Cuts: auto"),
+      [1, 2, 3].map((n) => h("option", { value: String(n), selected: o.cuts === String(n) }, `Cuts: ${n}`))),
+  ];
 }
 
 // A shot's earlier cut plans (shots/history.py), newest first: loaded when opened, and

@@ -40,8 +40,13 @@ from .models import (
     TakeStatus,
     score,
 )
-from .planner import PlanOutput, plan_context, plan_instructions, planned_sub_shots
-from .plans import TOO_LONG, advisory, check_plan
+from .planner import (
+    PlanOutput,
+    plan_context,
+    plan_instructions,
+    planned_sub_shots,
+)
+from .plans import CUT_COUNT, TOO_LONG, advisory, check_plan
 from .references import sub_shot_references
 from .staleness import design_print, keyframe_judge
 from .takes import next_round, plan_take
@@ -60,9 +65,14 @@ from .writer import (
 )
 
 
-def _rank(problems: list[str]) -> tuple[int, int]:
-    """How bad a plan's problems are: those a save would refuse, then all of them."""
-    return sum(not advisory(p) for p in problems), len(problems)
+def _rank(problems: list[str]) -> tuple[int, int, int]:
+    """How bad a plan's problems are: those a save would refuse, then a cut count other
+    than the one asked for, then all of them."""
+    return (
+        sum(not advisory(p) for p in problems),
+        sum(p.startswith(CUT_COUNT) for p in problems),
+        len(problems),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,22 +259,33 @@ class ShotFrameRunner:
         task.add_done_callback(self._tasks.discard)
 
     def start_plan(
-        self, plan: ShotPlan, then: dict[str, Any] | None = None, clip_ms: int | None = None
+        self,
+        plan: ShotPlan,
+        then: dict[str, Any] | None = None,
+        clip_ms: int | None = None,
+        *,
+        pace: str | None = None,
+        cuts: int | None = None,
     ) -> None:
         """Write a shot's sub-shot plan in the background (the API has saved it as
-        "writing", still holding the plan it replaces); `clip_ms` is the clip asked for
-        (None: the storyboard's). With `then` (plan_take's options), start sub-shot 1
-        afterwards."""
-        task = asyncio.create_task(self._plan(plan, then, clip_ms))
+        "writing", still holding the plan it replaces). Asked for: `clip_ms` (None: the
+        storyboard's), the shot's `pace` (None: the story's) and `cuts` (None: the planner
+        decides). With `then` (plan_take's options), start sub-shot 1 afterwards."""
+        task = asyncio.create_task(self._plan(plan, then, clip_ms, pace, cuts))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def _plan(
-        self, plan: ShotPlan, then: dict[str, Any] | None, clip_ms: int | None = None
+        self,
+        plan: ShotPlan,
+        then: dict[str, Any] | None,
+        clip_ms: int | None,
+        pace: str | None,
+        cuts: int | None,
     ) -> None:
         async with self._planning:
             try:
-                await self._write_plan(plan, clip_ms)
+                await self._write_plan(plan, clip_ms, pace, cuts)
             except asyncio.CancelledError:
                 plan.status, plan.error = "failed", "Interrupted. Plan it again."
                 self.repo.save_shot_plan(plan)
@@ -288,7 +309,12 @@ class ShotFrameRunner:
         self.repo.save_shot_take(take)
         await self.run(take.take_id)
 
-    async def _write_plan(self, plan: ShotPlan, clip_ms: int | None = None) -> None:
+    async def _write_plan(
+        self, plan: ShotPlan, clip_ms: int | None, pace: str | None, cuts: int | None
+    ) -> None:
+        """Write the plan: `clip_ms`, `pace` and `cuts` as asked (None: the storyboard's
+        clip, the story's pace, the planner's count). They are kept on the plan whether or
+        not it can be written, so the next try asks the same."""
         pkg = self.repo.get_package(plan.package_id, plan.revision_id)
         # The plan it replaces, as it is (the history keeps it so); this one changes below.
         previous = plan.model_copy(deep=True) if plan.sub_shots else None
@@ -297,7 +323,7 @@ class ShotFrameRunner:
                 raise RuntimeError("the package revision is gone")
             shot = shot_of(pkg, plan.shot_id)
             context = plan_context(pkg, shot, clip_ms)
-            pace = story_pace(self.repo, pkg.package_id)
+            judged_at = pace or story_pace(self.repo, pkg.package_id)
             # The better of the plan and its retry: fewer problems that aren't advisory, then
             # fewer problems. A retry asked for a judgement (a listener held) never costs a
             # plan that was otherwise clean.
@@ -305,14 +331,15 @@ class ShotFrameRunner:
             for attempt in range(2):  # once more with the problems of a plan that isn't clean
                 request = GenerationRequest(
                     stage=PLAN_STAGE,  # type: ignore[arg-type]
-                    instructions=plan_instructions(pace),
+                    instructions=plan_instructions(judged_at, cuts),
                     context=context,
                     attempt=attempt,
                 )
                 out = await self.text.generate(request, PlanOutput)
                 try:
                     subs = planned_sub_shots(pkg, shot, out, clip_ms, strict=False)
-                    problems = check_plan(pkg, shot, subs, pace)
+                    # A wrong cut count is refused by no save, but was asked for: retried.
+                    problems = check_plan(pkg, shot, subs, judged_at, cuts)
                 except ValueError as exc:  # not a plan at all: retry, then give up
                     if attempt and kept is None:
                         raise
@@ -338,6 +365,7 @@ class ShotFrameRunner:
         except Exception as exc:  # the previous plan (if any) stays; the user can plan again
             log.warning("sub-shot plan failed for %s", plan.shot_id, exc_info=True)
             plan.status, plan.error = "failed", f"The plan couldn't be written: {str(exc)[:300]}"
+        plan.pace, plan.cuts = pace, cuts
         plan.updated_at = utcnow()
         if plan.status == "done" and pkg is not None:
             # The plan it replaces goes to the history; approvals it no longer matches go.

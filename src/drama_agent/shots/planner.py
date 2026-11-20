@@ -99,12 +99,27 @@ class PlanOutput(BaseModel):
     notes: str = ""
 
 
-def plan_instructions(pace: object = DEFAULT_PACE) -> str:
-    """The planner's instructions at the story's pace (pace.py)."""
+def plan_instructions(pace: object = DEFAULT_PACE, cuts: int | None = None) -> str:
+    """The planner's instructions at the shot's pace (pace.py), and with `cuts`, the number
+    of sub-shots the director asked for."""
     guide = PLAN_GUIDE.format(
         max_sub=MAX_SUB_SHOTS, min_s=MIN_SUB_SHOT_MS / 1000, coverage_s=COVERAGE_MS / 1000
     )
-    return f"{PLAN_ROLE}\n\n{guide}\n\n{planner_rules(pace)}"
+    out = f"{PLAN_ROLE}\n\n{guide}\n\n{planner_rules(pace)}"
+    if cuts is not None:
+        out += f"\n\n## Cuts\n\n{cuts_rule(cuts)}"
+    return out
+
+
+def cuts_rule(cuts: int) -> str:
+    """The director's cut count, as the planner is told it."""
+    if cuts == 1:
+        return ("The director asked for **exactly 1 sub-shot**: the whole clip is one view, "
+                "with the camera moving inside it; this overrides the coverage rule.")  # fmt: skip
+    return (f"The director asked for **exactly {cuts} sub-shots**. Put each cut where the "
+            "action or the speaker changes (a new subject, a reaction, the next line), never "
+            "in the middle of a line, and make each cut a new view; this overrides \"a held "
+            "moment with one view is one sub-shot\".")  # fmt: skip
 
 
 def plan_context(pkg: ProductionPackage, shot: Shot, clip: int | None = None) -> dict[str, Any]:

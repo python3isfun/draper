@@ -26,6 +26,18 @@
   <div class="layout">
     <aside class="sidebar">
       <div id="drama-side" class="sidebar-pane">
+      <!-- Only the job open now; New job and All jobs are pages of their own (#new, #jobs). -->
+      <section class="card current-job">
+        <h2>Current job</h2>
+        <div id="current-job"></div>
+        <div class="design-row">
+          <a class="btn primary small" href="#new" id="go-new-job">New job</a>
+          <a class="btn small" href="#jobs" id="go-all-jobs">All jobs</a>
+        </div>
+      </section>
+      <!-- The New job form and the job list wait here while their pages aren't shown, so
+           what was typed or attached stays (app.js moves them into the main view). -->
+      <div id="drama-parking" hidden>
       <form id="new-job" class="card new-job">
         <h2>New job</h2>
         <div id="offline-note" class="banner warn compact" hidden>
@@ -105,13 +117,17 @@
         <p class="form-error" id="new-job-error" role="alert"></p>
       </form>
 
-      <section class="jobs">
+      <section class="card jobs" id="jobs-section">
         <div class="section-head">
-          <h2>Jobs</h2>
-          <button type="button" class="btn ghost small" id="refresh-jobs">Refresh</button>
+          <h2>All jobs</h2>
+          <span class="design-row">
+            <a class="btn primary small" href="#new">New job</a>
+            <button type="button" class="btn ghost small" id="refresh-jobs">Refresh</button>
+          </span>
         </div>
         <ul id="job-list" class="job-list"></ul>
       </section>
+      </div>
       </div>
 
       <div id="lib-side" class="sidebar-pane" hidden>
@@ -185,6 +201,7 @@
   <script src="experiment.js"></script>
   <script src="face.js"></script>
   <script src="shots.js"></script>
+  <script src="update.js"></script>
   <script src="library.js"></script>
   <script src="bench.js"></script>
 </body>

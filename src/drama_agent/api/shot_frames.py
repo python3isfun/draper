@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..content_guard import GuardRefused, screen
 from ..design.setup import make_thumb
@@ -20,7 +20,7 @@ from ..models import ProductionPackage
 from ..models.images import GeneratedImage
 from ..models.package import utcnow
 from ..models.storyboard import Shot
-from ..pace import story_pace
+from ..pace import Pace, pace_name, story_pace
 from ..shot_frames import (
     DEFAULT_DRAWS,
     KF_BEFORE_OUTDATED,
@@ -114,8 +114,18 @@ class PlanRequest(BaseModel):
     revision_id: str | None = None
     # Your own sub-shots; None asks the text model to plan them.
     sub_shots: list[SubShotIn] | None = Field(None, max_length=MAX_SUB_SHOTS)
-    # The clip's length in whole seconds (default: the storyboard's, rounded up).
+    # The clip's length in whole seconds (null: the storyboard's, rounded up; left out:
+    # what the shot's plan has now).
     clip_s: int | None = Field(None, ge=MIN_CLIP_S, le=MAX_CLIP_S)
+    # The shot's own pace (null: the story's) and how many sub-shots to cut it into (null:
+    # the planner decides). Left out: what the shot's plan has now.
+    pace: Pace | None = None
+    cuts: int | None = Field(None, ge=1, le=MAX_SUB_SHOTS)
+
+    @field_validator("pace", mode="before")
+    @classmethod
+    def _pace(cls, value: object) -> object:
+        return pace_name(value) or None if isinstance(value, str) else value
 
 
 class ReadingRequest(BaseModel):
@@ -303,17 +313,30 @@ def register(
         if (stored is not None and stored.busy) or is_busy(takes, shot_id):
             raise HTTPException(409, f"{shot_id} is still being planned or drawn")
         plan = ShotPlan(package_id=pkg.package_id, revision_id=pkg.revision_id, shot_id=shot_id)
-        clip_ms = req.clip_s * 1000 if req.clip_s else None
-        plan.clip_ms = clip_ms
+        # The shot's clip, pace and cut count: as asked (null: the storyboard's clip, the
+        # story's pace, the planner's count), else as its plan has them.
+        given = req.model_fields_set
+        clip_ms = (req.clip_s * 1000 if req.clip_s else None) if "clip_s" in given else (
+            stored.clip_ms if stored else None)  # fmt: skip
+        pace = req.pace if "pace" in given else (stored.pace if stored else None)
+        cuts = req.cuts if "cuts" in given else (stored.cuts if stored else None)
         if req.sub_shots is None:
             if stored is not None:
                 # The board keeps showing the old plan meanwhile, whole (its clip, notes,
-                # model), so the history keeps it as it was when the new one replaces it.
+                # model, settings), so the history keeps it as it was when replaced. The
+                # runner puts the asked settings on it, written or not.
                 plan = stored.model_copy(update={"error": None})
             plan.status = "writing"
             repo.save_shot_plan(plan)
-            runner.start_plan(plan, clip_ms=clip_ms)
-            return plan
+            runner.start_plan(plan, clip_ms=clip_ms, pace=pace, cuts=cuts)
+            return plan.model_copy(update={"pace": pace, "cuts": cuts})
+        if cuts is not None and cuts != len(req.sub_shots):
+            if "cuts" in given:
+                raise HTTPException(
+                    422, f"{len(req.sub_shots)} sub-shots given, but cuts asks for {cuts}"
+                )
+            cuts = None  # your own cuts replace the count asked of the planner
+        plan.clip_ms, plan.pace, plan.cuts = clip_ms, pace, cuts
         try:
             plan.sub_shots = make_sub_shots(
                 pkg,

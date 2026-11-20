@@ -191,7 +191,11 @@ const OLD_TABS = { cast: "casting", sets: "casting", props: "casting", assets: "
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
   const tab = p.get("tab") || "overview";
-  return { job: p.get("job"), tab: OLD_TABS[tab] || tab };
+  const job = p.get("job");
+  // The page in the main view: a job, the New job form, or the list of all jobs (also
+  // what opens with no job).
+  const page = job ? "job" : p.has("new") ? "new" : "jobs";
+  return { job, tab: OLD_TABS[tab] || tab, page };
 }
 
 function go(jobId, tab = "overview") {
@@ -239,6 +243,7 @@ async function route() {
   clearTimeout(state.pollTimer);
   if (!job) {
     state.job = state.pkg = null;
+    stopActivity();
     renderJobList();
     renderMain();
     return;
@@ -346,7 +351,27 @@ async function loadAssets(job) {
 // ---------------------------------------------------------------------------
 // Sidebar
 
+// The sidebar's current job: the one open now, as the job list shows it. On the New job
+// and All jobs pages, the job last open, as a way back to it.
+function renderCurrentJob() {
+  const open = readHash().job;
+  if (open) state.lastJobId = open;
+  const current = open || state.lastJobId;
+  const box = $("#current-job");
+  if (!current) {
+    box.replaceChildren(h("p", { class: "muted small" }, "No job open. Start a new one, or open one from All jobs."));
+    return;
+  }
+  const j = state.jobs.find((x) => x.job_id === current) || (state.job?.job_id === current ? state.job : null);
+  if (!j) { box.replaceChildren(h("p", { class: "muted small" }, "Loading…")); return; }
+  box.replaceChildren(h("a", { class: `job-item${open ? " active" : ""}`, href: `#job=${encodeURIComponent(current)}`,
+                               "aria-current": open ? "page" : null, title: open ? "Open this job's overview" : "Back to this job" },
+    h("div", { class: "seed" }, j.seed || current),
+    h("div", { class: "meta" }, statusChip(j.status), h("span", { class: "muted small" }, timeAgo(j.created_at)))));
+}
+
 function renderJobList() {
+  renderCurrentJob();
   const list = $("#job-list");
   const current = readHash().job;
   if (selectingIn(list)) {
@@ -572,18 +597,29 @@ document.addEventListener("selectionchange", () => {
   if (state.jobListPending && !selectingIn($("#job-list"))) renderJobList();
 });
 
+// The New job form and the job list are kept, not rebuilt: parked while their page isn't shown.
+function parkDramaPages() {
+  const parking = $("#drama-parking");
+  for (const el of [document.getElementById("new-job"), document.getElementById("jobs-section")]) {
+    if (el.parentElement !== parking) parking.append(el);
+  }
+}
+
 function renderMain() {
   // A drama poll that lands while the Experiment tab is open must not draw over it.
   if (document.body.dataset.mode && document.body.dataset.mode !== "drama") return;
   const main = $("#main");
   const job = state.job;
-  if (!readHash().job) {
-    main.replaceChildren(
-      h("div", { class: "card placeholder" },
-        h("h2", {}, "Turn a seed into a 3-episode short drama"),
-        h("p", {}, "Enter a one-line idea, paste a script, or upload images or videos on the left. Each job produces scripts, a timed shot list and art asset requirements."),
-      ),
-    );
+  const { page } = readHash();
+  parkDramaPages();
+  if (page === "new") {
+    main.replaceChildren(h("div", { class: "new-job-page" },
+      h("p", { class: "muted" }, "Enter a one-line idea, paste a script, or upload images or videos. Each job produces scripts, a timed shot list and art asset requirements."),
+      document.getElementById("new-job")));
+    return;
+  }
+  if (page === "jobs") {
+    main.replaceChildren(document.getElementById("jobs-section"));
     return;
   }
   if (!job) {
@@ -617,6 +653,7 @@ function renderJobHeader(job) {
     const base = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}`;
     const zipQ = new URLSearchParams({ revision_id: pkg.revision_id, job_id: job.job_id });
     actions.push(
+      updateButton(pkg),
       h("a", { class: "btn small primary-outline", href: `${base}/export?${zipQ}`,
         title: "Production hand-off: story bible, scripts, storyboard and shot list (CSV), cast/set/prop sheets, asset requirements with reference images, QA report and sources, in one zip" }, "Download zip"),
       h("a", { class: "btn small", href: `${base}?${q}&format=markdown`, target: "_blank", rel: "noopener" }, "Markdown"),
@@ -1610,6 +1647,7 @@ function renderRevise(pkg) {
       h("p", { class: "hint" }, `Based on revision ${pkg.revision_id}. Only the steps that own the targets are re-run; everything outside the impacted objects, and everything locked, is kept as it is. When it passes the checks it is published as a new revision, and the story's pictures, keyframes and cut plans move to it: what the revision changed is marked out of date.`),
       h("datalist", { id: "all-ids" }, ids.map(([id, label]) => h("option", { value: id }, label))),
       picker("targets", "Targets: what to change"),
+      episodeShots(pkg, r),
       picker("locked", "Locked: must not change"),
       h("label", { class: "field" }, h("span", {}, "Instruction"), instruction),
       h("label", { class: "check" }, visual, "This changes how a character, location or prop looks"),
@@ -1618,6 +1656,23 @@ function renderRevise(pkg) {
     ),
     r.result && renderRevisionResult(r.result),
   );
+}
+
+// One click per episode adds all its shots as targets: a storyboard revision of the whole
+// episode (an episode target would rewrite its script too).
+function episodeShots(pkg, r) {
+  const shotsOf = (ep) => pkg.shot_list.filter((s) => s.episode_id === ep.episode_id).map((s) => s.shot_id);
+  return h("div", { class: "row-wrap small" },
+    h("span", { class: "muted" }, "Add every shot of:"),
+    pkg.episodes.map((ep) => {
+      const ids = shotsOf(ep);
+      const all = ids.length > 0 && ids.every((id) => r.targets.includes(id));
+      return h("button", { type: "button", class: "btn ghost small", disabled: all || !ids.length,
+        title: `Revise the storyboard of every shot in episode ${ep.number} (${ids.length} shots), not its script`,
+        onclick: () => { r.targets = [...r.targets, ...ids.filter((id) => !r.targets.includes(id))]; renderMain(); } },
+        `Episode ${ep.number} (${ids.length})`);
+    }),
+    r.targets.length > 0 && h("button", { type: "button", class: "btn ghost small", onclick: () => { r.targets = []; renderMain(); } }, "Clear targets"));
 }
 
 const revisionBusy = (rev) => rev.status === "queued" || rev.status === "running";
