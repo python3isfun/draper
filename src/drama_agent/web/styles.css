@@ -814,3 +814,22 @@ a.btn.primary { color: #fff; }
 .update-steps { list-style: none; }
 label.update-step-head { cursor: pointer; margin: 0; }
 .update-step-head input[type="checkbox"] { width: auto; margin: 0; flex: none; }
+/* Update all: approving the waiting cuts in the window */
+.update-approvals { margin-top: 14px; }
+.update-approvals h3 { margin: 0 0 6px; }
+.update-approve { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 10px 0; background: var(--surface); }
+.update-approve-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.update-approve-head .update-shot { margin-left: auto; font-size: 12px; }
+.update-approve p { margin: 4px 0; }
+.update-draws { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; margin-top: 8px; }
+.update-draw { margin: 0; display: flex; flex-direction: column; gap: 4px; padding: 4px; border-radius: 8px; border: 2px solid transparent; }
+.update-draw.best { border-color: var(--ok); }
+.update-draw figcaption { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.update-draw-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+.update-thumb { position: relative; display: block; padding: 0; border: 0; background: var(--surface-2); border-radius: 6px; cursor: zoom-in; overflow: hidden; width: 100%; }
+.update-thumb img { display: block; width: 100%; height: auto; max-height: 240px; object-fit: contain; }
+.update-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.update-thumb.small { width: 44px; flex: none; }
+.update-approved li { display: flex; align-items: center; gap: 8px; padding: 4px 0; flex-wrap: wrap; }
+.update-window label.update-check { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.update-window label.update-check input { width: auto; margin: 0; }

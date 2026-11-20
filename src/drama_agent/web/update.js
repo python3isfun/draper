@@ -12,6 +12,9 @@
  *   3. Keyframes: draw what can be drawn without an approval: first keyframes (planning
  *      shots without a plan first), the next cut after an approved one, and out-of-date
  *      keyframes. Nothing is approved: approving is the person's check.
+ * The cuts waiting for an approval are approved in the window itself (each with the draws of
+ * its newest run, their checks and a full-size view; "Details" opens the shot's page), from
+ * the first look to the report; approving starts the next cut, which comes back once drawn.
  * It runs in the page: closing the window keeps it running (the header button reopens it);
  * reloading the page stops the steps not started yet (work already started finishes on the
  * server). Uses h(), api(), state, $, go(), numberSelect() and frames (shots.js).
@@ -34,6 +37,22 @@ function updPictureNames(images) {
   return new Map(images.images.map((i) => [i.image_id, slots.get(i.deliverable_id) || i.deliverable_id]));
 }
 
+const UPD_FINISHED = ["done", "failed", "paused"];
+
+// A shot's cut waiting for a person: its first cut without an approval, with finished
+// draws, nothing running and no design pick missing; with the takes of its newest run
+// (every round of it). Null when it has none.
+function updWaitingCut(s) {
+  const sub = s.sub_shots.find((x) => !x.approved);
+  if (!sub || s.busy || sub.missing.length) return null;
+  const done = sub.takes.filter((t) => UPD_FINISHED.includes(t.status) && t.results.some((d) => d.status === "done"));
+  if (!done.length) return null;
+  const run = done[done.length - 1].run_id;
+  return { shot: s, sub, takes: done.filter((t) => t.run_id === run), earlier: done.filter((t) => t.run_id !== run).length };
+}
+
+const updWaiting = (board) => board.shots.map(updWaitingCut).filter(Boolean);
+
 // What the board says needs doing, shot by shot.
 function updClassify(board) {
   const out = { replan: [], ownPlans: [], first: [], unplanned: 0, next: [], redraw: [],
@@ -53,8 +72,7 @@ function updClassify(board) {
     if (!sub) continue;
     if (sub.missing.length) { out.picks.push({ shot_id: s.shot_id, cut: sub.index, reason: sub.missing.join("; ") }); continue; }
     if (s.busy) continue;
-    const drawn = sub.takes.some((t) => t.results.some((d) => d.status === "done"));
-    if (drawn) out.approve.push({ shot_id: s.shot_id, cut: sub.index, of: s.sub_shots.length });
+    if (updWaitingCut(s)) out.approve.push({ shot_id: s.shot_id, cut: sub.index, of: s.sub_shots.length });
     else if (sub.index === 1) {
       out.first.push(s.shot_id);
       if (s.plan.source === "single" && s.duration_ms > 0) out.unplanned += 1;
@@ -179,14 +197,21 @@ async function updKeyframes(r, step) {
   }
   step.total = shots.size;
   step.shots = [...shots];
+  // A shot is finished the first time it isn't busy: a next cut started from the window by
+  // an approval afterwards isn't this step's to wait for.
+  const finished = new Set();
   while (shots.size) {
     if (r.stopped) return;
     await updSleep(UPD_POLL_MS);
-    const board = await getBoard(pkg);
-    const running = board.shots.filter((s) => shots.has(s.shot_id) && s.busy).length;
-    step.done = shots.size - running;
-    step.detail = running ? `${step.done} of ${shots.size} shots finished; ${running} drawing and checking` : `${shots.size} of ${shots.size} shots finished`;
-    updRender();
+    const { board, fresh } = await updBoard(r);
+    for (const s of board.shots) if (shots.has(s.shot_id) && !s.busy) finished.add(s.shot_id);
+    const running = shots.size - finished.size;
+    step.done = finished.size;
+    const detail = running ? `${step.done} of ${shots.size} shots finished; ${running} drawing and checking` : `${shots.size} of ${shots.size} shots finished`;
+    if ((fresh && updLive(r, board)) || detail !== step.detail) {
+      step.detail = detail;
+      updRender();
+    }
     if (!running) break;
   }
   step.result = shots.size
@@ -199,21 +224,29 @@ const UPD_RUN = { pictures: updPictures, plans: updPlans, keyframes: updKeyframe
 // ---------------------------------------------------------------------------------------
 // Flow: survey -> confirm -> run -> report
 
+// Whether a step has something to do, by the first look (its default tick).
+function updStepWanted(r, key) {
+  const pics = Object.keys(r.images.outdated || {}).length;
+  if (key === "pictures") return pics > 0 || r.images.queued > 0;
+  if (key === "plans") return r.plan.replan.length > 0;
+  const kf = r.plan.first.length + r.plan.next.length + r.plan.redraw.length;
+  return kf > 0 || r.plan.replan.length > 0 || pics > 0;
+}
+
 async function updSurvey(pkg) {
   // The job the story belongs to: the report's shot links open it.
   const jobId = upd.run && upd.run.pkg.package_id === pkg.package_id ? upd.run.jobId : state.job && state.job.job_id;
   const r = { pkg: { package_id: pkg.package_id, revision_id: pkg.revision_id }, jobId, phase: "survey",
-    draws: frames.draws, rounds: frames.rounds, provider: frames.provider, error: "" };
+    draws: frames.draws, rounds: frames.rounds, provider: frames.provider, error: "",
+    approved: [], next: true, shown: UPD_PAGE };
   upd.run = r;
   updRender();
   try {
     const [images, board] = await Promise.all([getImages(pkg), getBoard(pkg)]);
     if (upd.run !== r) return;
     Object.assign(r, { images, board, plan: updClassify(board), phase: "plan" });
-    const pics = Object.keys(images.outdated || {}).length;
-    const kf = r.plan.first.length + r.plan.next.length + r.plan.redraw.length;
-    r.steps = UPD_STEPS.map((s) => ({ ...s, status: "waiting",
-      on: s.key === "pictures" ? pics > 0 || images.queued > 0 : s.key === "plans" ? r.plan.replan.length > 0 : kf > 0 || r.plan.replan.length > 0 || pics > 0 }));
+    updLive(r, board);
+    r.steps = UPD_STEPS.map((s) => ({ ...s, status: "waiting", on: updStepWanted(r, s.key) }));
   } catch (e) {
     r.phase = "error";
     r.error = e.message;
@@ -246,6 +279,7 @@ async function updStart() {
   try {
     const [images, board] = await Promise.all([getImages(r.pkg), getBoard(r.pkg)]);
     r.after = { images, board, todo: updClassify(board) };
+    updLive(r, board);
   } catch (e) {
     r.error = `Couldn't read the story for the report: ${e.message}`;
   }
@@ -261,6 +295,208 @@ async function updStart() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Approving in the window
+
+const UPD_PAGE = 8;  // waiting cuts shown at a time
+// Takes a fresh board; says whether anything the window shows changed (so a poll that
+// changes nothing doesn't redraw the pictures).
+function updLive(r, board) {
+  const sig = JSON.stringify(board.shots.map((s) => [s.busy, s.sub_shots.map((x) => [x.approved,
+    x.takes.map((t) => [t.take_id, t.status, t.results.map((d) => [d.status, d.check && d.check.score])])])]));
+  r.live = board;
+  if (r.after) Object.assign(r.after, { board, todo: updClassify(board) });
+  if (r.phase === "plan") {
+    // The first look's counts follow approvals made in it; a step nobody ticked or
+    // unticked is on when it has something to do.
+    r.board = board;
+    r.plan = updClassify(board);
+    for (const s of r.steps || []) if (!s.touched) s.on = updStepWanted(r, s.key);
+  }
+  // An approval withdrawn (here, by withdrawing the cut before it, or elsewhere) leaves the list.
+  r.approved = (r.approved || []).filter((a) => {
+    const s = board.shots.find((x) => x.shot_id === a.shot_id);
+    const mine = s && s.sub_shots[a.cut - 1];
+    return mine && mine.approved && mine.approved[0] === a.take.take_id;
+  });
+  const changed = sig !== r.sig;
+  r.sig = sig;
+  return changed;
+}
+
+// The board, asked for in turn: an answer is used only when no later-asked board has been
+// used already (a slow poll never puts back what an approval changed).
+async function updBoard(r) {
+  const seq = (r.asked = (r.asked || 0) + 1);
+  const board = await getBoard(r.pkg);
+  const fresh = seq > (r.applied || 0);
+  if (fresh) r.applied = seq;
+  return { board, fresh };
+}
+
+// Reads the board again (after an action, or while something draws); the report's lists
+// follow it. A failed read shows until the next one succeeds.
+async function updRefresh(r, always = true) {
+  let changed = always;
+  try {
+    const { board, fresh } = await updBoard(r);
+    changed = (fresh && updLive(r, board)) || always || Boolean(r.pollError);
+    r.pollError = "";
+  } catch (e) {
+    r.pollError = `Couldn't read the board: ${e.message}`;
+    changed = true;
+  }
+  if (!changed) return;
+  updRender();
+  // The Keyframes tab underneath shows it too (unless it is polling the board itself).
+  if (state.pkg && state.pkg.package_id === r.pkg.package_id && frames.key === framesKey(state.pkg) && !frames.timer && !frames.loading) {
+    loadFrames(state.pkg);
+  }
+}
+
+async function updApprove(r, take, n) {
+  r.acting = true;
+  r.actionError = "";
+  updRender();
+  try {
+    await api(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, { method: "POST", body: JSON.stringify({ n, next: r.next }) });
+    r.approved = r.approved.filter((a) => !(a.shot_id === take.shot_id && a.cut === take.sub_shot));
+    r.approved.unshift({ shot_id: take.shot_id, cut: take.sub_shot, take, n });
+  } catch (e) {
+    r.actionError = e.message;
+  }
+  r.acting = false;
+  await updRefresh(r);
+}
+
+async function updWithdraw(r, a) {
+  r.acting = true;
+  r.actionError = "";
+  updRender();
+  try {
+    await api(`/v1/shot-takes/${encodeURIComponent(a.take.take_id)}/approve`, { method: "DELETE" });
+  } catch (e) {
+    r.actionError = e.message;
+  }
+  r.acting = false;
+  await updRefresh(r);
+}
+
+// A draw's standing for "best check": only a draw that passed its check counts.
+const updBest = (d) => (d.check && d.check.passed ? d.check.score : null);
+const updDrawLabel = (take, d) => `Round ${take.round} · draw ${d.n + 1}`;
+
+// A card is built once per cut and state of its takes, then reused on every redraw: its
+// pictures don't reload and its open details stay open.
+function updApproveCard(r, item) {
+  const key = `${item.shot.shot_id}|${item.sub.index}`;
+  const sig = JSON.stringify([item.sub.framing, item.earlier, item.takes.map((t) => [t.take_id, t.status, t.results.map((d) => [d.status, d.check && d.check.score])])]);
+  const kept = (r.cards ||= new Map()).get(key);
+  if (kept && kept.sig === sig) return kept.el;
+  const el = updBuildCard(r, item);
+  r.cards.set(key, { sig, el });
+  return el;
+}
+
+function updBuildCard(r, item) {
+  const { shot, sub } = item;
+  const draws = item.takes.flatMap((t) => t.results.filter((d) => d.status === "done").map((d) => ({ take: t, d })));
+  // The passing draw with the best score, when one beats the others.
+  const passed = draws.filter((x) => updBest(x.d) != null);
+  const top = Math.max(...passed.map((x) => updBest(x.d)));
+  const best = passed.filter((x) => updBest(x.d) === top).length === 1 ? passed.find((x) => updBest(x.d) === top) : null;
+  const where = `${shot.shot_id} · cut ${sub.index} of ${shot.sub_shots.length}`;
+  const big = draws.map(({ take, d }) => ({ src: drawUrl(take, d.n, "content"), caption: `${where} · ${updDrawLabel(take, d)}`,
+    title: d.check ? `${d.check.passed ? "pass" : "fail"} ${d.check.score}: ${d.check.summary || ""}` : "", likeness: take.likeness }));
+  return h("article", { class: "update-approve" },
+    h("div", { class: "update-approve-head" },
+      h("strong", {}, where),
+      h("span", { class: "small muted" }, `${(sub.start_ms / 1000).toFixed(1)}–${secs(sub.end_ms)} · ${shot.place}`),
+      updShotLink(shot.shot_id, "", "Details")),
+    h("p", { class: "small" }, h("strong", {}, sub.framing), sub.camera ? ` (${sub.camera})` : "", ` ${sub.action}`),
+    (sub.lines || []).length > 0 && h("p", { class: "small muted" }, sub.lines.map((l) => `${l.speaker || l.speaker_id}: "${l.text}"`).join("  ")),
+    h("div", { class: "update-draws" }, draws.map(({ take, d }, i) => {
+      const failed = d.check ? d.check.items.filter((x) => !x.passed) : [];
+      const isBest = best && best.d === d && best.take === take;
+      return h("figure", { class: `update-draw${isBest ? " best" : ""}` },
+        h("button", { type: "button", class: "update-thumb", "data-focus": `big:${take.take_id}:${d.n}`, title: "See it full size (arrows step through the draws)", onclick: () => enlarge(big, i) },
+          h("img", { src: drawUrl(take, d.n), alt: updDrawLabel(take, d), loading: "lazy" }), lookalikeTag(take.likeness)),
+        h("figcaption", {},
+          h("div", { class: "small" }, updDrawLabel(take, d)),
+          h("div", { class: "update-draw-tags" }, checkBadge(d), isBest && h("span", { class: "chip info" }, "best check")),
+          h("button", { type: "button", class: "btn small primary-outline", "data-act": "", "data-focus": `ok:${take.take_id}:${d.n}`,
+            title: "Approve this keyframe (with the setting above, the next cut starts, drawn from it)", onclick: () => updApprove(r, take, d.n) }, "Approve"),
+          (failed.length > 0 || (d.check && d.check.summary)) && stickyDetails(`upd-${take.take_id}-${d.n}`,
+            failed.length ? `${failed.length} issue${failed.length > 1 ? "s" : ""}` : "Check",
+            d.check.summary && h("p", { class: "muted small" }, d.check.summary),
+            h("ul", { class: "plain check-items small" }, failed.map((x) =>
+              h("li", {}, h("strong", {}, x.item), h("span", { class: "muted" }, ` (${x.severity})`), `: ${x.finding}`))),
+            d.check.fix && h("p", { class: "small" }, h("strong", {}, "Fix: "), d.check.fix))));
+    })),
+    item.earlier > 0 && h("p", { class: "small muted" }, `${updPlural(item.earlier, "earlier take")} of this cut: see Details.`));
+}
+
+// What became of a cut approved here: its next cut drawing, waiting, approved, or none.
+function updAfterApproval(r, a) {
+  const s = r.live && r.live.shots.find((x) => x.shot_id === a.shot_id);
+  if (!s) return "";
+  const mine = s.sub_shots[a.cut - 1];
+  if (!mine || !mine.approved || mine.approved[0] !== a.take.take_id) return "no longer approved";
+  const next = s.sub_shots[a.cut];
+  if (!next) return "last cut: the shot is complete";
+  if (next.approved) return `cut ${next.index} approved too`;
+  if (s.busy) return `cut ${next.index} drawing…`;
+  if (next.takes.some((t) => t.results.some((d) => d.status === "done"))) return `cut ${next.index} waiting for you`;
+  return `cut ${next.index} not started`;
+}
+
+function updApprovals(r, open) {
+  if (!r.live) return null;
+  const waiting = updWaiting(r.live);
+  const running = r.live.shots.filter((s) => s.busy).length;
+  if (!waiting.length && !r.approved.length && !(open && running)) return null;
+  const shown = waiting.slice(0, r.shown);
+  const body = [
+    h("div", { class: "design-row small" },
+      h("label", { class: "update-check" }, h("input", { type: "checkbox", checked: r.next, onchange: (e) => { r.next = e.target.checked; } }),
+        " Approving a cut starts the next one (drawn from it)"),
+      running > 0 && h("span", { class: "chip info" }, `${running} drawing; new cuts appear here when drawn`)),
+    r.actionError && h("p", { class: "form-error" }, r.actionError),
+    r.pollError && h("p", { class: "form-error" }, r.pollError),
+    shown.map((item) => updApproveCard(r, item)),
+    waiting.length > shown.length && h("button", { type: "button", class: "btn small", onclick: () => { r.shown += UPD_PAGE; updRender(); } },
+      `Show ${Math.min(UPD_PAGE, waiting.length - shown.length)} more (${waiting.length - shown.length} left)`),
+    !waiting.length && h("p", { class: "small muted" }, running ? "Nothing to approve yet." : "Nothing waits for your approval."),
+    r.approved.length > 0 && h("section", { class: "update-report-part" },
+      h("h4", {}, h("span", { class: "chip ok" }, r.approved.length), " approved here"),
+      h("ul", { class: "plain small update-approved" }, r.approved.map((a) => h("li", {},
+        h("button", { type: "button", class: "update-thumb small", title: "See it full size",
+          onclick: () => enlarge([{ src: drawUrl(a.take, a.n, "content"), caption: `${a.shot_id} · cut ${a.cut} · ${updDrawLabel(a.take, { n: a.n })}`, likeness: a.take.likeness }]) },
+          h("img", { src: drawUrl(a.take, a.n), alt: "", loading: "lazy" })),
+        h("span", {}, h("strong", {}, `${a.shot_id} · cut ${a.cut}`), h("span", { class: "muted" }, ` ${updAfterApproval(r, a)}`)),
+        updShotLink(a.shot_id, "", "Details"),
+        h("button", { type: "button", class: "btn ghost small", disabled: r.acting, "data-focus": `wd:${a.take.take_id}`, onclick: () => updWithdraw(r, a) }, "Withdraw"))))),
+  ];
+  const title = `${updPlural(waiting.length, "cut")} waiting for your approval`;
+  return open
+    ? h("section", { class: "update-approvals" }, h("h3", {}, title), body)
+    : stickyDetails("upd-approvals", title, body);
+}
+
+// While the window is open and something is drawing, the approvals follow the board (one
+// read at a time).
+setInterval(async () => {
+  const r = upd.run;
+  if (!r || !r.live || !upd.el || upd.el.hidden || r.phase === "running" || r.acting || r.polling) return;
+  if (!r.live.shots.some((s) => s.busy) && !r.pollError) return;
+  r.polling = true;
+  try {
+    await updRefresh(r, false);
+  } finally {
+    r.polling = false;
+  }
+}, UPD_POLL_MS);
+
+// ---------------------------------------------------------------------------------------
 // The window
 
 function openUpdate() {
@@ -269,7 +505,8 @@ function openUpdate() {
   if (!upd.el) {
     upd.el = h("div", { class: "update-backdrop", onclick: (e) => { if (e.target === upd.el) closeUpdate(); } });
     document.body.append(upd.el);
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && upd.el && !upd.el.hidden) closeUpdate(); });
+    // Escape closes a full-size picture first (it sits above the window), then the window.
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && upd.el && !upd.el.hidden && !$(".lightbox")) closeUpdate(); });
   }
   upd.el.hidden = false;
   const same = upd.run && upd.run.pkg.package_id === pkg.package_id && upd.run.pkg.revision_id === pkg.revision_id;
@@ -299,12 +536,22 @@ function updateButton(pkg) {
     title: "Bring the story's pictures, cut plans and keyframes up to date: shows the plan first, runs it in order, then reports what waits on you" }, updLabel(pkg));
 }
 
-const updShotLink = (id, extra = "") => h("a", { href: "#", class: "update-shot", onclick: (e) => {
-  e.preventDefault();
-  closeUpdate();
-  go(upd.run.jobId, "keyframes");
-  setTimeout(() => document.getElementById(`kf-${id}`)?.scrollIntoView({ block: "start" }), 600);
-} }, id, extra);
+// Opens the shot on the Keyframes tab (the window closes; the header button reopens it).
+const updShotLink = (id, extra = "", label = null) => h("a", { href: "#", class: "update-shot",
+  title: "Open this shot on the Keyframes tab: its plan, every take, prompts and checks", onclick: (e) => {
+    e.preventDefault();
+    const jobId = upd.run.jobId;  // closing the first look drops the run
+    closeUpdate();
+    go(jobId, "keyframes");
+    // Once the tab has drawn the shot (it may redraw as the board loads).
+    let tries = 0;
+    const find = () => {
+      const card = document.getElementById(`kf-${id}`);
+      if (card) card.scrollIntoView({ block: "start" });
+      if (++tries < 4) setTimeout(find, 400);
+    };
+    setTimeout(find, 300);
+  } }, label || [id, extra]);
 
 // A short list of shots (or pictures) with why, the rest folded.
 function updList(items, render) {
@@ -328,7 +575,7 @@ function updPlanView(r) {
     const n = r.steps.indexOf(s) + 1;
     return h("li", { class: `update-step ${s.on ? "" : "off"}` },
       h("label", { class: "update-step-head" },
-        h("input", { type: "checkbox", checked: s.on, onchange: (e) => { s.on = e.target.checked; updRender(); } }),
+        h("input", { type: "checkbox", checked: s.on, onchange: (e) => { s.on = e.target.checked; s.touched = true; updRender(); } }),
         h("strong", {}, `${n}. ${s.label}`)),
       h("div", { class: "update-step-body" }, body));
   };
@@ -366,7 +613,8 @@ function updPlanView(r) {
         kfs > 0 && h("p", { class: "small muted" }, `Up to about ${kfs * r.draws * r.rounds} keyframe images (${kfs} shots × ${r.draws} draws × up to ${r.rounds} rounds).`),
       ])),
     (p.busy.length > 0) && h("p", { class: "small muted" }, `${updPlural(p.busy.length, "shot")} already being planned or drawn: left as they are.`),
-    h("p", { class: "small muted" }, "Nothing is approved for you. At the end, a report lists the keyframes waiting for your approval. You can close this window while it runs; reloading the page stops the steps that haven't started."),
+    h("p", { class: "small muted" }, "Nothing is approved for you: you approve the cuts here, as they are drawn and in the report. You can close this window while it runs; reloading the page stops the steps that haven't started."),
+    updApprovals(r, false),
   ];
 }
 
@@ -381,7 +629,7 @@ function updStepsView(r) {
       h("div", { class: "update-step-head" },
         h("span", { class: `chip ${cls}` }, word),
         h("strong", {}, `${i + 1}. ${s.label}`),
-        s.started && h("span", { class: "small muted" }, updMins((s.ended || Date.now()) - s.started))),
+        s.started && h("span", { class: "small muted", "data-since": s.started, "data-until": s.ended || "" }, updMins((s.ended || Date.now()) - s.started))),
       s.status === "running" && h("div", { class: "update-bar", role: "progressbar", "aria-valuenow": pct ?? undefined },
         h("div", { class: pct == null ? "indeterminate" : "", style: pct == null ? "" : `width:${pct}%` })),
       s.detail && s.status === "running" && h("p", { class: "small muted" }, s.detail),
@@ -404,8 +652,6 @@ function updReport(r) {
     h("p", { class: "small muted" }, `Took ${updMins(r.ended - r.started)}.`),
     h("ul", { class: "small" }, r.steps.map((s) => h("li", {}, h("strong", {}, `${s.label}: `), s.result || s.status))),
     a && h("div", {},
-      sec("waiting for your approval", "info", a.todo.approve, (it) => [updShotLink(it.shot_id, ` · cut ${it.cut} of ${it.of}`)],
-        "Pick a draw on each. Approving a cut starts the next one; press Update all again afterwards to draw anything else that's left."),
       sec("still running", "info", a.todo.busy.map((id) => ({ shot_id: id })), shotWhy, "Started work that hadn't finished when the report was made."),
       sec("waiting for design picks", "warn", a.todo.picks, shotWhy, "Pick the missing looks, sets or props, then update again."),
       sec("plans you wrote that are out of date", "warn", a.todo.ownPlans, shotWhy),
@@ -414,7 +660,8 @@ function updReport(r) {
       sec("keyframes that couldn't start", "warn", kf.skipped, shotWhy),
       sec("shots with out-of-date keyframes left", "warn", a.todo.outdatedKf, (it) => [updShotLink(it.shot_id, ` · cut ${it.cuts.join(", ")}`), h("span", { class: "muted" }, ` ${it.reason}`)])),
     a && !a.todo.approve.length && !a.todo.picks.length && !a.todo.outdatedKf.length && !a.todo.ownPlans.length && !a.todo.busy.length
-      && h("p", { class: "banner ok small" }, "Everything is up to date and nothing waits on you."));
+      && h("p", { class: "banner ok small" }, "Everything is up to date and nothing waits on you."),
+    updApprovals(r, true));
 }
 
 function updRender() {
@@ -423,10 +670,17 @@ function updRender() {
   const el = upd.el;
   const r = upd.run;
   if (!el || el.hidden || !r) return;
+  // Kept across redraws: the scroll position and the focused control (read before the new
+  // view is built: building it moves the reused cards out of the old one).
+  const scrolled = el.querySelector(".update-body")?.scrollTop || 0;
+  const focused = el.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
   const body = r.phase === "survey" ? h("p", { class: "loading" }, "Looking at the story…")
     : r.phase === "error" ? h("p", { class: "form-error" }, `Couldn't read the story: ${r.error}`)
     : r.phase === "plan" ? updPlanView(r)
-    : [updStepsView(r), r.phase === "done" && updReport(r), r.error && h("p", { class: "form-error" }, r.error)];
+    : [updStepsView(r),
+       // Cuts drawn so far can be approved while the rest are drawn.
+       r.phase === "running" && r.steps.find((s) => s.key === "keyframes").status === "running" && updApprovals(r, true),
+       r.phase === "done" && updReport(r), r.error && h("p", { class: "form-error" }, r.error)];
   const anyOn = r.steps && r.steps.some((s) => s.on);
   const buttons = r.phase === "plan"
     ? [h("button", { type: "button", class: "btn", onclick: closeUpdate }, "Cancel"),
@@ -443,7 +697,16 @@ function updRender() {
       h("button", { type: "button", class: "btn ghost small", "aria-label": "Close", onclick: closeUpdate }, "×")),
     h("div", { class: "update-body" }, body),
     h("div", { class: "update-actions" }, buttons)));
+  // Reused cards keep their buttons: only whether an action is under way changes.
+  for (const b of el.querySelectorAll("[data-act]")) b.disabled = Boolean(r.acting);
+  if (focused) el.querySelector(`[data-focus="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+  el.querySelector(".update-body").scrollTop = scrolled;
 }
 
-// While a step runs, the elapsed times tick.
-setInterval(() => { if (updBusy() && upd.el && !upd.el.hidden) updRender(); }, 1000);
+// While a step runs, its elapsed time ticks (only those labels change).
+setInterval(() => {
+  if (!updBusy() || !upd.el || upd.el.hidden) return;
+  for (const span of upd.el.querySelectorAll("[data-since]")) {
+    span.textContent = updMins((Number(span.dataset.until) || Date.now()) - Number(span.dataset.since));
+  }
+}, 1000);

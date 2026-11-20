@@ -49,10 +49,13 @@ with no build step. It lets you:
   pictures and wait for the image queue; re-plan the out-of-date cut plans the model wrote
   (each keeps its own pace and cut count; plans you wrote are left to you); draw every
   keyframe that can be drawn without an approval (first keyframes, the next cut after an
-  approved one, out-of-date keyframes). It never approves anything: the closing report
-  lists the cuts waiting for your approval, the shots waiting for design picks and what
-  failed. Closing the window keeps it running; reloading the page stops the steps not
-  started yet
+  approved one, out-of-date keyframes). It never approves anything by itself: the cuts
+  waiting for you are approved in the window (from the first look, while keyframes are
+  drawn and in the report), each with the draws of its newest run, their checks, a
+  full-size view and **Details** (the shot's page, for every take, prompt and check).
+  Approving starts the next cut, which comes back once drawn; an approval can be
+  withdrawn. The report also lists the shots waiting for design picks and what failed.
+  Closing the window keeps it running; reloading the page stops the steps not started yet
 - export a package as Markdown or JSON
 
 Model output is always inserted as text, never as HTML.
