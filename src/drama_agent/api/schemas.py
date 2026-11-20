@@ -236,6 +236,8 @@ class ExpTurnRequest(BaseModel):
     # Restrictive mode (top-of-page switch, off by default): no real-person likeness by name
     # or face. The content rules that protect minors and real people apply either way.
     restrictive: bool = False
+    # "Drawn with": "h3" (default) or another provider the chat lists (e.g. "nano-banana").
+    provider: str | None = Field(None, max_length=40)
 
 
 class ExpSessionItem(ExpSession):
@@ -261,8 +263,10 @@ class ExpSessionView(BaseModel):
     session: ExpSession
     turns: list[ExpTurn]
     sizes: dict[str, str]  # aspect ratio -> size
-    # Image providers a Face Lab test can be drawn with (name -> model), H3 first.
+    # Image providers a chat message or a study's test can be drawn with (name -> model),
+    # H3 first; `provider_references`: how many pictures each takes (0: words alone).
     providers: dict[str, str] = Field(default_factory=dict)
+    provider_references: dict[str, int] = Field(default_factory=dict)
     anchor: StudyAnchor | None = None  # a study's <Picture 1>, if its tests have one
 
 

@@ -9,7 +9,8 @@
 const exp = {
   sessions: [],
   sid: null,
-  view: null,  // { session, turns, sizes }
+  view: null,  // { session, turns, sizes, providers }
+  provider: "h3",  // "Drawn with": the image model for the next message, in every chat
   timer: null,
   mounted: null,  // session id the main view is built for
   el: {},  // persistent elements of the mounted view
@@ -477,6 +478,7 @@ function renderTurn(t) {
       ? `sent ${t.references.map((r) => (exp.labels[r] != null ? `#${exp.labels[r]}` : "an image")).join(", ")}`
       : "new image (no picture)",
     t.prompt_model && `prompt by ${t.prompt_model}`,
+    t.provider && `drawn with ${faceProviderName(t.provider, exp.view?.providers?.[t.provider])}`,
     t.restrictive && "restrictive mode",
   ].filter(Boolean).join(" · ");
   const bot = h("div", { class: "exp-msg bot" },
@@ -652,6 +654,7 @@ function renderComposer(v) {
     h("label", { class: "exp-draws" }, "Draws ",
       h("select", { "aria-label": "Draws", onchange: (e) => { d.draws = Number(e.target.value); } },
         [1, 2, 3, 4].map((n) => h("option", { value: n, selected: n === d.draws }, n)))),
+    expProviderSelect(v),
   );
   el.text.classList.toggle("mono", d.mode === "exact");
   updateSendButton();
@@ -667,6 +670,19 @@ function updateSendButton() {
   el.send.textContent = sending != null ? sending || "Sending…"
     : expBusy(v) ? "Working…"
     : d.text.trim() || !d.files.length ? "Send" : "Upload";
+}
+
+// "Drawn with": the image model that draws the next message, for every chat (Characters,
+// Sets, keyframes, Scratch) until changed. A model that takes no pictures (a local server,
+// for study tests) isn't offered: a chat edits pictures.
+function expProviderSelect(v) {
+  const names = Object.keys(v.providers || {}).filter((n) => (v.provider_references || {})[n] !== 0);
+  if (names.length < 2) return null;
+  if (!names.includes(exp.provider)) exp.provider = "h3";
+  return h("label", { class: "exp-draws" }, "Drawn with ",
+    h("select", { "aria-label": "Image model", title: "The image model that draws this message's images",
+      onchange: (e) => { exp.provider = e.target.value; } },
+    names.map((n) => h("option", { value: n, title: v.providers[n], selected: n === exp.provider }, faceProviderName(n, v.providers[n])))));
 }
 
 async function sendExp() {
@@ -699,7 +715,8 @@ async function sendExp() {
     progress("Sending…");
     await api(`/v1/experiments/${encodeURIComponent(sid)}/turns`, {
       method: "POST",
-      body: JSON.stringify({ text: d.text, attachments: files.map((f) => f.asset.asset_id), mode: d.mode, draws: d.draws, restrictive: restrictiveBox.checked }),
+      body: JSON.stringify({ text: d.text, attachments: files.map((f) => f.asset.asset_id), mode: d.mode, draws: d.draws, restrictive: restrictiveBox.checked,
+        provider: exp.provider || "h3" }),
     });
     for (const f of files) URL.revokeObjectURL(f.url);
     d.files = [];

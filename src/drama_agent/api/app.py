@@ -93,7 +93,8 @@ def create_app(
     images = image_client or FixtureImageClient()
     wakeup = asyncio.Event()
     image_wakeup = asyncio.Event()
-    # Face Lab tests may also be drawn by a local image server ("local"), chosen per test.
+    # Chat messages and study tests may be drawn by another provider (Nano Banana, or a local
+    # image server for tests), chosen per message.
     experiments = ExperimentRunner(repo, media, images, orchestrator.client,
                                    providers=face_providers)  # fmt: skip
 
@@ -286,7 +287,9 @@ def create_app_from_env() -> FastAPI:
         image_client=image_client_from_env(),
         keyframe_providers=keyframe_providers_from_env(),
         keyframe_provider=os.environ.get("DRAMA_KEYFRAME_PROVIDER", "h3"),
-        face_providers=face_providers_from_env(),
+        # Chats and studies: a local image server, and Nano Banana as for keyframes (its own
+        # client: each runner closes what it holds).
+        face_providers=face_providers_from_env() | keyframe_providers_from_env(),
     )
 
 

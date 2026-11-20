@@ -310,8 +310,8 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
 | `DRAMA_IMAGE_CLIENT` | follows `DRAMA_MODEL_CLIENT` | `minimax` (real) or `fixture` (local placeholder images) |
 | `MCPHUB_IMAGE_URL` | `https://api.mcphub.com/api/v3/gpu-images` | image route (note: not under `/v1`) |
 | `MCPHUB_IMAGE_MODEL` | `minimax-h3-image` | image model |
-| `GEMINI_API_KEY` / `GEMINI_URL` | — / `https://generativelanguage.googleapis.com/v1beta` | enables Nano Banana as a second keyframe provider (`nano-banana`); a gateway serving the Gemini API can stand in for the URL. With fixture images, a local stand-in is offered instead |
-| `GEMINI_IMAGE_MODEL` | `gemini-nano-banana-2.1` | the Gemini image model for keyframes |
+| `GEMINI_API_KEY` / `GEMINI_URL` | — / `https://generativelanguage.googleapis.com/v1beta` | enables Nano Banana (`nano-banana`) as a second provider for keyframes, chat messages and study tests; a gateway serving the Gemini API can stand in for the URL. With fixture images, a local stand-in is offered instead |
+| `GEMINI_IMAGE_MODEL` | `gemini-nano-banana-2.1` | the Gemini image model for keyframes, chats and studies |
 | `DRAMA_LOCAL_IMAGE_URL` | `http://localhost:8080` | a simple image server of your own that Face Lab tests can be drawn with (`local`): `POST /image` with a `prompt` form field (plus `size` and `seed`, which it may ignore), answering with a PNG or JPEG. With fixture images, a local stand-in |
 | `DRAMA_KEYFRAME_PROVIDER` | `h3` | the keyframe provider when a request names none (`h3` or `nano-banana`) |
 
@@ -641,7 +641,11 @@ Chats open in a side panel over the page. **Open full page** shows a chat on its
    one** makes any earlier result or upload current instead (branching); **Start a new
    image** clears it. **Draws** (1–4) renders several seeds of the same prompt. In Rewrite mode a message
    can set it too ("do 4 draws", "give me three versions"): the writer returns the count and
-   writes one prompt, never a grid of options in one image.
+   writes one prompt, never a grid of options in one image. **Drawn with** picks the
+   image model for the next message, in every chat (Characters, Sets, keyframes, Scratch):
+   MiniMax H3 (default) or Nano Banana (when `GEMINI_API_KEY` is set; at most eight
+   pictures per message). The prompt is written the same way; each reply says which model
+   drew it.
 
 Size: "match the current image" picks the H3 size nearest the current image's aspect
 ratio (about 16 MP), or choose one. One message runs at a time per chat; a failed one

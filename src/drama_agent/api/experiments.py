@@ -14,8 +14,8 @@ from fastapi.responses import FileResponse
 from ..design.setup import package_has_uploads, story_rating
 from ..design.slots import _graph as slot_graph
 from ..design.slots import selected_image, slot_title
-from ..experiment import SIZES as EXP_SIZES
 from ..experiment import (
+    MAX_REFERENCES,
     ExpError,
     ExpSession,
     ExpTarget,
@@ -31,6 +31,7 @@ from ..experiment import (
     plan_turn,
     size_of,
 )
+from ..experiment import SIZES as EXP_SIZES
 from ..face_lab import new_study, plan_describe, plan_test, source_photo, subject_for
 from ..image_ids import resolve as resolve_image
 from ..image_ids import story_likeness
@@ -75,8 +76,12 @@ def register(app: FastAPI, ctx: Any) -> None:
                 label=label, image_id=img and img.image_id,
                 thumb=img and f"/v1/generated-images/{img.image_id}/thumb",
             )  # fmt: skip
+        references = {"h3": MAX_REFERENCES} | {
+            name: getattr(client, "max_references", 0)
+            for name, client in experiments.providers.items()
+        }
         return ExpSessionView(session=shown, turns=turns, sizes=EXP_SIZES, providers=providers,
-                              anchor=anchor)  # fmt: skip
+                              provider_references=references, anchor=anchor)  # fmt: skip
 
     def _messages(session_id: str) -> int:
         return sum(t.mode not in ("pick", "import") for t in repo.list_exp_turns(session_id))
@@ -369,10 +374,7 @@ def register(app: FastAPI, ctx: Any) -> None:
         """Face Lab: render a prompt from text alone, with fixed seeds if given."""
         session = _exp_session_or_404(session_id)
         turns = _exp_turns(session_id)
-        provider = None if req.provider in (None, "", "h3") else req.provider
-        if provider is not None and provider not in experiments.providers:
-            names = ", ".join(["h3", *experiments.providers])
-            raise HTTPException(422, f"no image provider {provider!r}; there are: {names}")
+        provider = _provider(req.provider)
         if session.kind == "face" and is_busy(turns):
             raise HTTPException(409, "Wait for the current step to finish first.")
         anchor = await _anchor(session, turns) if session.kind == "face" else None
@@ -440,11 +442,21 @@ def register(app: FastAPI, ctx: Any) -> None:
         repo.delete_exp_session(session_id)
         await asyncio.to_thread(experiments.delete_files, session_id, uploads)
 
+    def _provider(name: str | None) -> str | None:
+        """The image provider a request names: None for H3 (the default), else one the
+        runner has (e.g. "nano-banana", "local"). 422 for any other."""
+        provider = None if name in (None, "", "h3") else name
+        if provider is not None and provider not in experiments.providers:
+            names = ", ".join(["h3", *experiments.providers])
+            raise HTTPException(422, f"no image provider {provider!r}; there are: {names}")
+        return provider
+
     @app.post("/v1/experiments/{session_id}/turns", status_code=202, response_model=ExpTurn)
     async def send_experiment_turn(session_id: str, req: ExpTurnRequest) -> ExpTurn:
         session = _exp_session_or_404(session_id)
         if session.kind != "chat":
             raise HTTPException(422, "This is a Face Lab study: use describe or tests.")
+        provider = _provider(req.provider)
         turns = _exp_turns(session_id)  # numbered, so the message can mention any image
         # Uploads: this message's, plus the current image when it is an earlier upload
         # (its dimensions pick the "auto" size).
@@ -471,6 +483,15 @@ def register(app: FastAPI, ctx: Any) -> None:
         except ExpError as exc:
             _drop_files(imports)
             raise HTTPException(409 if is_busy(turns) else 422, str(exc)) from exc
+        # Drawn by another provider ("Drawn with"): only as many pictures as it takes.
+        if provider is not None and turn.mode != "upload":
+            most = getattr(experiments.providers[provider], "max_references", 0)
+            if len(turn.references) > most:
+                _drop_files(imports)
+                sent = f"{len(turn.references)} picture{'s' if len(turn.references) != 1 else ''}"
+                raise HTTPException(422, f"{provider} takes at most {most} pictures (none: words alone), "
+                                         f"and this message sends {sent}. Draw it with H3, or start a new image.")  # fmt: skip
+            turn.provider = provider
         for t in imports:
             repo.save_exp_turn(t)
         if turn.attachments:

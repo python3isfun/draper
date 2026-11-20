@@ -449,7 +449,7 @@ function renderPromptControls(v) {
 function faceProviderName(name, model) {
   if (name === "h3") return "MiniMax H3";
   if (name === "local") return `Local server${model ? ` ${model.replace(/^[^(]*/, "")}` : ""}`;
-  return name;
+  return providerName(name);
 }
 
 function updateRenderButton() {

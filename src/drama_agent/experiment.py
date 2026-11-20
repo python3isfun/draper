@@ -134,8 +134,8 @@ class ExpTurn(BaseModel):
     rating: str = DEFAULT_RATING
     from_image: str | None = None  # "pick": the design image it copies (its image_id)
     import_ref: str | None = None  # "import": the picture it copies (an image_ids ref)
-    # The image provider that draws it: None for H3, or another by name (a Face Lab test
-    # can use "local", a simple image server of your own).
+    # The image provider that draws it: None for H3, or another by name ("nano-banana",
+    # Gemini's image models; "local", a simple image server of your own: tests only).
     provider: str | None = None
     # Global numbers the message mentions ("@1234") and the chat number each came in as.
     global_mentions: dict[str, int] = Field(default_factory=dict)
@@ -785,7 +785,7 @@ class ExperimentRunner:
         self.media = media
         self.images = images
         self.writer_client = writer_client
-        # Providers besides H3 (`images`) a turn may name, e.g. "local" (Face Lab tests).
+        # Providers besides H3 (`images`) a turn may name: "nano-banana", "local".
         self.providers = dict(providers or {})
         self._gpu = asyncio.Lock()
         # One render at a time per provider; H3 shares the GPU lock with keyframes.

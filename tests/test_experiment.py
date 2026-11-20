@@ -478,3 +478,29 @@ def test_auto_size_from_an_old_16mp_turn_draws_at_2k() -> None:
     assert _size_for("auto", ["turn:turn_old:0"], [old], {}) == SIZES["1:1"]
     old.size = "3552x4736"
     assert _size_for("auto", ["turn:turn_old:0"], [old], {}) == SIZES["3:4"]
+
+
+def test_a_message_can_be_drawn_with_nano_banana(tmp_path):
+    """ "Drawn with" in a chat: a message names its image model; H3 stays the default. A
+    model that takes no pictures can't draw a message that sends one."""
+    banana = FixtureImageClient(model_id="fixture-nano-banana", max_references=8)
+    local = FixtureImageClient(model_id="local (http://localhost:8080)", max_references=0)
+    with Chat(tmp_path, providers={"nano-banana": banana, "local": local}) as c:
+        v = c.view()
+        assert v["providers"]["nano-banana"] == "fixture-nano-banana"
+        assert v["provider_references"] == {"h3": 9, "nano-banana": 8, "local": 0}
+        c.send(attachments=[c.upload()])
+        assert c.send(text="put her hair in a low bun", provider="nano-banana").status_code == 202
+        turn = c.wait()["turns"][-1]
+        assert turn["status"] == "done", turn["error"]
+        assert turn["provider"] == "nano-banana"
+        assert len(banana.calls) == 1 and c.images.calls == []
+        _, _, _, refs = banana.calls[-1]
+        assert len(refs) == 1  # the current image, as <Picture 1>
+        # The next message, with H3 (the default).
+        assert c.send(text="now make her smile").status_code == 202
+        assert c.wait()["turns"][-1]["provider"] is None and len(c.images.calls) == 1
+        r = c.send(text="and a red scarf", provider="local")
+        assert r.status_code == 422 and "takes at most 0 pictures" in r.json()["detail"]
+        r = c.send(text="and a red scarf", provider="nope")
+        assert r.status_code == 422 and "nano-banana" in r.json()["detail"]
