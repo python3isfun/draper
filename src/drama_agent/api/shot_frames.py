@@ -35,6 +35,7 @@ from ..shot_frames import (
     PromptVersion,
     ShotFrameRunner,
     ShotPlan,
+    ShotPlanVersion,
     ShotTake,
     approved_take,
     current_sub,
@@ -52,10 +53,10 @@ from ..shot_frames import (
     shot_board,
     shot_of,
     shot_picks,
-    stale_approvals,
     sub_shot_for,
 )
 from ..shot_reading import SceneReading, candidates, scene_shots
+from ..shots.history import replace_plan, restore_plan
 from .schemas import UseKeyframeRequest
 
 
@@ -121,6 +122,16 @@ class ReadingRequest(BaseModel):
     revision_id: str | None = None
 
 
+class RevisionBody(BaseModel):
+    revision_id: str | None = None
+
+
+class RestoredPlan(BaseModel):
+    plan: ShotPlan
+    # The old plan's keyframes approved again (their take and draw still exist).
+    keyframes_approved: int
+
+
 class ChoiceRequest(BaseModel):
     revision_id: str | None = None
     sub_shot: int = Field(1, ge=1, le=MAX_SUB_SHOTS)
@@ -167,7 +178,9 @@ def register(
         readings = repo.list_scene_readings(pkg.package_id, pkg.revision_id)
         shots = shot_board(pkg, images, takes, plans, versions, readings,
                            story_pace(repo, pkg.package_id))  # fmt: skip
+        history = repo.count_plan_versions(pkg.package_id, pkg.revision_id)
         for shot in shots:  # a take asked to pause says so until it does
+            shot["plan"]["history"] = history.get(shot["shot_id"], 0)  # earlier plans
             for sub in shot["sub_shots"]:
                 for t in sub["takes"]:
                     t["pausing"] = t["take_id"] in runner.pausing
@@ -290,13 +303,16 @@ def register(
         if (stored is not None and stored.busy) or is_busy(takes, shot_id):
             raise HTTPException(409, f"{shot_id} is still being planned or drawn")
         plan = ShotPlan(package_id=pkg.package_id, revision_id=pkg.revision_id, shot_id=shot_id)
-        plan.clip_ms = req.clip_s * 1000 if req.clip_s else None
+        clip_ms = req.clip_s * 1000 if req.clip_s else None
+        plan.clip_ms = clip_ms
         if req.sub_shots is None:
+            if stored is not None:
+                # The board keeps showing the old plan meanwhile, whole (its clip, notes,
+                # model), so the history keeps it as it was when the new one replaces it.
+                plan = stored.model_copy(update={"error": None})
             plan.status = "writing"
-            if stored is not None:  # the board keeps showing the old one meanwhile
-                plan.sub_shots, plan.source = stored.sub_shots, stored.source
             repo.save_shot_plan(plan)
-            runner.start_plan(plan)
+            runner.start_plan(plan, clip_ms=clip_ms)
             return plan
         try:
             plan.sub_shots = make_sub_shots(
@@ -313,10 +329,45 @@ def register(
             raise HTTPException(422, str(exc)) from None
         plan.source, plan.updated_at = "user", utcnow()
         plan.design_print = design_print(pkg, shot)
-        repo.save_shot_plan(plan)
-        for t in stale_approvals(pkg, shot, takes, plan):
-            repo.approve_shot_draw(t.take_id, None)
+        replace_plan(repo, pkg, shot, plan, "user")  # withdraws approvals it doesn't match
         return plan
+
+    @app.get(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/plans",
+        response_model=list[ShotPlanVersion],
+    )
+    async def plan_history(
+        package_id: str, shot_id: str, revision_id: str | None = None
+    ) -> list[ShotPlanVersion]:
+        """A shot's earlier cut plans, newest first, each with the keyframes approved for
+        it when it was replaced."""
+        pkg = package_or_404(package_id, revision_id)
+        _shot(pkg, shot_id)
+        return list(reversed(repo.list_plan_versions(pkg.package_id, pkg.revision_id, shot_id)))
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/plans/{version}/restore",
+        response_model=RestoredPlan,
+    )
+    async def restore_shot_plan(
+        package_id: str, shot_id: str, version: int, req: RevisionBody
+    ) -> RestoredPlan:
+        """Make an earlier cut plan the shot's plan again. The plan in force goes to the
+        history; the old plan's keyframes come back, approved again where their draw still
+        exists, and approvals the restored plan doesn't match are withdrawn."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        stored, _ = _plan(pkg, shot)
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        if (stored is not None and stored.busy) or is_busy(takes, shot_id):
+            raise HTTPException(409, f"{shot_id} is still being planned or drawn")
+        try:
+            plan, back = restore_plan(repo, pkg, shot, version)
+        except KeyError:
+            raise HTTPException(404, f"{shot_id} has no plan version {version}") from None
+        except ValueError as exc:
+            raise HTTPException(422, f"That plan no longer fits the shot: {exc}") from None
+        return RestoredPlan(plan=plan, keyframes_approved=back)
 
     async def _save_version(
         pkg: ProductionPackage,

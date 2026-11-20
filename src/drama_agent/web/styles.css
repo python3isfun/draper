@@ -759,3 +759,8 @@ td.mono { white-space: nowrap; }
 .study-anchor { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 .study-anchor-row { position: relative; display: flex; gap: 10px; align-items: center; }
 .study-anchor-row img { width: 72px; height: 96px; object-fit: cover; border-radius: 6px; background: var(--surface-2); }
+
+/* A shot's earlier cut plans */
+.plan-history { display: grid; gap: 8px; margin-top: 8px; }
+.plan-version { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 8px 10px; }
+.plan-version ol { margin: 6px 0 0; padding-left: 18px; }

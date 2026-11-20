@@ -8,7 +8,7 @@
  */
 
 const frames = { key: null, view: null, error: "", notes: [], timer: null, loading: false,
-  draws: 2, rounds: 3, provider: null, directions: {}, prompts: {}, plans: {}, episode: "all",
+  draws: 2, rounds: 3, provider: null, directions: {}, prompts: {}, plans: {}, history: {}, episode: "all",
   sel: {}, notes2: {}, compare: {}, diffs: new Map(), vdraws: {}, verr: {},
   send: { key: null, targets: null, error: "" } };  // "Send to a look": the draw it is open on
 
@@ -506,6 +506,9 @@ function renderPlan(pkg, shot) {
       !editing && h("span", { class: "take-actions" },
         h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, title: "Ask the text model where the cuts go",
           onclick: (e) => frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id }) }, "Plan cuts"),
+        p.history > 0 && h("button", { type: "button", class: "btn ghost small", "aria-expanded": String(!!frames.history[historyKey(pkg, shot)]),
+          title: "Earlier cut plans of this shot, each with the keyframes approved for it", onclick: () => toggleHistory(pkg, shot) },
+          `History (${p.history})`),
         h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, onclick: () => {
           frames.plans[shot.shot_id] = { clip_s: Math.min(15, Math.max(4, Math.ceil(shot.clip_ms / 1000))), rows: shot.sub_shots.map((s) => ({ start_s: s.start_ms / 1000, framing: s.framing, camera: s.camera, action: s.action, pos: positionsOf(s) })) };
           framesRender();
@@ -517,7 +520,66 @@ function renderPlan(pkg, shot) {
       h("ul", { class: "plain" }, p.problems.map((x) => h("li", {}, x)))),
     p.notes && h("p", { class: "small muted" }, p.notes),
     editing && renderPlanEditor(pkg, shot),
+    renderHistory(pkg, shot),
   );
+}
+
+// A shot's earlier cut plans (shots/history.py), newest first: loaded when opened, and
+// again whenever the board's count for the shot changes (a re-plan, an edit, a restore).
+// Kept per story revision, so a panel never shows another story's plans.
+const historyKey = (pkg, shot) => `${framesKey(pkg)}|${shot.shot_id}`;
+
+function toggleHistory(pkg, shot) {
+  const key = historyKey(pkg, shot);
+  if (frames.history[key]) { delete frames.history[key]; framesRender(); return; }
+  loadHistory(pkg, shot);
+}
+
+async function loadHistory(pkg, shot) {
+  const key = historyKey(pkg, shot);
+  const count = shot.plan.history;
+  frames.history[key] = { loading: true, count };
+  framesRender();
+  let next;
+  try {
+    const list = await api(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plans?revision_id=${encodeURIComponent(pkg.revision_id)}`);
+    next = { list, count };
+  } catch (err) {
+    next = { error: err.message, count };
+  }
+  if (frames.history[key]) { frames.history[key] = next; framesRender(); }  // unless closed meanwhile
+}
+
+const REPLACED_BY = { model: "a re-plan", user: "your edit", restore: "a restore" };
+
+function renderHistory(pkg, shot) {
+  const open = frames.history[historyKey(pkg, shot)];
+  if (!open) return null;
+  if (!open.loading && open.count !== shot.plan.history) {
+    if (!shot.plan.history) { delete frames.history[historyKey(pkg, shot)]; return null; }
+    queueMicrotask(() => loadHistory(pkg, shot));  // not while rendering
+  }
+  if (open.loading) return h("p", { class: "small muted" }, "Loading earlier plans…");
+  if (open.error) return h("p", { class: "small warn-text" }, open.error);
+  return h("div", { class: "plan-history" }, open.list.map((v) => {
+    const kept = Object.keys(v.approved).length;
+    const made = v.plan.source === "user" ? "your plan" : v.plan.source === "model" ? `planned by ${v.plan.model || "the text model"}` : "the whole shot as one sub-shot";
+    return h("div", { class: "plan-version" },
+      h("div", { class: "take-head small" },
+        h("strong", {}, `Plan ${v.version}`),
+        h("span", { class: "muted" }, `${made} · replaced by ${REPLACED_BY[v.replaced_by] || v.replaced_by} ${timeAgo(v.replaced_at)} · ${kept} approved keyframe${kept === 1 ? "" : "s"}`),
+        h("button", { type: "button", class: "btn ghost small", disabled: shot.busy,
+          title: "Make this the shot's plan again: its keyframes come back, and the plan in force is kept in this history",
+          onclick: async (e) => {
+            await frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plans/${v.version}/restore`, e.currentTarget, { revision_id: pkg.revision_id });
+            // A restore swaps one plan for another (the count stays): reload the list.
+            if (!frames.error) loadHistory(pkg, shot); else framesRender();
+          } }, "Restore")),
+      h("ol", { class: "plain small" }, v.plan.sub_shots.map((s) => h("li", {},
+        h("span", { class: "muted" }, `${(s.start_ms / 1000).toFixed(1)}-${(s.end_ms / 1000).toFixed(1)} s · `),
+        [s.framing, s.camera, s.action].filter(Boolean).join(" · ")))),
+      v.plan.notes && h("p", { class: "small muted" }, v.plan.notes));
+  }));
 }
 
 const stateLine = (st) => [st.wearing && `wears ${st.wearing}`, st.hair && `hair ${st.hair}`, st.carrying ? `holding ${st.carrying}` : "empty hands", st.condition].filter(Boolean).join(" · ");

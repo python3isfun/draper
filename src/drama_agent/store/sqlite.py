@@ -18,15 +18,16 @@ from ..library.models import AssetImage, Casting, LibraryAsset
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
-from ..shot_frames import PromptVersion, ShotPlan, ShotTake, approval_changes
+from ..shot_frames import PromptVersion, ShotPlan, ShotPlanVersion, ShotTake, approval_changes
 from ..shot_reading import SceneReading
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
 # v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns.
 # v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. v10: shot_prompts.
 # v11: scene_readings. v12: the asset library (library_assets, story_casting, asset_images).
+# v13: shot_plan_versions (story_settings came in at v12, without a bump).
 # Each step is additive, so older files upgrade in place (see _migrate).
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -183,6 +184,14 @@ CREATE TABLE IF NOT EXISTS image_ids (
     gid         INTEGER PRIMARY KEY AUTOINCREMENT,  -- the image's global number (@1234)
     ref         TEXT NOT NULL UNIQUE                -- what it is (image_ids.py)
 );
+CREATE TABLE IF NOT EXISTS shot_plan_versions (
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    shot_id     TEXT NOT NULL,
+    version     INTEGER NOT NULL,           -- a replaced cut plan (shots/history.py)
+    data        TEXT NOT NULL,
+    PRIMARY KEY (package_id, revision_id, shot_id, version)
+);
 CREATE TABLE IF NOT EXISTS shot_plans (
     package_id  TEXT NOT NULL,
     revision_id TEXT NOT NULL,
@@ -201,7 +210,7 @@ _NOT_ARCHIVED = "coalesce(json_extract(data, '$.archived'), 0) = 0"
 # Tables of a story's work kept per revision; a published revise run moves them forward.
 _REVISION_TABLES = (
     "generated_images", "design_options", "shot_takes", "shot_prompts", "shot_plans",
-    "scene_readings",
+    "shot_plan_versions", "scene_readings",
 )  # fmt: skip
 
 
@@ -412,12 +421,15 @@ class SqliteRepository:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 for table in _REVISION_TABLES:
+                    # A kept plan version holds its plan, whose revision moves too.
+                    nested = ", '$.plan.revision_id', ?" if table == "shot_plan_versions" else ""
                     cur = self._conn.execute(
                         f"UPDATE {table} SET revision_id = ?, "  # table names are fixed
-                        "data = json_set(data, '$.revision_id', ?) "
+                        f"data = json_set(data, '$.revision_id', ?{nested}) "
                         "WHERE package_id = ? AND revision_id = ?",
-                        (to_revision, to_revision, package_id, from_revision),
-                    )
+                        (to_revision, to_revision, *([to_revision] if nested else []),
+                         package_id, from_revision),
+                    )  # fmt: skip
                     moved += cur.rowcount
                 # Library picture links keep their revision in the data only.
                 cur = self._conn.execute(
@@ -880,6 +892,60 @@ class SqliteRepository:
                 (package_id, revision_id),
             ).fetchall()
         return [ShotPlan.model_validate_json(r[0]) for r in rows]
+
+    def add_plan_version(self, v: ShotPlanVersion) -> ShotPlanVersion:
+        """Store a replaced plan, numbered next for its shot (in one transaction, so the
+        planner and an edit or a restore never get the same number)."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                (last,) = self._conn.execute(
+                    "SELECT coalesce(max(version), 0) FROM shot_plan_versions "
+                    "WHERE package_id = ? AND revision_id = ? AND shot_id = ?",
+                    (v.package_id, v.revision_id, v.shot_id),
+                ).fetchone()
+                v = v.model_copy(update={"version": last + 1})
+                self._conn.execute(
+                    "INSERT INTO shot_plan_versions (package_id, revision_id, shot_id, version, "
+                    "data) VALUES (?, ?, ?, ?, ?)",
+                    (v.package_id, v.revision_id, v.shot_id, v.version, v.model_dump_json()),
+                )
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            self._conn.execute("COMMIT")
+        return v
+
+    def delete_plan_version(
+        self, package_id: str, revision_id: str, shot_id: str, version: int
+    ) -> None:
+        self._exec(
+            "DELETE FROM shot_plan_versions WHERE package_id = ? AND revision_id = ? "
+            "AND shot_id = ? AND version = ?",
+            (package_id, revision_id, shot_id, version),
+        )
+
+    def count_plan_versions(self, package_id: str, revision_id: str) -> dict[str, int]:
+        """How many earlier plans each shot of a revision has (for the board)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT shot_id, count(*) FROM shot_plan_versions "
+                "WHERE package_id = ? AND revision_id = ? GROUP BY shot_id",
+                (package_id, revision_id),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def list_plan_versions(
+        self, package_id: str, revision_id: str, shot_id: str | None = None
+    ) -> list[ShotPlanVersion]:
+        """A revision's replaced cut plans (of one shot, if given), oldest first."""
+        sql = "SELECT data FROM shot_plan_versions WHERE package_id = ? AND revision_id = ?"
+        params: tuple[Any, ...] = (package_id, revision_id)
+        if shot_id is not None:
+            sql, params = sql + " AND shot_id = ?", (*params, shot_id)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY shot_id, version", params).fetchall()
+        return [ShotPlanVersion.model_validate_json(r[0]) for r in rows]
 
     def fail_unfinished_shot_plans(self, error: str) -> int:
         with self._lock:

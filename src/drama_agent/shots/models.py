@@ -140,6 +140,21 @@ class ShotPlan(BaseModel):
         return next((s for s in self.sub_shots if s.index == index), None)
 
 
+class ShotPlanVersion(BaseModel):
+    """A shot's cut plan as it was before it was replaced (by the planner, a person or a
+    restore), with the keyframes approved for it then ({take_id: draw n}), so it can be
+    restored with them. Kept per story revision and moved with it."""
+
+    package_id: str
+    revision_id: str
+    shot_id: str
+    version: int  # 1, 2, ... per shot, in the order the plans were replaced
+    plan: ShotPlan
+    approved: dict[str, int] = Field(default_factory=dict)
+    replaced_at: datetime = Field(default_factory=utcnow)
+    replaced_by: Literal["model", "user", "restore"] = "model"
+
+
 class PromptVersion(BaseModel):
     """One version of a sub-shot keyframe's prompt. The writer's prompts and a person's
     edits are versions; any version can be drawn, compared or restored."""

@@ -10,7 +10,7 @@ from ..library.models import AssetImage, Casting, LibraryAsset
 from ..models import Job, LLMCall, ProductionPackage, QAReport, Revision, TraceEvent
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
-from ..shot_frames import PromptVersion, ShotPlan, ShotTake, approval_changes
+from ..shot_frames import PromptVersion, ShotPlan, ShotPlanVersion, ShotTake, approval_changes
 from ..shot_reading import SceneReading
 
 
@@ -83,6 +83,14 @@ class Repository(Protocol):
     def save_shot_plan(self, plan: ShotPlan) -> None: ...
     def get_shot_plan(self, package_id: str, revision_id: str, shot_id: str) -> ShotPlan | None: ...
     def list_shot_plans(self, package_id: str, revision_id: str) -> list[ShotPlan]: ...
+    def add_plan_version(self, v: ShotPlanVersion) -> ShotPlanVersion: ...
+    def delete_plan_version(
+        self, package_id: str, revision_id: str, shot_id: str, version: int
+    ) -> None: ...
+    def count_plan_versions(self, package_id: str, revision_id: str) -> dict[str, int]: ...
+    def list_plan_versions(
+        self, package_id: str, revision_id: str, shot_id: str | None = None
+    ) -> list[ShotPlanVersion]: ...
     def fail_unfinished_shot_plans(self, error: str) -> int: ...
     def add_prompt_version(self, version: PromptVersion) -> PromptVersion: ...
     def save_scene_reading(self, reading: SceneReading) -> None: ...
@@ -134,6 +142,7 @@ class InMemoryRepository:
         self.settings: dict[tuple[str, str], str] = {}  # stories' changed settings
         self.shot_takes: dict[str, ShotTake] = {}
         self.shot_plans: dict[tuple[str, str, str], ShotPlan] = {}
+        self.plan_versions: list[ShotPlanVersion] = []
         self.prompt_versions: list[PromptVersion] = []
         self.scene_readings: dict[tuple[str, str, str], SceneReading] = {}
         self.library: dict[str, LibraryAsset] = {}
@@ -237,6 +246,13 @@ class InMemoryRepository:
                         update={"revision_id": to_revision}
                     )
                     moved += 1
+        for i, v in enumerate(self.plan_versions):
+            if v.package_id == package_id and v.revision_id == from_revision:
+                plan = v.plan.model_copy(update={"revision_id": to_revision})
+                self.plan_versions[i] = v.model_copy(
+                    update={"revision_id": to_revision, "plan": plan}
+                )
+                moved += 1
         for i, pv in enumerate(self.prompt_versions):
             if pv.package_id == package_id and pv.revision_id == from_revision:
                 self.prompt_versions[i] = pv.model_copy(update={"revision_id": to_revision})
@@ -539,6 +555,36 @@ class InMemoryRepository:
             v.model_copy(deep=True)
             for v in sorted(mine, key=lambda v: (v.shot_id, v.sub_shot, v.v))
         ]
+
+    def add_plan_version(self, v: ShotPlanVersion) -> ShotPlanVersion:
+        last = max((x.version for x in self.plan_versions
+                    if (x.package_id, x.revision_id, x.shot_id)
+                    == (v.package_id, v.revision_id, v.shot_id)), default=0)  # fmt: skip
+        v = v.model_copy(update={"version": last + 1}, deep=True)
+        self.plan_versions.append(v)
+        return v.model_copy(deep=True)
+
+    def delete_plan_version(
+        self, package_id: str, revision_id: str, shot_id: str, version: int
+    ) -> None:
+        self.plan_versions = [x for x in self.plan_versions
+                              if (x.package_id, x.revision_id, x.shot_id, x.version)
+                              != (package_id, revision_id, shot_id, version)]  # fmt: skip
+
+    def count_plan_versions(self, package_id: str, revision_id: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for x in self.plan_versions:
+            if (x.package_id, x.revision_id) == (package_id, revision_id):
+                out[x.shot_id] = out.get(x.shot_id, 0) + 1
+        return out
+
+    def list_plan_versions(
+        self, package_id: str, revision_id: str, shot_id: str | None = None
+    ) -> list[ShotPlanVersion]:
+        rows = [v for v in self.plan_versions
+                if (v.package_id, v.revision_id) == (package_id, revision_id)
+                and shot_id in (None, v.shot_id)]  # fmt: skip
+        return [v.model_copy(deep=True) for v in sorted(rows, key=lambda v: (v.shot_id, v.version))]
 
     def fail_unfinished_shot_plans(self, error: str) -> int:
         n = 0

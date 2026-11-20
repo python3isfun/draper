@@ -22,8 +22,8 @@ from ..models.package import utcnow
 from ..models.storyboard import Shot
 from ..pace import story_pace
 from ..shot_reading import SceneReading
-from .approvals import stale_approvals
 from .common import KEYFRAME_SIZES, NotReady, intimate_scene, shot_of
+from .history import replace_plan
 from .judge import JudgeOutput, judge_instructions
 from .models import (
     CHECK_STAGE,
@@ -248,17 +248,23 @@ class ShotFrameRunner:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    def start_plan(self, plan: ShotPlan, then: dict[str, Any] | None = None) -> None:
+    def start_plan(
+        self, plan: ShotPlan, then: dict[str, Any] | None = None, clip_ms: int | None = None
+    ) -> None:
         """Write a shot's sub-shot plan in the background (the API has saved it as
-        "writing"); with `then` (plan_take's options), start sub-shot 1 afterwards."""
-        task = asyncio.create_task(self._plan(plan, then))
+        "writing", still holding the plan it replaces); `clip_ms` is the clip asked for
+        (None: the storyboard's). With `then` (plan_take's options), start sub-shot 1
+        afterwards."""
+        task = asyncio.create_task(self._plan(plan, then, clip_ms))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _plan(self, plan: ShotPlan, then: dict[str, Any] | None) -> None:
+    async def _plan(
+        self, plan: ShotPlan, then: dict[str, Any] | None, clip_ms: int | None = None
+    ) -> None:
         async with self._planning:
             try:
-                await self._write_plan(plan)
+                await self._write_plan(plan, clip_ms)
             except asyncio.CancelledError:
                 plan.status, plan.error = "failed", "Interrupted. Plan it again."
                 self.repo.save_shot_plan(plan)
@@ -282,13 +288,15 @@ class ShotFrameRunner:
         self.repo.save_shot_take(take)
         await self.run(take.take_id)
 
-    async def _write_plan(self, plan: ShotPlan) -> None:
+    async def _write_plan(self, plan: ShotPlan, clip_ms: int | None = None) -> None:
         pkg = self.repo.get_package(plan.package_id, plan.revision_id)
+        # The plan it replaces, as it is (the history keeps it so); this one changes below.
+        previous = plan.model_copy(deep=True) if plan.sub_shots else None
         try:
             if pkg is None:
                 raise RuntimeError("the package revision is gone")
             shot = shot_of(pkg, plan.shot_id)
-            context = plan_context(pkg, shot, plan.clip_ms)
+            context = plan_context(pkg, shot, clip_ms)
             pace = story_pace(self.repo, pkg.package_id)
             # The better of the plan and its retry: fewer problems that aren't advisory, then
             # fewer problems. A retry asked for a judgement (a listener held) never costs a
@@ -303,7 +311,7 @@ class ShotFrameRunner:
                 )
                 out = await self.text.generate(request, PlanOutput)
                 try:
-                    subs = planned_sub_shots(pkg, shot, out, plan.clip_ms, strict=False)
+                    subs = planned_sub_shots(pkg, shot, out, clip_ms, strict=False)
                     problems = check_plan(pkg, shot, subs, pace)
                 except ValueError as exc:  # not a plan at all: retry, then give up
                     if attempt and kept is None:
@@ -321,6 +329,7 @@ class ShotFrameRunner:
                 context = context | {"previous_plan": out.model_dump(), "problems": fixable}
             assert kept is not None
             plan.sub_shots, _, out = kept
+            plan.clip_ms = clip_ms
             plan.notes, plan.source = out.notes.strip(), "model"
             plan.model = request.model or getattr(self.text, "model_id", None)
             if pkg is not None:
@@ -330,12 +339,12 @@ class ShotFrameRunner:
             log.warning("sub-shot plan failed for %s", plan.shot_id, exc_info=True)
             plan.status, plan.error = "failed", f"The plan couldn't be written: {str(exc)[:300]}"
         plan.updated_at = utcnow()
-        self.repo.save_shot_plan(plan)
         if plan.status == "done" and pkg is not None:
-            shot = shot_of(pkg, plan.shot_id)
-            takes = self.repo.list_shot_takes(plan.package_id, plan.revision_id)
-            for t in stale_approvals(pkg, shot, takes, plan):
-                self.repo.approve_shot_draw(t.take_id, None)
+            # The plan it replaces goes to the history; approvals it no longer matches go.
+            replace_plan(self.repo, pkg, shot_of(pkg, plan.shot_id), plan, "model",
+                         previous=previous)  # fmt: skip
+        else:
+            self.repo.save_shot_plan(plan)
 
     async def aclose(self) -> None:
         for t in list(self._tasks):

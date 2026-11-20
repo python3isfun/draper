@@ -525,6 +525,18 @@ listener longer while someone off screen speaks goes back to the planner once wi
 problem (the better of the two plans is kept); it is flagged on the board and in the export,
 and never refused on a save.
 
+**Plan history.** A shot's cut plan is never lost when it is replaced: a re-plan, an edit
+with different cuts or a restore keeps the plan it replaces in the shot's history, with the
+keyframes approved for it then (`shots/history.py`). **History (N)** on the shot lists the
+earlier plans, newest first, each with its cuts; **Restore** makes one the plan again. Its
+keyframes come back (takes are never deleted when a plan changes, only hidden), approved
+again where the draw still exists, and the plan in force takes its place in the history (so
+swapping back and forth never piles up copies). A plan whose cuts no longer fit the shot (a
+revision changed who is in it or how long it runs) is refused. A failed plan or a save of
+the same cuts adds nothing. The history moves with the story when a
+revision is published. Endpoints: `GET .../keyframes/{shot_id}/plans` and
+`POST .../keyframes/{shot_id}/plans/{version}/restore`.
+
 ### Pace
 
 A story's pace (job option `pace`, under Options; changeable on the story's Overview, like the
@@ -850,8 +862,9 @@ src/drama_agent/
                    staleness.py (out of date, redraw in order), takes.py (explore, develop,
                    takes, picks, imports), worker.py, setup.py (thumbnails, image clients).
                    images.py re-exports it all under the old names
-  shots/           Shot keyframes: models.py, common.py, picks.py, plans.py, approvals.py,
-                   staleness.py, references.py, takes.py, writer.py, planner.py, judge.py,
+  shots/           Shot keyframes: models.py, common.py, picks.py, plans.py, history.py,
+                   approvals.py, staleness.py, references.py, takes.py, writer.py, planner.py,
+                   judge.py,
                    runner.py (ShotFrameRunner), board.py. shot_frames.py re-exports it all
   library/         The asset library: characters and sets across stories (models, sync,
                    views, matching, reuse)
