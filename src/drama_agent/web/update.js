@@ -592,13 +592,7 @@ const updShotLink = (id, extra = "", label = null) => h("a", { href: "#", class:
     closeUpdate();
     go(jobId, "keyframes");
     // Once the tab has drawn the shot (it may redraw as the board loads).
-    let tries = 0;
-    const find = () => {
-      const card = document.getElementById(`kf-${id}`);
-      if (card) card.scrollIntoView({ block: "start" });
-      if (++tries < 4) setTimeout(find, 400);
-    };
-    setTimeout(find, 300);
+    framesOpenShot(id);
   } }, label || [id, extra]);
 
 // A short list of shots (or pictures) with why, the rest folded.

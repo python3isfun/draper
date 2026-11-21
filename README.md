@@ -393,7 +393,17 @@ prompt). A picked take with a hand-edited prompt has that prompt in `selected_de
 A storyboard shot is one video generation, but a dynamic one holds a few cuts inside it
 (0-2 s a wide, 2-6 s a close-up), which the video prompt marks as `[Shot 2] At 00:02.000,
 the camera cuts to ...`. The **Keyframes** tab gives video production (dramer) one checked
-picture per cut, so characters stay consistent and each cut starts as planned:
+picture per cut, so characters stay consistent and each cut starts as planned.
+
+The tab opens on a **Grid**: every cut's keyframe in export order (the
+approved draw; else the newest, dashed; else what it waits for), grouped by **scene**, by
+**person** (each person's cuts across the story beside the design pictures they were drawn
+from, to check that they stay the same person) or by **place**. **S/M/L** sets the tile
+size, **Export only** shows just the approved keyframes the export holds, a tile opens full
+size (the arrow keys step through its row) and **Details** opens the cut in the detailed
+view (plan, takes, prompts and checks). The view settings are kept in the browser.
+
+Each keyframe is made in steps:
 
 1. **Plan the cuts**: the text model splits each shot's clip into 1-3 sub-shots, each with
    its start, framing, camera, action, who is on screen and on which side of the frame,

@@ -842,3 +842,36 @@ label.update-step-head { cursor: pointer; margin: 0; }
 @keyframes update-pulse { 50% { opacity: 0.3; } }
 @media (prefers-reduced-motion: reduce) { .update-dot { animation: none; } }
 .update-now-box { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 8px 0; background: var(--surface-2); }
+
+/* Keyframes storyboard */
+.seg { display: inline-flex; }
+.seg .btn { border-radius: 0; margin-left: -1px; }
+.seg .btn:first-child { border-radius: 7px 0 0 7px; margin-left: 0; }
+.seg .btn:last-child { border-radius: 0 7px 7px 0; }
+.seg .btn.on { background: var(--accent); border-color: var(--accent); color: #fff; position: relative; }
+.sb-bar { align-items: center; gap: 8px; flex-wrap: wrap; }
+.sb { --sb-w: 150px; }
+.sb-s { --sb-w: 110px; }
+.sb-l { --sb-w: 280px; }
+.sb-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.sb-head h3 { margin: 0; }
+.sb-refs { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.sb-refs .ref-open { position: relative; }
+.sb-refs img { height: 56px; border-radius: 4px; display: block; }
+.sb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--sb-w), 1fr)); gap: 10px; }
+.sb-tile { margin: 0; min-width: 0; }
+.sb-img { display: block; position: relative; width: 100%; padding: 0; border: 2px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface-2); cursor: zoom-in; }
+.sb-img img { display: block; width: 100%; height: auto; }
+.sb-tile.approved .sb-img { border-color: var(--ok); }
+.sb-tile.unapproved .sb-img { border-color: var(--warn); border-style: dashed; }
+.sb-tile.unapproved img { opacity: 0.75; }
+.sb-tile.outdated .sb-img { border-color: var(--warn); }
+.sb-none { aspect-ratio: 9 / 16; display: grid; place-items: center; color: var(--muted); font-size: 12px; border-style: dashed; cursor: default; text-align: center; padding: 6px; }
+.sb-tile figcaption { margin-top: 4px; font-size: 12px; }
+.sb-cap { display: flex; justify-content: space-between; align-items: center; gap: 6px; min-width: 0; }
+.sb-cap strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-s .sb-cap .chip { font-size: 10px; padding: 0 5px; }
+@media (max-width: 640px) { .sb-refs { margin-left: 0; } }
+.sb-bar label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.sb-bar label input { width: auto; margin: 0; }
+.sb-cap > span, .sb-cap > a { flex-shrink: 0; white-space: nowrap; }

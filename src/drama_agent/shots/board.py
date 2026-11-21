@@ -109,6 +109,7 @@ def shot_board(
             "action": shot.visual_action,
             "duration_ms": shot.duration_ms,
             "people": [{"id": c, "name": names.get(c, c)} for c in shot.character_ids],
+            "location_id": shot.location_id,
             "place": names.get(shot.location_id, shot.location_id),
             "intimacy": intimate_scene(pkg, shot),
             "clip_ms": plan.sub_shots[-1].end_ms,

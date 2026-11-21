@@ -197,15 +197,26 @@ function frameSourceChip(take) {
     onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench("chat", m[1], frameLabel(take.shot_id, take.sub_shot)); } }, `from chat #${m[2]}`);
 }
 
+// The picture that stands for a sub-shot: its approved draw, else its newest finished one.
+// An approval whose draw isn't on the board gives none: no other picture stands in for it.
+function subFrame(sub) {
+  const [aid, an] = sub.approved || [];
+  if (aid) {
+    const ap = sub.takes.find((t) => t.take_id === aid);
+    const d = ap && ap.results.find((x) => x.n === an);
+    return d ? { take: ap, d, approved: true } : null;
+  }
+  const done = sub.takes.flatMap((t) => t.results.filter((x) => x.status === "done").map((x) => [t, x]));
+  const newest = done.reduce((m, x) => (!m || x[0].created_at > m[0].created_at ? x : m), null);
+  return newest ? { take: newest[0], d: newest[1], approved: false } : null;
+}
+
 // The sub-shot's approved keyframe, large, at the top of its block: which round and draw
 // (or chat image) it is and its check. With none approved, the newest finished draw, dashed.
 function renderFrameHero(sub) {
-  const [aid, an] = sub.approved || [];
-  const approved = aid && sub.takes.find((t) => t.take_id === aid);
-  const done = sub.takes.flatMap((t) => t.results.filter((d) => d.status === "done").map((d) => [t, d]));
-  const newest = done.reduce((m, x) => (!m || x[0].created_at > m[0].created_at ? x : m), null);
-  const [take, d] = approved ? [approved, approved.results.find((x) => x.n === an)] : newest || [];
-  if (!take || !d) return null;
+  const f = subFrame(sub);
+  if (!f) return null;
+  const { take, d, approved } = f;
   const items = [{ src: drawUrl(take, d.n, "content"), caption: approved ? "Approved keyframe" : "Newest draw", likeness: take.likeness }];
   return h("div", { class: `pick-hero${approved ? "" : " unpicked"}` },
     h("button", { type: "button", class: "ref-open", "aria-label": "Enlarge the keyframe", onclick: () => enlarge(items, 0) },
@@ -655,7 +666,7 @@ function renderReading(pkg, shot) {
 
 function renderSubShot(pkg, shot, sub, total) {
   const blocked = sub.missing.length > 0;
-  return h("div", { class: "frame-block" },
+  return h("div", { class: "frame-block", id: `kf-${shot.shot_id}-${sub.index}` },
     h("div", { class: "take-head" },
       h("h4", { style: "margin:0" }, total > 1 ? `[Shot ${sub.index}] at ${sub.timecode}` : "Keyframe"),
       h("span", { class: "muted small" }, `${secs(sub.start_ms)}–${secs(sub.end_ms)}`),
@@ -696,6 +707,125 @@ function renderShotCard(pkg, shot) {
     subs.map((s) => renderSubShot(pkg, shot, s, subs.length)),
   );
 }
+
+// Keyframe grid: every cut's keyframe as a compact grid in export order, so a scene (or one
+// person across the story) can be checked for consistency at a glance. Grouped by scene,
+// by person or by place; the lightbox steps through a group in order. The view settings
+// are per viewer (browser storage, best effort).
+const SB_KEY = "kf-storyboard";
+const SB_CHOICES = { layout: ["board", "details"], group: ["scene", "person", "place"], size: ["s", "m", "l"], only: [false, true] };
+const sbPrefs = (() => {
+  const out = { layout: "board", group: "scene", size: "m", only: false };
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(SB_KEY) || "{}") || {}; } catch { /* storage off or bad: defaults */ }
+  for (const [k, ok] of Object.entries(SB_CHOICES)) if (ok.includes(saved[k])) out[k] = saved[k];
+  return out;
+})();
+function sbSet(patch, save = true) {
+  Object.assign(sbPrefs, patch);
+  if (save) try { localStorage.setItem(SB_KEY, JSON.stringify(sbPrefs)); } catch { /* storage off: this page only */ }
+  framesRender();
+}
+
+// Opens a shot (and one of its cuts) in the detailed view: plan, takes, prompts and checks.
+// The switch is for this visit only: the saved view stays as the viewer chose it. Waits up to
+// about 3 s for the tab to draw the shot (the board may still be loading), then scrolls once.
+function framesOpenShot(shotId, sub = null) {
+  if (sbPrefs.layout !== "details") sbSet({ layout: "details" }, false);
+  let tries = 0;
+  const find = () => {
+    const el = (sub != null && document.getElementById(`kf-${shotId}-${sub}`)) || document.getElementById(`kf-${shotId}`);
+    if (el) el.scrollIntoView({ block: "start" });
+    else if (++tries < 12) setTimeout(find, 250);
+  };
+  setTimeout(find, 50);
+}
+
+const sbShort = (t, n = 120) => (t && t.length > n ? `${t.slice(0, n).replace(/\s+\S*$/, "")}…` : t || "");
+const sbBusy = (sub) => sub.takes.some((t) => !["done", "failed", "paused"].includes(t.status));
+
+function sbGroups(shots) {
+  const cells = shots.flatMap((shot) => shot.sub_shots.map((sub) => ({ shot, sub, frame: subFrame(sub) })));
+  const shown = sbPrefs.only ? cells.filter((c) => c.sub.approved) : cells;
+  const groups = new Map();
+  const add = (key, head, c) => {
+    if (!groups.has(key)) groups.set(key, { key, ...head, cells: [] });
+    groups.get(key).cells.push(c);
+  };
+  for (const c of shown) {
+    if (sbPrefs.group === "person") {
+      if (!c.sub.people.length) add("~none", { title: "No one on screen" }, c);
+      c.sub.people.forEach((id, i) => add(`p:${id}`, { title: c.sub.people_names[i], person: id }, c));
+    } else if (sbPrefs.group === "place") {
+      add(`l:${c.shot.location_id}`, { title: c.shot.place || "No place" }, c);
+    } else {
+      add(`s:${c.shot.episode_id}|${c.shot.scene_id}`, { title: `${c.shot.episode_id} · ${c.shot.scene_id}`, sub: c.shot.place }, c);
+    }
+  }
+  const out = [...groups.values()];
+  const none = out.findIndex((g) => g.key === "~none");
+  if (none >= 0) out.push(...out.splice(none, 1));  // people first
+  return out;
+}
+
+// The design pictures a person's cuts were drawn from: the reference to compare their faces with.
+function sbPersonRefs(group) {
+  const ids = new Map();
+  for (const c of group.cells) {
+    const ch = (c.sub.choices || []).find((x) => x.character_id === group.person);
+    if (ch && !ids.has(ch.image_id)) ids.set(ch.image_id, ch);
+  }
+  if (!ids.size) return null;
+  const list = [...ids.values()];
+  const items = list.map((ch) => ({ src: thumbUrl(ch, "content"), caption: `${ch.name}: design picture`, title: ch.shows, likeness: ch.likeness }));
+  return h("div", { class: "sb-refs" },
+    h("span", { class: "small muted" }, "Drawn from"),
+    list.map((ch, i) => h("button", { type: "button", class: "ref-open", title: `${ch.shows || ch.name} (click to enlarge)`, "aria-label": `Enlarge ${ch.name}'s design picture`, onclick: () => enlarge(items, i) },
+      h("img", { src: thumbUrl(ch), alt: ch.name, loading: "lazy" }), lookalikeTag(ch.likeness), idTag(`design:${ch.image_id}`))));
+}
+
+function sbTile(c, items, at) {
+  const { shot, sub, frame } = c;
+  const label = shot.sub_shots.length > 1 ? `${shot.shot_id} · cut ${sub.index}` : shot.shot_id;
+  const outdated = frame && frame.approved && (sub.outdated || []).length > 0;
+  const status = !frame
+    ? (sub.approved ? ["bad", "approved draw missing"] : sbBusy(sub) ? ["info", "drawing…"] : sub.missing.length ? ["warn", "waiting for picks"] : ["", "no draw yet"])
+    : outdated ? ["warn", "out of date"]
+    : frame.approved ? ["ok", "✓ approved"]
+    : sbBusy(sub) ? ["info", "drawing…"] : ["warn", "not approved"];
+  const tip = `${sub.framing || shot.framing}: ${sub.action || shot.action}`;
+  return h("figure", { class: `sb-tile${frame ? (frame.approved ? " approved" : " unapproved") : " empty"}${outdated ? " outdated" : ""}` },
+    frame
+      ? h("button", { type: "button", class: "sb-img", title: `${tip} (click to enlarge; arrows step through this row)`, "aria-label": `Enlarge ${label}`, onclick: () => enlarge(items, at) },
+          h("img", { src: drawUrl(frame.take, frame.d.n), alt: label, loading: "lazy" }), lookalikeTag(frame.take.likeness), idTag(`take:${frame.take.take_id}:${frame.d.n}`))
+      : h("div", { class: "sb-img sb-none", title: sub.missing.length ? `First: ${sub.missing.join("; ")}` : tip }, status[1]),
+    h("figcaption", {},
+      h("div", { class: "sb-cap" }, h("strong", {}, label), h("span", { class: "muted" }, secs(sub.start_ms))),
+      h("div", { class: "sb-cap" },
+        h("span", { class: `chip ${status[0]}`, title: outdated ? sub.outdated.join("; ") : "" }, status[1]),
+        h("a", { href: "#", class: "small", title: "Plan, takes, prompts and checks of this cut", onclick: (e) => { e.preventDefault(); framesOpenShot(shot.shot_id, sub.index); } }, "Details"))));
+}
+
+function renderFrameBoard(shots) {
+  const groups = sbGroups(shots);
+  if (!groups.length) return h("section", { class: "card" }, h("p", { class: "muted" }, sbPrefs.only ? "No approved keyframes yet: nothing would be exported." : "No shots."));
+  return h("div", { class: `sb sb-${sbPrefs.size}` }, groups.map((g) => {
+    const items = g.cells.filter((c) => c.frame).map((c) => ({ cell: c, src: drawUrl(c.frame.take, c.frame.d.n, "content"),
+      caption: `${c.shot.sub_shots.length > 1 ? `${c.shot.shot_id} · cut ${c.sub.index}` : c.shot.shot_id} at ${secs(c.sub.start_ms)}`,
+      title: `· ${!c.frame.approved ? "not approved (newest draw)" : (c.sub.outdated || []).length ? "approved, out of date" : "approved"} · ${sbShort(c.sub.action || c.shot.action)}`, likeness: c.frame.take.likeness }));
+    const at = new Map(items.map((x, i) => [x.cell, i]));
+    const approved = g.cells.filter((c) => c.sub.approved).length;
+    return h("section", { class: "card sb-group" },
+      h("div", { class: "sb-head" },
+        h("h3", {}, g.title, g.sub && h("span", { class: "muted small" }, ` · ${g.sub}`)),
+        h("span", { class: `chip ${approved === g.cells.length ? "ok" : ""}` }, `${approved}/${g.cells.length} approved`),
+        g.person && sbPersonRefs(g)),
+      h("div", { class: "sb-grid" }, g.cells.map((c) => sbTile(c, items, at.get(c)))));
+  }));
+}
+
+const sbSeg = (label, value, options, set) => h("span", { class: "seg", role: "group", "aria-label": label },
+  options.map(([v, text]) => h("button", { type: "button", class: `btn small${v === value ? " on" : ""}`, "aria-pressed": String(v === value), onclick: () => set(v) }, text)));
 
 function renderKeyframes(pkg) {
   if (frames.key !== framesKey(pkg)) loadFrames(pkg);
@@ -741,9 +871,17 @@ function renderKeyframes(pkg) {
       episodes.length > 1 && h("select", { "aria-label": "Episode", onchange: (e) => { frames.episode = e.target.value; framesRender(); } },
         h("option", { value: "all", selected: frames.episode === "all" }, "All episodes"),
         episodes.map((ep) => h("option", { value: ep, selected: frames.episode === ep }, ep)))),
+    h("div", { class: "design-row sb-bar" },
+      sbSeg("View", sbPrefs.layout, [["board", "Grid"], ["details", "Details"]], (v) => sbSet({ layout: v })),
+      sbPrefs.layout === "board" && [
+        h("span", { class: "small muted" }, "Group by"),
+        sbSeg("Group by", sbPrefs.group, [["scene", "Scene"], ["person", "Person"], ["place", "Place"]], (v) => sbSet({ group: v })),
+        sbSeg("Size", sbPrefs.size, [["s", "S"], ["m", "M"], ["l", "L"]], (v) => sbSet({ size: v })),
+        h("label", { class: "small", title: "Only the approved keyframes: what the export holds" },
+          h("input", { type: "checkbox", checked: sbPrefs.only, onchange: (e) => sbSet({ only: e.target.checked }) }), " Export only")]),
     frames.error && h("p", { class: "small warn-text" }, frames.error),
     frames.notes.length > 0 && stickyDetails("kf-notes", `${frames.notes.length} shot${frames.notes.length > 1 ? "s" : ""} not started`,
       h("ul", { class: "plain small" }, frames.notes.map((n) => h("li", {}, n)))),
   );
-  return h("div", {}, controls, shown.map((s) => renderShotCard(pkg, s)));
+  return h("div", {}, controls, sbPrefs.layout === "board" ? renderFrameBoard(shown) : shown.map((s) => renderShotCard(pkg, s)));
 }

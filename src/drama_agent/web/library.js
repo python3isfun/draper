@@ -421,15 +421,11 @@ function libKeyframes(a, part) {
 }
 
 function libFrameThumb(sub, total) {
-  const [aid, an] = sub.approved || [];
-  const ap = aid && sub.takes.find((t) => t.take_id === aid);
-  const done = sub.takes.flatMap((t) => t.results.filter((d) => d.status === "done").map((d) => [t, d]));
-  const newest = done.reduce((m, x) => (!m || x[0].created_at > m[0].created_at ? x : m), null);
-  const [take, n] = ap ? [ap, an] : newest ? [newest[0], newest[1].n] : [];
+  const f = subFrame(sub);  // shots.js: the approved draw, else the newest
   const label = total > 1 ? `Cut ${sub.index}` : "Keyframe";
-  return h("figure", { class: `kf-thumb${ap ? " approved" : ""}` },
-    take ? h("img", { src: drawUrl(take, n), alt: label, loading: "lazy" }) : h("div", { class: "lib-noimg" }, "none yet"),
-    h("figcaption", { class: "small" }, label, " · ", ap ? "✓ approved" : take ? "not approved" : sub.missing.length ? "waiting" : "not drawn",
+  return h("figure", { class: `kf-thumb${sub.approved ? " approved" : ""}` },
+    f ? h("img", { src: drawUrl(f.take, f.d.n), alt: label, loading: "lazy" }) : h("div", { class: "lib-noimg" }, sub.approved ? "draw missing" : "none yet"),
+    h("figcaption", { class: "small" }, label, " · ", sub.approved ? "✓ approved" : f ? "not approved" : sub.missing.length ? "waiting" : "not drawn",
       ` · ${count(sub.takes.length, "round", "rounds")}`));
 }
 
