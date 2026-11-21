@@ -25,6 +25,8 @@ KF_SHOT_REVISED = "a revision changed the shot since it was drawn"
 
 KF_BEFORE_OUTDATED = "the keyframe it continues from is out of date"  # redraw that one first
 
+KF_CUT_INSERTED = "a cut was inserted before it: redraw it from the new cut's keyframe"
+
 
 def design_print(pkg: ProductionPackage, shot: Shot) -> str:
     """A fingerprint of the design text a keyframe of this shot is written and checked
@@ -126,7 +128,8 @@ def keyframe_judge(
                        else (p := approved_take(takes, t.shot_id, t.sub_shot - 1))
                        and FrameRef(ref_id=frame_ref(p), role="", kind="previous_frame"))  # fmt: skip
                 if now is None or now.ref_id != r.ref_id:
-                    out.append(KF_BEFORE_CHANGED)
+                    inserted = t.moved_by_insert and r.kind != "previous_shot"
+                    out.append(KF_CUT_INSERTED if inserted else KF_BEFORE_CHANGED)
                     continue
                 before_id = r.ref_id.split(":")[1]
                 before = next((x for x in takes if x.take_id == before_id), None)

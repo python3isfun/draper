@@ -154,7 +154,7 @@ def test_sub_shots_are_checked(package):
     bad = [
         ([{**wide, "start_ms": 500}], "starts at 0"),
         ([{**wide, "start_ms": 0}, {**close, "start_ms": 300}], "at least 1 s"),
-        ([{**wide, "start_ms": 0}] * 4, "1 to 3"),
+        ([{**wide, "start_ms": 0}] * 6, "1 to 5"),
         ([{**wide, "start_ms": 0, "people": ["ch_nobody"]}], "isn't in the shot"),
         ([{**wide, "start_ms": 0, "framing": " "}], "needs a framing"),
         ([{**wide, "start_ms": 0}, {**close, "start_ms": 3000}], "middle of"),

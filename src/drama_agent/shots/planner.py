@@ -11,7 +11,7 @@ from ..models import ProductionPackage
 from ..models.storyboard import Shot
 from ..pace import DEFAULT_PACE, planner_rules
 from .common import _names
-from .models import COVERAGE_MS, MAX_SUB_SHOTS, MIN_SUB_SHOT_MS, SubShot
+from .models import COVERAGE_MS, MIN_SUB_SHOT_MS, PLANNER_MAX_SUB_SHOTS, ShotPlan, SubShot
 from .plans import clip_ms, make_sub_shots, shot_lines
 from .writer import shot_context
 
@@ -103,7 +103,9 @@ def plan_instructions(pace: object = DEFAULT_PACE, cuts: int | None = None) -> s
     """The planner's instructions at the shot's pace (pace.py), and with `cuts`, the number
     of sub-shots the director asked for."""
     guide = PLAN_GUIDE.format(
-        max_sub=MAX_SUB_SHOTS, min_s=MIN_SUB_SHOT_MS / 1000, coverage_s=COVERAGE_MS / 1000
+        max_sub=max(PLANNER_MAX_SUB_SHOTS, cuts or 0),
+        min_s=MIN_SUB_SHOT_MS / 1000,
+        coverage_s=COVERAGE_MS / 1000,
     )
     out = f"{PLAN_ROLE}\n\n{guide}\n\n{planner_rules(pace)}"
     if cuts is not None:
@@ -120,6 +122,49 @@ def cuts_rule(cuts: int) -> str:
             "action or the speaker changes (a new subject, a reaction, the next line), never "
             "in the middle of a line, and make each cut a new view; this overrides \"a held "
             "moment with one view is one sub-shot\".")  # fmt: skip
+
+
+INSERT_RULE = """\
+## Inserting a cut
+
+The shot already has a plan: `current_plan`, its cuts numbered from 1. The director wants \
+**one new cut inserted {where}**, showing: `insert_note`. Return the whole plan, \
+{total} sub-shots: the current cuts in order with the new one in its place.
+
+- Keep every current cut's `framing`, `camera`, `people`, `placement` and `off_screen` word \
+for word: their keyframes are already drawn.
+- Move the start times as needed to make room (no line cut in the middle, each cut at least \
+{min_s:.0f} s).
+- Write the new cut's framing, camera, action, people and sides from the note, the shot \
+and the set; it is a different view from the cuts on either side of it.
+- Rewrite the `action` of the cut before it (and after it) only so that the actions \
+together still tell the shot's action once, in order, with nothing repeated.\
+"""
+
+
+def insert_rule(plan: ShotPlan, after: int) -> str:
+    """The planner's instructions for a cut inserted after cut `after` of `plan`."""
+    n = len(plan.sub_shots)
+    where = (f"after cut {after}, as the last cut" if after >= n
+             else f"between cut {after} and cut {after + 1}")  # fmt: skip
+    return INSERT_RULE.format(where=where, total=n + 1, min_s=MIN_SUB_SHOT_MS / 1000)
+
+
+def insert_context(pkg: ProductionPackage, plan: ShotPlan, after: int, note: str) -> dict[str, Any]:
+    """What the planner is given about the plan a cut is inserted into (names, not ids)."""
+    names = _names(pkg)
+    return {
+        "current_plan": [
+            {"cut": s.index, "start_s": s.start_ms / 1000, "end_s": s.end_ms / 1000,
+             "framing": s.framing, "camera": s.camera, "action": s.action,
+             "people": [names.get(c, c) for c in s.people],
+             "placement": {names.get(c, c): v for c, v in s.placement.items()},
+             "off_screen": {names.get(c, c): v for c, v in s.off_screen.items()}}
+            for s in plan.sub_shots
+        ],
+        "insert_after_cut": after,
+        "insert_note": note,
+    }  # fmt: skip
 
 
 def plan_context(pkg: ProductionPackage, shot: Shot, clip: int | None = None) -> dict[str, Any]:
@@ -206,8 +251,33 @@ def spread(people: list[str]) -> dict[str, str]:
 
 
 def fixture_plan(request: GenerationRequest) -> PlanOutput:
-    """Offline stand-in for the planner: the whole shot is one sub-shot."""
+    """Offline stand-in for the planner: the whole shot is one sub-shot; asked to insert a
+    cut, the current cuts with the new one halfway through the cut it follows (or all
+    of them re-timed equally when that cut is too short to halve)."""
     shot = request.context["shot"]
+    if "insert_note" in request.context:
+        cuts = request.context["current_plan"]
+        after = request.context["insert_after_cut"]
+        out = [PlannedSubShot(**{k: c[k] for k in PlannedSubShot.model_fields if k in c})
+               for c in cuts]  # fmt: skip
+        before = cuts[after - 1]
+        start = round((before["start_s"] + before["end_s"]) / 2, 1)
+        if before["end_s"] - before["start_s"] < 2 * MIN_SUB_SHOT_MS / 1000:
+            # Too short to halve: every cut re-timed to an equal share of the shot.
+            step = cuts[-1]["end_s"] / (len(cuts) + 1)
+            for k, c in enumerate(out):
+                c.start_s = round((k + (k >= after)) * step, 1)
+            start = round(after * step, 1)
+        new = PlannedSubShot(
+            start_s=start,
+            framing=f"Insert shot: {request.context['insert_note']}",
+            camera="still",
+            action=request.context["insert_note"],
+            people=[],
+            off_screen=dict.fromkeys(shot["people"], "left"),
+        )
+        return PlanOutput(sub_shots=[*out[:after], new, *out[after:]],
+                          notes="Offline sample: the cut inserted halfway.")  # fmt: skip
     return PlanOutput(
         sub_shots=[PlannedSubShot(start_s=0, framing=shot["framing"], camera=shot["camera"],
                                   action=shot["action"], people=shot["people"],

@@ -19,7 +19,11 @@ CHECK_STAGE = "shot_check"
 
 PLAN_STAGE = "shot_plan"
 
-MAX_SUB_SHOTS = 3
+# The most cuts a shot holds (a person's plan, an inserted cut); the planner cuts a shot into
+# at most PLANNER_MAX_SUB_SHOTS on its own, more only when asked for a count.
+MAX_SUB_SHOTS = 5
+
+PLANNER_MAX_SUB_SHOTS = 3
 
 MIN_SUB_SHOT_MS = 1000
 
@@ -136,6 +140,9 @@ class ShotPlan(BaseModel):
     # The design text it was planned against (design_print); None for plans from before it
     # was recorded (judged by the hand edits made to the shot's set, looks and props).
     design_print: str | None = None
+    # Set on a plan written by inserting a cut: the cut it was inserted after (inserts.py),
+    # so restoring the plan before it, or this one again, moves the keyframes with it.
+    inserted_after: int | None = None
 
     @property
     def busy(self) -> bool:
@@ -248,6 +255,10 @@ class ShotTake(BaseModel):
     # The design text it was written and checked against (design_print); None for takes
     # from before it was recorded, which are judged by their pictures alone.
     design_print: str | None = None
+    # Kept approved when a cut was inserted right before its cut (inserts.py): it continues
+    # from the cut before the insert, so it is out of date until redrawn, but a new approval
+    # of the inserted cut doesn't withdraw it.
+    moved_by_insert: bool = False
     draws: int = DEFAULT_DRAWS
     seeds: list[int] = Field(default_factory=list)
     results: list[FrameDraw] = Field(default_factory=list)

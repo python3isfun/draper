@@ -15,6 +15,7 @@ from ..models import ProductionPackage
 from ..models.package import utcnow
 from ..models.storyboard import Shot
 from .approvals import stale_approvals
+from .inserts import restore_moves
 from .models import ShotPlan, ShotPlanVersion
 from .plans import current_sub, make_sub_shots
 
@@ -76,6 +77,12 @@ def restore_plan(
     plan = v.plan.model_copy(update={"revision_id": pkg.revision_id, "sub_shots": subs,
                                      "status": "done", "error": None,
                                      "updated_at": utcnow()})  # fmt: skip
+    # Undoing an inserted cut, or restoring it again: the keyframes move with their cuts.
+    current = repo.get_shot_plan(pkg.package_id, pkg.revision_id, shot.shot_id)
+    if current is not None:
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        for t in restore_moves(pkg, shot, current, plan, takes):
+            repo.save_shot_take(t)
     replace_plan(repo, pkg, shot, plan, "restore")
     repo.delete_plan_version(pkg.package_id, pkg.revision_id, shot.shot_id, version)
     by_id = {t.take_id: t for t in repo.list_shot_takes(pkg.package_id, pkg.revision_id)}

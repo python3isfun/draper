@@ -33,7 +33,9 @@ def approval_changes(take: ShotTake, n: int | None, others: list[ShotTake]) -> l
     """The takes whose `approved` changes when draw `n` of `take` is approved (None:
     withdrawn); `others` are the shot's other takes. One approved draw per sub-shot, and a
     later sub-shot's approved keyframe must be drawn from the approved keyframe before it:
-    changing or withdrawing one withdraws those drawn from another, down the chain."""
+    changing or withdrawing one withdraws those drawn from another, down the chain. A take
+    kept across an inserted cut (`moved_by_insert`) is drawn from the cut before the insert:
+    it stays approved, out of date (staleness.py), while that keyframe stays approved."""
     changed: list[ShotTake] = []
 
     def clear(t: ShotTake) -> None:
@@ -52,11 +54,16 @@ def approval_changes(take: ShotTake, n: int | None, others: list[ShotTake]) -> l
     for k in sorted({t.sub_shot for t in every if t.sub_shot > 1}):
         prev = next((t for t in every if t.sub_shot == k - 1 and t.approved is not None), None)
         want = frame_ref(prev) if prev is not None else None
+        # A keyframe moved by an inserted cut holds while it is drawn from an approved
+        # keyframe of an earlier cut (the cut it continued before the insert).
+        earlier = {frame_ref(t) for t in every if t.sub_shot < k - 1 and t.approved is not None}
         for t in every:
+            drawn_from = t.references[0].ref_id if t.references else None
             if (
                 t.sub_shot == k
                 and t.approved is not None
-                and (not t.references or t.references[0].ref_id != want)
+                and drawn_from != want
+                and not (t.moved_by_insert and drawn_from in earlier)
             ):
                 clear(t)
     return changed

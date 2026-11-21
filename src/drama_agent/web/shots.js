@@ -484,7 +484,7 @@ function renderPlanEditor(pkg, shot) {
           h("select", { "aria-label": `Where ${p.name} is`, onchange: (e) => { row.pos[p.id] = e.target.value; } },
             POSITIONS.map(([v, label]) => h("option", { value: v, selected: (row.pos[p.id] || "") === v }, label)))))))),
     h("div", { class: "prompt-edit-actions" },
-      rows.length < 3 && h("button", { type: "button", class: "btn ghost small", onclick: () => {
+      rows.length < MAX_CUTS && h("button", { type: "button", class: "btn ghost small", onclick: () => {
         rows.push({ start_s: "", framing: "", camera: "", action: "", pos: { ...rows[rows.length - 1].pos } });
         framesRender();
       } }, "+ Sub-shot"),
@@ -559,9 +559,9 @@ function planSettings(pkg, shot) {
       h("option", { value: "", selected: !o.pace }, `Pace: story's (${story})`),
       Object.entries(PACE_LABELS).map(([v, label]) => h("option", { value: v, selected: o.pace === v }, `Pace: ${label}`))),
     h("select", { class: "plan-setting", "aria-label": "Sub-shots in this shot", disabled: shot.busy, onchange: set("cuts"),
-      title: "How many sub-shots the next plan cuts this shot into (at most 3, each at least 1 s)" },
+      title: `How many sub-shots the next plan cuts this shot into (up to ${MAX_CUTS}, each at least 1 s; auto: the planner decides, at most 3)` },
       h("option", { value: "", selected: !o.cuts }, "Cuts: auto"),
-      [1, 2, 3].map((n) => h("option", { value: String(n), selected: o.cuts === String(n) }, `Cuts: ${n}`))),
+      Array.from({ length: MAX_CUTS }, (_, i) => i + 1).map((n) => h("option", { value: String(n), selected: o.cuts === String(n) }, `Cuts: ${n}`))),
   ];
 }
 
@@ -713,9 +713,9 @@ function renderShotCard(pkg, shot) {
 // by person or by place; the lightbox steps through a group in order. The view settings
 // are per viewer (browser storage, best effort).
 const SB_KEY = "kf-storyboard";
-const SB_CHOICES = { layout: ["board", "details"], group: ["scene", "person", "place"], size: ["s", "m", "l"], only: [false, true] };
+const SB_CHOICES = { layout: ["gallery", "board", "details"], group: ["scene", "person", "place"], size: ["s", "m", "l"], only: [false, true] };
 const sbPrefs = (() => {
-  const out = { layout: "board", group: "scene", size: "m", only: false };
+  const out = { layout: "gallery", group: "scene", size: "m", only: false };
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(SB_KEY) || "{}") || {}; } catch { /* storage off or bad: defaults */ }
   for (const [k, ok] of Object.entries(SB_CHOICES)) if (ok.includes(saved[k])) out[k] = saved[k];
@@ -784,15 +784,65 @@ function sbPersonRefs(group) {
       h("img", { src: thumbUrl(ch), alt: ch.name, loading: "lazy" }), lookalikeTag(ch.likeness), idTag(`design:${ch.image_id}`))));
 }
 
-function sbTile(c, items, at) {
+// A cut inserted after one (POST …/insert): the text model writes it from a note, keeping
+// the shot's other cuts and their keyframes. The "+" on a tile's right edge opens the form.
+const MAX_CUTS = 5;  // shots/models.py MAX_SUB_SHOTS
+
+function insertBlocked(shot) {
+  if (shot.sub_shots.length >= MAX_CUTS) return `${shot.shot_id} already has ${MAX_CUTS} cuts, the most a shot holds`;
+  if (shot.busy) return `${shot.shot_id} is being planned or drawn: wait for it to finish`;
+  return "";
+}
+
+function sbAdd(c) {
+  const { shot, sub } = c;
+  const last = sub.index === shot.sub_shots.length;
+  const blocked = insertBlocked(shot);
+  const open = frames.insert && frames.insert.shot_id === shot.shot_id && frames.insert.after === sub.index;
+  return h("button", { type: "button", class: `sb-add${open ? " on" : ""}`, disabled: !!blocked, "aria-label": `Insert a cut after ${galLabel(c)}`,
+    title: blocked || `Insert a new cut after ${galLabel(c)}${last ? `, at the end of ${shot.shot_id}` : `, before cut ${sub.index + 1}`}`,
+    onclick: () => {
+      frames.insert = { shot_id: shot.shot_id, after: sub.index, note: "", draw: true, error: "" };
+      framesRender();
+      setTimeout(() => { const t = $("#kf-insert-note"); if (t) { t.focus(); t.scrollIntoView({ block: "nearest" }); } }, 0);
+    } }, "+");
+}
+
+function renderInsertForm(pkg, shots) {
+  const ins = frames.insert;
+  const shot = ins && shots.find((s) => s.shot_id === ins.shot_id);
+  if (!shot) return null;
+  const n = shot.sub_shots.length;
+  const where = ins.after >= n ? `at the end of ${shot.shot_id}, after cut ${ins.after}` : `in ${shot.shot_id}, between cut ${ins.after} and cut ${ins.after + 1}`;
+  const submit = async (e) => {
+    const note = ins.note.trim();
+    if (!note) { ins.error = "Say what the new cut shows."; framesRender(); return; }
+    const out = await frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/insert`, e.currentTarget,
+      { revision_id: pkg.revision_id, after: ins.after, note, draw: ins.draw, draws: frames.draws, max_rounds: frames.rounds, provider: frames.provider });
+    if (out) frames.insert = null;
+    else { ins.error = frames.error; frames.error = ""; }
+    framesRender();
+  };
+  const go = h("button", { type: "button", class: "btn small primary-outline", onclick: submit }, "Insert cut");
+  return h("div", { class: "sb-insert" },
+    h("strong", {}, `New cut ${where}`),
+    h("p", { class: "small muted" }, "The text model writes it from your note (framing, camera, action, who is where) and re-times the shot. The other cuts keep their view and their approved keyframes; the cut after the new one is marked out of date until it is redrawn from it."),
+    h("textarea", { id: "kf-insert-note", rows: 2, maxlength: 1000, placeholder: "What the new cut shows, e.g. a close-up of Lila's hand on the door handle",
+      value: ins.note, oninput: (e) => { ins.note = e.target.value; },
+      onkeydown: (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!go.disabled) submit({ currentTarget: go }); } } }),
+    h("div", { class: "design-row" },
+      h("label", { class: "small" }, h("input", { type: "checkbox", checked: ins.draw, onchange: (e) => { ins.draw = e.target.checked; } }),
+        " Draw its keyframe once planned (needs the cut before it approved)"),
+      go,
+      h("button", { type: "button", class: "btn ghost small", onclick: () => { frames.insert = null; framesRender(); } }, "Cancel")),
+    ins.error && h("p", { class: "small warn-text" }, ins.error));
+}
+
+function sbTile(c, items, at, add = false) {
   const { shot, sub, frame } = c;
-  const label = shot.sub_shots.length > 1 ? `${shot.shot_id} · cut ${sub.index}` : shot.shot_id;
+  const label = galLabel(c);
   const outdated = frame && frame.approved && (sub.outdated || []).length > 0;
-  const status = !frame
-    ? (sub.approved ? ["bad", "approved draw missing"] : sbBusy(sub) ? ["info", "drawing…"] : sub.missing.length ? ["warn", "waiting for picks"] : ["", "no draw yet"])
-    : outdated ? ["warn", "out of date"]
-    : frame.approved ? ["ok", "✓ approved"]
-    : sbBusy(sub) ? ["info", "drawing…"] : ["warn", "not approved"];
+  const status = galStatus(c, "not approved");
   const tip = `${sub.framing || shot.framing}: ${sub.action || shot.action}`;
   return h("figure", { class: `sb-tile${frame ? (frame.approved ? " approved" : " unapproved") : " empty"}${outdated ? " outdated" : ""}` },
     frame
@@ -803,25 +853,135 @@ function sbTile(c, items, at) {
       h("div", { class: "sb-cap" }, h("strong", {}, label), h("span", { class: "muted" }, secs(sub.start_ms))),
       h("div", { class: "sb-cap" },
         h("span", { class: `chip ${status[0]}`, title: outdated ? sub.outdated.join("; ") : "" }, status[1]),
-        h("a", { href: "#", class: "small", title: "Plan, takes, prompts and checks of this cut", onclick: (e) => { e.preventDefault(); framesOpenShot(shot.shot_id, sub.index); } }, "Details"))));
+        h("a", { href: "#", class: "small", title: "Plan, takes, prompts and checks of this cut", onclick: (e) => { e.preventDefault(); framesOpenShot(shot.shot_id, sub.index); } }, "Details"))),
+    add && sbAdd(c));
 }
 
-function renderFrameBoard(shots) {
+function renderFrameBoard(pkg, shots) {
   const groups = sbGroups(shots);
   if (!groups.length) return h("section", { class: "card" }, h("p", { class: "muted" }, sbPrefs.only ? "No approved keyframes yet: nothing would be exported." : "No shots."));
   return h("div", { class: `sb sb-${sbPrefs.size}` }, groups.map((g) => {
     const items = g.cells.filter((c) => c.frame).map((c) => ({ cell: c, src: drawUrl(c.frame.take, c.frame.d.n, "content"),
-      caption: `${c.shot.sub_shots.length > 1 ? `${c.shot.shot_id} · cut ${c.sub.index}` : c.shot.shot_id} at ${secs(c.sub.start_ms)}`,
+      caption: `${galLabel(c)} at ${secs(c.sub.start_ms)}`,
       title: `· ${!c.frame.approved ? "not approved (newest draw)" : (c.sub.outdated || []).length ? "approved, out of date" : "approved"} · ${sbShort(c.sub.action || c.shot.action)}`, likeness: c.frame.take.likeness }));
     const at = new Map(items.map((x, i) => [x.cell, i]));
     const approved = g.cells.filter((c) => c.sub.approved).length;
+    // Inserting is offered in story order (by scene), where a tile's neighbours are its cuts.
+    const add = sbPrefs.group === "scene";
+    const mine = [...new Set(g.cells.map((c) => c.shot))];
+    const failed = mine.filter((s) => s.plan.error && s.plan.status !== "writing");
     return h("section", { class: "card sb-group" },
       h("div", { class: "sb-head" },
         h("h3", {}, g.title, g.sub && h("span", { class: "muted small" }, ` · ${g.sub}`)),
         h("span", { class: `chip ${approved === g.cells.length ? "ok" : ""}` }, `${approved}/${g.cells.length} approved`),
         g.person && sbPersonRefs(g)),
-      h("div", { class: "sb-grid" }, g.cells.map((c) => sbTile(c, items, at.get(c)))));
+      failed.map((s) => h("p", { class: "small warn-text" }, `${s.shot_id}: ${s.plan.error}`)),
+      add && frames.insert && mine.some((s) => s.shot_id === frames.insert.shot_id) && renderInsertForm(pkg, mine),
+      h("div", { class: "sb-grid" }, g.cells.map((c) => sbTile(c, items, at.get(c), add))));
   }));
+}
+
+// Gallery: the keyframes one after another in story order, the current one large between the
+// cut before and the cut after, over a filmstrip of every cut (scene breaks marked). The
+// arrow keys step; "Follow" steps through one person's cuts only. Position and follow are
+// for this visit only.
+const galLabel = (c) => (c.shot.sub_shots.length > 1 ? `${c.shot.shot_id} · cut ${c.sub.index}` : c.shot.shot_id);
+const galKey = (c) => `${c.shot.shot_id}|${c.sub.index}`;
+function galGo(key) {
+  frames.galAt = key;
+  framesRender();
+}
+function galStep(d) {
+  const keys = frames.galKeys || [];
+  if (!keys.length) return;
+  const i = Math.max(0, keys.indexOf(frames.galAt));
+  galGo(keys[Math.max(0, Math.min(keys.length - 1, i + d))]);
+}
+document.addEventListener("keydown", (e) => {
+  if (sbPrefs.layout !== "gallery" || framesInLib() || state.tab !== "keyframes" || $(".lightbox") || $("[aria-modal=true]") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const a = document.activeElement;
+  if (a && ["INPUT", "TEXTAREA", "SELECT"].includes(a.tagName)) return;
+  if (e.key === "ArrowRight") galStep(1);
+  else if (e.key === "ArrowLeft") galStep(-1);
+  else return;
+  e.preventDefault();
+});
+
+// A cut's status chip [kind, text], shared by the Grid and the Gallery.
+function galStatus(c, unapproved = "not approved (newest draw)") {
+  const outdated = c.frame && c.frame.approved && (c.sub.outdated || []).length > 0;
+  return c.shot.plan.status === "writing" ? ["info", "re-planning…"]
+    : !c.frame
+    ? (c.sub.approved ? ["bad", "approved draw missing"] : sbBusy(c.sub) ? ["info", "drawing…"] : c.sub.missing.length ? ["warn", "waiting for picks"] : ["", "no draw yet"])
+    : outdated ? ["warn", "out of date"]
+    : c.frame.approved ? ["ok", "✓ approved"]
+    : sbBusy(c.sub) ? ["info", "drawing…"] : ["warn", unapproved];
+}
+
+function galSide(c, which) {
+  if (!c) return h("div", { class: "gal-side gal-end" }, which === "prev" ? "Start" : "End");
+  return h("button", { type: "button", class: `gal-side${c.frame && !c.frame.approved ? " unapproved" : ""}`, title: `${which === "prev" ? "Previous" : "Next"}: ${galLabel(c)} (${which === "prev" ? "←" : "→"})`, onclick: () => galGo(galKey(c)) },
+    c.frame ? h("img", { src: drawUrl(c.frame.take, c.frame.d.n), alt: galLabel(c) }) : h("div", { class: "sb-none" }, galStatus(c)[1]),
+    h("span", { class: "small muted" }, `${which === "prev" ? "← " : ""}${galLabel(c)}${which === "next" ? " →" : ""}`));
+}
+
+function renderFrameGallery(shots) {
+  const people = new Map();
+  for (const s of shots) for (const p of s.people) if (!people.has(p.id)) people.set(p.id, p.name);
+  if (frames.galFollow && !people.has(frames.galFollow)) frames.galFollow = "";
+  const cells = shots.flatMap((shot) => shot.sub_shots.map((sub) => ({ shot, sub, frame: subFrame(sub) })))
+    .filter((c) => (!sbPrefs.only || c.sub.approved) && (!frames.galFollow || c.sub.people.includes(frames.galFollow)));
+  frames.galKeys = cells.map(galKey);
+  const follow = h("label", { class: "small" }, "Follow ",
+    h("select", { "aria-label": "Follow", title: "Step through every cut, or only one person's", onchange: (e) => { frames.galFollow = e.target.value; framesRender(); } },
+      h("option", { value: "", selected: !frames.galFollow }, "every cut"),
+      [...people].map(([id, name]) => h("option", { value: id, selected: frames.galFollow === id }, name))));
+  if (!cells.length) return h("section", { class: "card" }, follow, h("p", { class: "muted" }, sbPrefs.only ? "No approved keyframes here yet." : "No cuts here."));
+  let i = frames.galKeys.indexOf(frames.galAt);
+  if (i < 0) { i = 0; frames.galAt = frames.galKeys[0]; }
+  const c = cells[i];
+  const [tone, text] = galStatus(c);
+  const items = cells.filter((x) => x.frame).map((x) => ({ cell: x, src: drawUrl(x.frame.take, x.frame.d.n, "content"), caption: galLabel(x),
+    title: `${x.shot.scene_id} · ${galStatus(x)[1]}`, likeness: x.frame.take.likeness }));
+  const at = items.findIndex((x) => x.cell === c);
+  let scene = null;
+  const strip = h("div", { class: "gal-strip", role: "list" }, cells.map((x) => {
+    const brk = x.shot.scene_id !== scene;
+    scene = x.shot.scene_id;
+    return [
+      brk && h("span", { class: "gal-break", title: `${x.shot.place}` }, `${x.shot.episode_id} · ${x.shot.scene_id}`),
+      h("button", { type: "button", role: "listitem", class: `gal-thumb${x === c ? " on" : ""}${x.frame ? (x.frame.approved ? " approved" : " unapproved") : " empty"}`,
+        title: `${galLabel(x)}: ${galStatus(x)[1]}`, "aria-current": x === c ? "true" : null, onclick: () => galGo(galKey(x)) },
+        x.frame ? h("img", { src: drawUrl(x.frame.take, x.frame.d.n), alt: galLabel(x), loading: "lazy" }) : h("span", {}, "·")),
+    ];
+  }));
+  // Keep the current thumbnail in view (without moving the page).
+  setTimeout(() => {
+    const on = strip.querySelector(".on");
+    if (on && strip.isConnected) strip.scrollLeft = on.offsetLeft - strip.clientWidth / 2 + on.clientWidth / 2;
+  }, 0);
+  return h("section", { class: "card gal" },
+    h("div", { class: "gal-top" },
+      h("button", { type: "button", class: "btn small", disabled: i === 0, onclick: () => galStep(-1) }, "← Previous"),
+      h("strong", {}, `${i + 1} / ${cells.length}`),
+      h("button", { type: "button", class: "btn small", disabled: i === cells.length - 1, onclick: () => galStep(1) }, "Next →"),
+      follow,
+      h("span", { class: "small muted" }, "Arrow keys step; click the picture for full size")),
+    h("div", { class: "gal-stage" },
+      galSide(cells[i - 1], "prev"),
+      c.frame
+        ? h("button", { type: "button", class: `gal-main${c.frame.approved ? "" : " unapproved"}`, "aria-label": `Enlarge ${galLabel(c)}`, onclick: () => enlarge(items, at) },
+            h("img", { src: drawUrl(c.frame.take, c.frame.d.n, "content"), alt: galLabel(c) }), lookalikeTag(c.frame.take.likeness), idTag(`take:${c.frame.take.take_id}:${c.frame.d.n}`))
+        : h("div", { class: "gal-main sb-none" }, text),
+      galSide(cells[i + 1], "next")),
+    h("div", { class: "gal-cap" },
+      h("div", { class: "sb-cap" },
+        h("span", {}, h("strong", {}, galLabel(c)), h("span", { class: "muted" }, ` · ${c.shot.episode_id} · ${c.shot.scene_id} · ${c.shot.place} · from ${secs(c.sub.start_ms)}`)),
+        h("span", {}, h("span", { class: `chip ${tone}`, title: (c.sub.outdated || []).join("; ") }, text), " ",
+          h("a", { href: "#", class: "small", onclick: (e) => { e.preventDefault(); framesOpenShot(c.shot.shot_id, c.sub.index); } }, "Details"))),
+      h("p", { class: "small" }, h("strong", {}, c.sub.framing || c.shot.framing), " — ", c.sub.action || c.shot.action),
+      h("p", { class: "small muted" }, c.sub.people_names.length ? `On screen: ${c.sub.people_names.join(", ")}` : "No one on screen")),
+    strip);
 }
 
 const sbSeg = (label, value, options, set) => h("span", { class: "seg", role: "group", "aria-label": label },
@@ -872,7 +1032,9 @@ function renderKeyframes(pkg) {
         h("option", { value: "all", selected: frames.episode === "all" }, "All episodes"),
         episodes.map((ep) => h("option", { value: ep, selected: frames.episode === ep }, ep)))),
     h("div", { class: "design-row sb-bar" },
-      sbSeg("View", sbPrefs.layout, [["board", "Grid"], ["details", "Details"]], (v) => sbSet({ layout: v })),
+      sbSeg("View", sbPrefs.layout, [["gallery", "Gallery"], ["board", "Grid"], ["details", "Details"]], (v) => sbSet({ layout: v })),
+      sbPrefs.layout === "gallery" && h("label", { class: "small", title: "Only the approved keyframes: what the export holds" },
+        h("input", { type: "checkbox", checked: sbPrefs.only, onchange: (e) => sbSet({ only: e.target.checked }) }), " Export only"),
       sbPrefs.layout === "board" && [
         h("span", { class: "small muted" }, "Group by"),
         sbSeg("Group by", sbPrefs.group, [["scene", "Scene"], ["person", "Person"], ["place", "Place"]], (v) => sbSet({ group: v })),
@@ -883,5 +1045,6 @@ function renderKeyframes(pkg) {
     frames.notes.length > 0 && stickyDetails("kf-notes", `${frames.notes.length} shot${frames.notes.length > 1 ? "s" : ""} not started`,
       h("ul", { class: "plain small" }, frames.notes.map((n) => h("li", {}, n)))),
   );
-  return h("div", {}, controls, sbPrefs.layout === "board" ? renderFrameBoard(shown) : shown.map((s) => renderShotCard(pkg, s)));
+  return h("div", {}, controls, sbPrefs.layout === "gallery" ? renderFrameGallery(shown)
+    : sbPrefs.layout === "board" ? renderFrameBoard(pkg, shown) : shown.map((s) => renderShotCard(pkg, s)));
 }

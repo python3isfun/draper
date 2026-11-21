@@ -128,6 +128,19 @@ class PlanRequest(BaseModel):
         return pace_name(value) or None if isinstance(value, str) else value
 
 
+class InsertRequest(BaseModel):
+    revision_id: str | None = None
+    # The cut the new one follows (1 = between cuts 1 and 2; the last cut: at the end).
+    after: int = Field(ge=1, le=MAX_SUB_SHOTS - 1)
+    # What the new cut shows, in the director's words; the text model writes the cut.
+    note: str = Field(min_length=1, max_length=1000)
+    # Draw the new cut's keyframe once it is planned (when the cut before is approved).
+    draw: bool = True
+    draws: int = Field(DEFAULT_DRAWS, ge=1, le=MAX_DRAWS)
+    max_rounds: int = Field(MAX_ROUNDS, ge=1, le=MAX_ROUNDS)
+    provider: str | None = None
+
+
 class ReadingRequest(BaseModel):
     revision_id: str | None = None
 
@@ -234,6 +247,9 @@ def register(
         return runner.fresh_reading(pkg, shot.scene_id)
 
     def _start(take: ShotTake) -> ShotTake:
+        stored = repo.get_shot_plan(take.package_id, take.revision_id, take.shot_id)
+        if stored is not None and stored.busy:  # an insert moves its takes when written
+            raise HTTPException(409, f"{take.shot_id} is being planned; draw once it is done")
         repo.save_shot_take(take)
         runner.start(take.take_id)
         return take
@@ -353,6 +369,45 @@ def register(
         plan.source, plan.updated_at = "user", utcnow()
         plan.design_print = design_print(pkg, shot)
         replace_plan(repo, pkg, shot, plan, "user")  # withdraws approvals it doesn't match
+        return plan
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/insert",
+        status_code=202,
+        response_model=ShotPlan,
+    )
+    async def insert_cut(package_id: str, shot_id: str, req: InsertRequest) -> ShotPlan:
+        """Insert one cut after cut `after`, from the director's note: the text model writes
+        it and re-times the shot in the background, keeping every other cut's view. Their
+        keyframes stay approved, moved to their new numbers; the cut right after the new one
+        is out of date until it is redrawn from the new cut's keyframe. With `draw`, the new
+        cut's keyframe is drawn once it is planned."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        stored, now = _plan(pkg, shot)
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        if (stored is not None and stored.busy) or is_busy(takes, shot_id):
+            raise HTTPException(409, f"{shot_id} is still being planned or drawn")
+        n = len(now.sub_shots)
+        if n >= MAX_SUB_SHOTS:
+            raise HTTPException(422, f"{shot_id} already has {n} cuts, the most a shot holds")
+        if req.after > n:
+            raise HTTPException(
+                422, f"{shot_id} has {n} cut{'s' if n > 1 else ''}, no cut {req.after}"
+            )
+        then = None
+        if req.draw:
+            try:
+                then = {"sub_shot": req.after + 1, "draws": req.draws,
+                        "max_rounds": req.max_rounds, **runner.take_options(req.provider)}  # fmt: skip
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
+        # The plan in force (the storyboard's single cut, if none is stored) is what the board
+        # keeps showing while the new one is written.
+        plan = now.model_copy(update={"status": "writing", "error": None}, deep=True)
+        repo.save_shot_plan(plan)
+        runner.start_plan(plan, then=then, clip_ms=now.clip_ms, pace=now.pace,
+                          insert=(req.after, req.note.strip()))  # fmt: skip
         return plan
 
     @app.get(
@@ -674,7 +729,9 @@ def register(
         if take.busy or d is None or d.status != "done":
             raise HTTPException(409, "only a finished draw of a finished take can be approved")
         shot = _shot(pkg, take.shot_id)
-        _, plan = _plan(pkg, shot)
+        stored, plan = _plan(pkg, shot)
+        if stored is not None and stored.busy:
+            raise HTTPException(409, f"{shot.shot_id} is being planned; approve once it is done")
         if current_sub(pkg, shot, plan, take) is None:
             raise HTTPException(409, "the sub-shot plan changed since this take was drawn")
         takes = repo.list_shot_takes(take.package_id, take.revision_id)
@@ -689,9 +746,16 @@ def register(
                 )
         out = repo.approve_shot_draw(take_id, req.n)
         following = plan.sub(take.sub_shot + 1)
+
+        def takes_now() -> list[ShotTake]:
+            return repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+
         if (
             req.next
             and following is not None
+            # Unless the next cut keeps an approved keyframe (one kept across an inserted cut
+            # is redrawn when the user chooses: it is marked out of date).
+            and approved_take(takes_now(), take.shot_id, following.index) is None
             # Unless the next cut already has a take drawn from this keyframe (takes drawn
             # from another, or for an older plan, can't be approved after it).
             and not _drawn_from(pkg, shot, plan, following.index, frame_ref(out))

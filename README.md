@@ -395,7 +395,12 @@ A storyboard shot is one video generation, but a dynamic one holds a few cuts in
 the camera cuts to ...`. The **Keyframes** tab gives video production (dramer) one checked
 picture per cut, so characters stay consistent and each cut starts as planned.
 
-The tab opens on a **Grid**: every cut's keyframe in export order (the
+The tab opens on a **Gallery**: the keyframes one after another in story order, the current
+one large between the cut before and the cut after (to check that consecutive frames
+match), over a filmstrip of every cut with the scene breaks marked. The arrow keys (or
+Previous / Next, or a click on the filmstrip) step; **Follow** steps through one person's
+cuts only; **Export only** skips what isn't approved; the picture opens full size. The
+**Grid** shows every cut's keyframe at once in export order (the
 approved draw; else the newest, dashed; else what it waits for), grouped by **scene**, by
 **person** (each person's cuts across the story beside the design pictures they were drawn
 from, to check that they stay the same person) or by **place**. **S/M/L** sets the tile
@@ -403,9 +408,24 @@ size, **Export only** shows just the approved keyframes the export holds, a tile
 size (the arrow keys step through its row) and **Details** opens the cut in the detailed
 view (plan, takes, prompts and checks). The view settings are kept in the browser.
 
+**Inserting a cut between two keyframes.** Grouped by scene, each Grid tile has a **+** on
+its right edge: a new cut after that one, in its shot (after a shot's last cut, at the end of
+that shot). Say what the new cut shows; the text model writes it (framing, camera, action,
+who is where) and re-times the shot, rewording the actions next to it so the shot is told
+once, in order (`POST .../keyframes/{shot_id}/insert` with `after`, the cut it follows, and
+`note`). The other cuts keep their view word for word, so their keyframes stay approved,
+moved to their new numbers. The cut right after the new one was drawn from the cut before
+the insert: it stays approved but out of date ("a cut was inserted before it") until it is
+redrawn from the new cut's keyframe, and approving the new cut doesn't withdraw it or start
+a redraw of it. With **Draw its keyframe** (`draw`, the default) the new cut is drawn once
+planned, if the cut before it is approved. A shot holds at most 5 cuts, each at least 1 s
+inside the clip; a plan that can't fit keeps the shot as it was and says why. The plan from
+before the insert goes to the shot's plan history.
+
 Each keyframe is made in steps:
 
-1. **Plan the cuts**: the text model splits each shot's clip into 1-3 sub-shots, each with
+1. **Plan the cuts**: the text model splits each shot's clip into 1-3 sub-shots (a shot
+   holds up to 5: asked for by count, written by hand or inserted), each with
    its start, framing, camera, action, who is on screen and on which side of the frame,
    and who is off frame on which side. **Edit** changes them (and the clip's length); a
    shot with no plan is one sub-shot. Changing a sub-shot withdraws its approved keyframe
@@ -584,7 +604,7 @@ applies to the next storyboard revision and the next cut plan; shots already pla
 changed.
 
 **Per shot.** Next to **Plan cuts**, a shot can have its own **Pace** (else the story's) and
-**Cuts**: exactly 1, 2 or 3 sub-shots, or auto (the planner decides). The planner is told
+**Cuts**: exactly 1 to 5 sub-shots, or auto (the planner decides, at most 3). The planner is told
 both; a plan with another number of cuts goes back to it once, and the closer plan is kept.
 They are saved with the shot's plan, so a later re-plan uses them again until changed, and
 the shot's own pace judges its listener holds. `POST .../keyframes/{shot_id}/plan` takes

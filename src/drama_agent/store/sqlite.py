@@ -817,7 +817,7 @@ class SqliteRepository:
         self._exec(
             "INSERT INTO shot_takes (take_id, package_id, revision_id, shot_id, frame, status, "
             "created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (take_id) DO UPDATE "
-            "SET status = excluded.status, data = json_set(excluded.data, '$.approved', "
+            "SET status = excluded.status, frame = excluded.frame, data = json_set(excluded.data, '$.approved', "
             "json_extract(shot_takes.data, '$.approved'))",
             (take.take_id, take.package_id, take.revision_id, take.shot_id, str(take.sub_shot),
              take.status, take.created_at.isoformat(), take.model_dump_json()),

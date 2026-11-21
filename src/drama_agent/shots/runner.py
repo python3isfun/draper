@@ -22,8 +22,10 @@ from ..models.package import utcnow
 from ..models.storyboard import Shot
 from ..pace import story_pace
 from ..shot_reading import SceneReading
+from .approvals import is_busy
 from .common import KEYFRAME_SIZES, NotReady, intimate_scene, shot_of
 from .history import replace_plan
+from .inserts import carry_takes, kept_cuts
 from .judge import JudgeOutput, judge_instructions
 from .models import (
     CHECK_STAGE,
@@ -42,6 +44,8 @@ from .models import (
 )
 from .planner import (
     PlanOutput,
+    insert_context,
+    insert_rule,
     plan_context,
     plan_instructions,
     planned_sub_shots,
@@ -266,12 +270,15 @@ class ShotFrameRunner:
         *,
         pace: str | None = None,
         cuts: int | None = None,
+        insert: tuple[int, str] | None = None,
     ) -> None:
         """Write a shot's sub-shot plan in the background (the API has saved it as
         "writing", still holding the plan it replaces). Asked for: `clip_ms` (None: the
         storyboard's), the shot's `pace` (None: the story's) and `cuts` (None: the planner
-        decides). With `then` (plan_take's options), start sub-shot 1 afterwards."""
-        task = asyncio.create_task(self._plan(plan, then, clip_ms, pace, cuts))
+        decides). With `insert` (after cut, the director's note), the plan it holds gets one
+        cut more there (inserts.py). With `then` (plan_take's options), start a sub-shot's
+        keyframe afterwards (its `sub_shot`)."""
+        task = asyncio.create_task(self._plan(plan, then, clip_ms, pace, cuts, insert))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
@@ -282,10 +289,11 @@ class ShotFrameRunner:
         clip_ms: int | None,
         pace: str | None,
         cuts: int | None,
+        insert: tuple[int, str] | None = None,
     ) -> None:
         async with self._planning:
             try:
-                await self._write_plan(plan, clip_ms, pace, cuts)
+                await self._write_plan(plan, clip_ms, pace, cuts, insert)
             except asyncio.CancelledError:
                 plan.status, plan.error = "failed", "Interrupted. Plan it again."
                 self.repo.save_shot_plan(plan)
@@ -310,20 +318,32 @@ class ShotFrameRunner:
         await self.run(take.take_id)
 
     async def _write_plan(
-        self, plan: ShotPlan, clip_ms: int | None, pace: str | None, cuts: int | None
+        self,
+        plan: ShotPlan,
+        clip_ms: int | None,
+        pace: str | None,
+        cuts: int | None,
+        insert: tuple[int, str] | None = None,
     ) -> None:
         """Write the plan: `clip_ms`, `pace` and `cuts` as asked (None: the storyboard's
         clip, the story's pace, the planner's count). They are kept on the plan whether or
-        not it can be written, so the next try asks the same."""
+        not it can be written, so the next try asks the same. With `insert` (after cut, note),
+        the plan held gets one cut more and its takes move with their cuts (inserts.py)."""
         pkg = self.repo.get_package(plan.package_id, plan.revision_id)
         # The plan it replaces, as it is (the history keeps it so); this one changes below.
         previous = plan.model_copy(deep=True) if plan.sub_shots else None
+        # With an insert, the count is the plan's cuts and the new one (the API checked it has cuts).
+        asked = cuts if insert is None or previous is None else len(previous.sub_shots) + 1
         try:
             if pkg is None:
                 raise RuntimeError("the package revision is gone")
             shot = shot_of(pkg, plan.shot_id)
             context = plan_context(pkg, shot, clip_ms)
             judged_at = pace or story_pace(self.repo, pkg.package_id)
+            instructions = plan_instructions(judged_at, asked)
+            if insert is not None and previous is not None:
+                context |= insert_context(pkg, previous, *insert)
+                instructions += "\n\n" + insert_rule(previous, insert[0])
             # The better of the plan and its retry: fewer problems that aren't advisory, then
             # fewer problems. A retry asked for a judgement (a listener held) never costs a
             # plan that was otherwise clean.
@@ -331,15 +351,17 @@ class ShotFrameRunner:
             for attempt in range(2):  # once more with the problems of a plan that isn't clean
                 request = GenerationRequest(
                     stage=PLAN_STAGE,  # type: ignore[arg-type]
-                    instructions=plan_instructions(judged_at, cuts),
+                    instructions=instructions,
                     context=context,
                     attempt=attempt,
                 )
                 out = await self.text.generate(request, PlanOutput)
                 try:
                     subs = planned_sub_shots(pkg, shot, out, clip_ms, strict=False)
+                    if insert is not None and previous is not None:  # the cuts' views as they were
+                        subs = kept_cuts(previous.sub_shots, subs, insert[0])
                     # A wrong cut count is refused by no save, but was asked for: retried.
-                    problems = check_plan(pkg, shot, subs, judged_at, cuts)
+                    problems = check_plan(pkg, shot, subs, judged_at, asked)
                 except ValueError as exc:  # not a plan at all: retry, then give up
                     if attempt and kept is None:
                         raise
@@ -361,6 +383,11 @@ class ShotFrameRunner:
             plan.model = request.model or getattr(self.text, "model_id", None)
             if pkg is not None:
                 plan.design_print = design_print(pkg, shot_of(pkg, plan.shot_id))
+            plan.inserted_after = insert[0] if insert is not None and previous else None
+            if plan.inserted_after is not None and is_busy(
+                self.repo.list_shot_takes(plan.package_id, plan.revision_id), plan.shot_id
+            ):  # its takes are about to move: one being made would save itself back
+                raise RuntimeError("a keyframe of the shot was being made; insert the cut again")
             plan.status, plan.error = "done", None
         except Exception as exc:  # the previous plan (if any) stays; the user can plan again
             log.warning("sub-shot plan failed for %s", plan.shot_id, exc_info=True)
@@ -368,6 +395,12 @@ class ShotFrameRunner:
         plan.pace, plan.cuts = pace, cuts
         plan.updated_at = utcnow()
         if plan.status == "done" and pkg is not None:
+            if insert is not None and previous is not None:
+                # The existing cuts' takes move to their new numbers, approvals kept.
+                takes = self.repo.list_shot_takes(plan.package_id, plan.revision_id)
+                shot = shot_of(pkg, plan.shot_id)
+                for t in carry_takes(pkg, shot, previous, plan, insert[0], takes):
+                    self.repo.save_shot_take(t)
             # The plan it replaces goes to the history; approvals it no longer matches go.
             replace_plan(self.repo, pkg, shot_of(pkg, plan.shot_id), plan, "model",
                          previous=previous)  # fmt: skip

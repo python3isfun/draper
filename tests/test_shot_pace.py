@@ -43,7 +43,7 @@ def test_a_shot_is_planned_at_its_own_pace_and_cut_count(tmp_path):
         assert s["plan"]["pace"] is None and s["plan"]["cuts"] is None
 
         # Out of range or unknown is refused.
-        assert b.http.post(f"{b.base}/{sid}/plan", json={"cuts": 4}).status_code == 422
+        assert b.http.post(f"{b.base}/{sid}/plan", json={"cuts": 6}).status_code == 422
         assert b.http.post(f"{b.base}/{sid}/plan", json={"pace": "zippy"}).status_code == 422
 
 
