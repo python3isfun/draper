@@ -82,6 +82,44 @@ function updClassify(board) {
 }
 
 // ---------------------------------------------------------------------------------------
+// What a shot is doing now
+
+const UPD_STAGE = { pending: "waiting for its turn", writing: "writing the prompt", drawing: "drawing", checking: "checking" };
+
+// A busy shot's activity: its cuts being planned, or the take being made (its stage, round,
+// draws drawn and checked), with how far along the round is (0..1) and since when.
+function updActivity(s) {
+  if (s.plan.status === "writing") return { shot: s, text: "planning the cuts", frac: 0.05, since: null };
+  for (const sub of s.sub_shots) {
+    for (const t of sub.takes) {
+      if (!UPD_STAGE[t.status]) continue;
+      const drawn = t.results.length;
+      const checked = t.results.filter((d) => d.check || d.check_error || d.status === "failed").length;
+      const n = t.draws || 1;
+      const frac = t.status === "pending" ? 0 : t.status === "writing" ? 0.1
+        : t.status === "drawing" ? 0.15 + (0.55 * drawn) / n : 0.7 + (0.3 * checked) / n;
+      const stage = t.status === "drawing" ? `drawing ${Math.min(drawn + 1, n)} of ${n}`
+        : t.status === "checking" ? `checking ${Math.min(checked + 1, n)} of ${n}` : UPD_STAGE[t.status];
+      const round = t.max_rounds > 1 ? ` · round ${t.round} of up to ${t.max_rounds}` : "";
+      return { shot: s, text: `cut ${sub.index} of ${s.sub_shots.length}${round} · ${stage}`, frac, since: Date.parse(t.created_at) };
+    }
+  }
+  return { shot: s, text: "starting", frac: 0, since: null };
+}
+
+// One line per busy shot (at most `max`, then how many more).
+function updActivityList(shots, max = 6) {
+  if (!shots.length) return null;
+  const rows = shots.slice(0, max).map(updActivity);
+  return h("ul", { class: "plain small update-now" },
+    rows.map((a) => h("li", {},
+      h("span", { class: "update-dot", "aria-hidden": "true" }),
+      h("strong", {}, a.shot.shot_id), ` ${a.text}`,
+      a.since && h("span", { class: "muted", "data-since": a.since, "data-until": "", "data-clock": "" }, updClock(Date.now() - a.since)))),
+    shots.length > max && h("li", { class: "muted" }, `and ${shots.length - max} more`));
+}
+
+// ---------------------------------------------------------------------------------------
 // The steps
 
 const UPD_STEPS = [
@@ -207,7 +245,12 @@ async function updKeyframes(r, step) {
     for (const s of board.shots) if (shots.has(s.shot_id) && !s.busy) finished.add(s.shot_id);
     const running = shots.size - finished.size;
     step.done = finished.size;
-    const detail = running ? `${step.done} of ${shots.size} shots finished; ${running} drawing and checking` : `${shots.size} of ${shots.size} shots finished`;
+    step.finished = finished;
+    // The bar moves with each draw and check, not only when a whole shot is done.
+    const partial = board.shots.filter((s) => shots.has(s.shot_id) && !finished.has(s.shot_id))
+      .reduce((sum, s) => sum + updActivity(s).frac, 0);
+    step.frac = (finished.size + partial) / shots.size;
+    const detail = running ? `${step.done} of ${updPlural(shots.size, "shot")} finished; ${running} in progress:` : `${shots.size} of ${shots.size} shots finished`;
     if ((fresh && updLive(r, board)) || detail !== step.detail) {
       step.detail = detail;
       updRender();
@@ -452,14 +495,19 @@ function updAfterApproval(r, a) {
 function updApprovals(r, open) {
   if (!r.live) return null;
   const waiting = updWaiting(r.live);
-  const running = r.live.shots.filter((s) => s.busy).length;
+  // Busy shots the keyframe step doesn't list already (next cuts started by approving).
+  const kf = r.steps && r.steps.find((s) => s.key === "keyframes");
+  const listed = kf && kf.status === "running" && kf.shots ? kf.shots.filter((id) => !kf.finished || !kf.finished.has(id)) : [];
+  const busy = r.live.shots.filter((s) => s.busy && !listed.includes(s.shot_id));
+  const running = busy.length;
   if (!waiting.length && !r.approved.length && !(open && running)) return null;
   const shown = waiting.slice(0, r.shown);
   const body = [
     h("div", { class: "design-row small" },
       h("label", { class: "update-check" }, h("input", { type: "checkbox", checked: r.next, onchange: (e) => { r.next = e.target.checked; } }),
         " Approving a cut starts the next one (drawn from it)"),
-      running > 0 && h("span", { class: "chip info" }, `${running} drawing; new cuts appear here when drawn`)),
+      running > 0 && h("span", { class: "small muted" }, "New cuts appear here when drawn.")),
+    running > 0 && h("div", { class: "update-now-box" }, h("strong", { class: "small" }, `In progress (${running})`), updActivityList(busy)),
     r.actionError && h("p", { class: "form-error" }, r.actionError),
     r.pollError && h("p", { class: "form-error" }, r.pollError),
     shown.map((item) => updApproveCard(r, item)),
@@ -476,7 +524,7 @@ function updApprovals(r, open) {
         updShotLink(a.shot_id, "", "Details"),
         h("button", { type: "button", class: "btn ghost small", disabled: r.acting, "data-focus": `wd:${a.take.take_id}`, onclick: () => updWithdraw(r, a) }, "Withdraw"))))),
   ];
-  const title = `${updPlural(waiting.length, "cut")} waiting for your approval`;
+  const title = waiting.length ? `${updPlural(waiting.length, "cut")} waiting for your approval` : "Approvals";
   return open
     ? h("section", { class: "update-approvals" }, h("h3", {}, title), body)
     : stickyDetails("upd-approvals", title, body);
@@ -619,12 +667,18 @@ function updPlanView(r) {
 }
 
 const UPD_STATUS = { waiting: ["", "waiting"], running: ["info", "running"], done: ["ok", "done"], failed: ["bad", "failed"], skipped: ["", "skipped"], stopped: ["warn", "stopped"] };
+const updClock = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 const updMins = (ms) => (ms < 60000 ? `${Math.max(1, Math.round(ms / 1000))} s` : `${Math.round(ms / 60000)} min`);
 
 function updStepsView(r) {
   return h("ol", { class: "plain update-steps" }, r.steps.map((s, i) => {
     const [cls, word] = UPD_STATUS[s.status];
-    const pct = s.status === "running" && s.total ? Math.round((100 * (s.done || 0)) / s.total) : null;
+    const pct = s.status !== "running" || !s.total ? null
+      : Math.round(100 * (s.frac != null ? s.frac : (s.done || 0) / s.total));
+    // The keyframe step lists what each of its unfinished shots is doing.
+    const now = s.key === "keyframes" && s.status === "running" && r.live && s.shots
+      ? r.live.shots.filter((x) => s.shots.includes(x.shot_id) && !(s.finished && s.finished.has(x.shot_id)))
+      : [];
     return h("li", { class: `update-step ${s.status}` },
       h("div", { class: "update-step-head" },
         h("span", { class: `chip ${cls}` }, word),
@@ -633,6 +687,7 @@ function updStepsView(r) {
       s.status === "running" && h("div", { class: "update-bar", role: "progressbar", "aria-valuenow": pct ?? undefined },
         h("div", { class: pct == null ? "indeterminate" : "", style: pct == null ? "" : `width:${pct}%` })),
       s.detail && s.status === "running" && h("p", { class: "small muted" }, s.detail),
+      now.length > 0 && updActivityList(now),
       s.result && h("p", { class: "small" }, s.result));
   }));
 }
@@ -703,10 +758,11 @@ function updRender() {
   el.querySelector(".update-body").scrollTop = scrolled;
 }
 
-// While a step runs, its elapsed time ticks (only those labels change).
+// While the window is open, the elapsed times tick (only those labels change).
 setInterval(() => {
-  if (!updBusy() || !upd.el || upd.el.hidden) return;
+  if (!upd.el || upd.el.hidden) return;
   for (const span of upd.el.querySelectorAll("[data-since]")) {
-    span.textContent = updMins((Number(span.dataset.until) || Date.now()) - Number(span.dataset.since));
+    const ms = (Number(span.dataset.until) || Date.now()) - Number(span.dataset.since);
+    span.textContent = "clock" in span.dataset ? updClock(ms) : updMins(ms);
   }
 }, 1000);

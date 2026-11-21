@@ -833,3 +833,12 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .update-approved li { display: flex; align-items: center; gap: 8px; padding: 4px 0; flex-wrap: wrap; }
 .update-window label.update-check { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
 .update-window label.update-check input { width: auto; margin: 0; }
+/* Update all: what each busy shot is doing now */
+.update-now { margin: 6px 0 0; }
+.update-now li { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; padding: 2px 0; }
+.update-now li .muted:last-child { margin-left: auto; font-variant-numeric: tabular-nums; }
+.update-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--info); flex: none; align-self: center;
+  animation: update-pulse 1.2s ease-in-out infinite; }
+@keyframes update-pulse { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .update-dot { animation: none; } }
+.update-now-box { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 8px 0; background: var(--surface-2); }

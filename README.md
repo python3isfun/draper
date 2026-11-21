@@ -45,7 +45,7 @@ with no build step. It lets you:
   (`pipeline/revise.py`; `GET /v1/revisions/{id}` follows a run)
 - bring a story up to date in one go (**Update all** in the job's header,
   `web/update.js`): a window first lists what would be done and waits for a confirmation,
-  then runs the steps in order with their progress: redraw the out-of-date design
+  then runs the steps in order with their progress (each busy shot listed with its cut, round, stage such as "drawing 2 of 3" or "checking 1 of 3", and how long it has run): redraw the out-of-date design
   pictures and wait for the image queue; re-plan the out-of-date cut plans the model wrote
   (each keeps its own pace and cut count; plans you wrote are left to you); draw every
   keyframe that can be drawn without an approval (first keyframes, the next cut after an
