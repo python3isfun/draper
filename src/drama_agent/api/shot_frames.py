@@ -57,6 +57,8 @@ from ..shot_frames import (
 )
 from ..shot_reading import SceneReading, candidates, scene_shots
 from ..shots.history import replace_plan, restore_plan
+from ..shots.models import ShotVideoPrompt
+from ..shots.video_prompt import approved_frames, fingerprint, prompt_state
 from .schemas import UseKeyframeRequest
 
 
@@ -169,6 +171,12 @@ class ApproveRequest(BaseModel):
     next: bool = True
 
 
+class VideoPromptsRequest(BaseModel):
+    revision_id: str | None = None
+    # Only these shots (None: every shot whose prompt is missing, failed or out of date).
+    shot_ids: list[str] | None = None
+
+
 class KeyframeBoard(BaseModel):
     package_id: str
     revision_id: str
@@ -199,8 +207,9 @@ def register(
         images = repo.list_images(pkg.package_id, pkg.revision_id)
         versions = repo.list_prompt_versions(pkg.package_id, pkg.revision_id)
         readings = repo.list_scene_readings(pkg.package_id, pkg.revision_id)
+        prompts = repo.list_video_prompts(pkg.package_id, pkg.revision_id)
         shots = shot_board(pkg, images, takes, plans, versions, readings,
-                           story_pace(repo, pkg.package_id))  # fmt: skip
+                           story_pace(repo, pkg.package_id), prompts)  # fmt: skip
         history = repo.count_plan_versions(pkg.package_id, pkg.revision_id)
         for shot in shots:  # a take asked to pause says so until it does
             shot["plan"]["history"] = history.get(shot["shot_id"], 0)  # earlier plans
@@ -213,11 +222,38 @@ def register(
             image_model=image_model,
             busy=sum(1 for t in takes if t.busy)
             + sum(1 for p in plans if p.busy)
-            + sum(1 for r in readings if r.busy),
+            + sum(1 for r in readings if r.busy)
+            + sum(1 for p in prompts if p.busy),
             shots=shots,
             providers={name: c.model_id for name, c in runner.providers.items()},
             default_provider=runner.default_provider,
         )
+
+    def _start_prompt(pkg: ProductionPackage, shot_id: str) -> ShotVideoPrompt:
+        """Write the shot's video prompt in the background; the prompt it replaces stays
+        shown meanwhile."""
+        stored = repo.get_video_prompt(pkg.package_id, pkg.revision_id, shot_id)
+        vp = (stored.model_copy(update={"status": "writing", "error": None}) if stored
+              else ShotVideoPrompt(package_id=pkg.package_id, revision_id=pkg.revision_id,
+                                   shot_id=shot_id))  # fmt: skip
+        repo.save_video_prompt(vp)
+        runner.start_video_prompt(vp)
+        return vp
+
+    def _auto_prompt(pkg: ProductionPackage, shot: Shot) -> None:
+        """Once every cut of the shot has its approved keyframe, write its video prompt,
+        unless the one it has is current or being written."""
+        stored = repo.get_video_prompt(pkg.package_id, pkg.revision_id, shot.shot_id)
+        if stored is not None and stored.busy:
+            return
+        _, plan = _plan(pkg, shot)
+        frames = approved_frames(pkg, shot, plan,
+                                 repo.list_shot_takes(pkg.package_id, pkg.revision_id))  # fmt: skip
+        if not frames or not all(frames.values()):
+            return
+        context, ids = runner.video_inputs(pkg, shot)
+        if prompt_state(stored, fingerprint(context, ids)) != "current":
+            _start_prompt(pkg, shot.shot_id)
 
     def _take_or_404(take_id: str) -> ShotTake:
         take = repo.get_shot_take(take_id)
@@ -445,7 +481,53 @@ def register(
             raise HTTPException(404, f"{shot_id} has no plan version {version}") from None
         except ValueError as exc:
             raise HTTPException(422, f"That plan no longer fits the shot: {exc}") from None
+        _auto_prompt(pkg, shot)
         return RestoredPlan(plan=plan, keyframes_approved=back)
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/video-prompt",
+        status_code=202,
+        response_model=ShotVideoPrompt,
+    )
+    async def write_video_prompt(
+        package_id: str, shot_id: str, req: RevisionBody
+    ) -> ShotVideoPrompt:
+        """Write (or write again) the shot's H3 video prompt from its plan, keyframes and
+        scene reading as they are now (shots/video_prompt.py), in the background. It is
+        written on its own once every cut has an approved keyframe; this writes it sooner,
+        or again."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        stored = repo.get_video_prompt(pkg.package_id, pkg.revision_id, shot_id)
+        if stored is not None and stored.busy:
+            raise HTTPException(409, f"{shot_id}'s video prompt is being written")
+        stored_plan, _ = _plan(pkg, shot)
+        if stored_plan is not None and stored_plan.busy:
+            raise HTTPException(
+                409, f"{shot_id} is being planned; write its prompt once it is done"
+            )
+        return _start_prompt(pkg, shot_id)
+
+    @app.post("/v1/drama-packages/{package_id}/keyframes/video-prompts", status_code=202)
+    async def write_video_prompts(package_id: str, req: VideoPromptsRequest) -> dict[str, Any]:
+        """Write the video prompt of every shot (or of `shot_ids`) whose prompt is missing,
+        failed or out of date; shots being planned or written are skipped."""
+        pkg = _writable(package_id, req.revision_id)
+        board = {s["shot_id"]: s for s in _board(pkg).shots}
+        if req.shot_ids is not None and (unknown := set(req.shot_ids) - set(board)):
+            raise HTTPException(404, f"no shot {', '.join(sorted(unknown))}")
+        started, skipped = [], []
+        for shot_id, s in board.items():
+            if req.shot_ids is not None and shot_id not in req.shot_ids:
+                continue
+            if s["video_prompt"]["state"] == "current" and req.shot_ids is None:
+                continue
+            if s["video_prompt"]["state"] == "writing" or s["plan"]["status"] == "writing":
+                skipped.append(shot_id)
+                continue
+            _start_prompt(pkg, shot_id)
+            started.append(shot_id)
+        return {"started": started, "skipped": skipped}
 
     async def _save_version(
         pkg: ProductionPackage,
@@ -774,6 +856,7 @@ def register(
                         **runner.take_options(take.provider),  # the same provider
                     )
                 )
+        _auto_prompt(pkg, shot)
         return out
 
     @app.post("/v1/experiments/{session_id}/use-keyframe", status_code=201, response_model=ShotTake)
@@ -845,6 +928,8 @@ def register(
         if req.approve:
             take = repo.approve_shot_draw(take.take_id, 0)
         runner.start_check(take.take_id, recheck=False)
+        if req.approve:
+            _auto_prompt(pkg, shot)
         return take
 
     @app.delete("/v1/shot-takes/{take_id}/approve", response_model=ShotTake)

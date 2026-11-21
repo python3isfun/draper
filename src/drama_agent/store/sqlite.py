@@ -20,14 +20,16 @@ from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 from ..shot_frames import PromptVersion, ShotPlan, ShotPlanVersion, ShotTake, approval_changes
 from ..shot_reading import SceneReading
+from ..shots.models import ShotVideoPrompt
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
 # v4: generated_images. v5: design_options. v6: exp_sessions, exp_turns.
 # v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. v10: shot_prompts.
 # v11: scene_readings. v12: the asset library (library_assets, story_casting, asset_images).
 # v13: shot_plan_versions (story_settings came in at v12, without a bump).
+# v14: shot_video_prompts.
 # Each step is additive, so older files upgrade in place (see _migrate).
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -192,6 +194,14 @@ CREATE TABLE IF NOT EXISTS shot_plan_versions (
     data        TEXT NOT NULL,
     PRIMARY KEY (package_id, revision_id, shot_id, version)
 );
+CREATE TABLE IF NOT EXISTS shot_video_prompts (
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    shot_id     TEXT NOT NULL,
+    status      TEXT NOT NULL,              -- writing | done | failed
+    data        TEXT NOT NULL,
+    PRIMARY KEY (package_id, revision_id, shot_id)
+);
 CREATE TABLE IF NOT EXISTS shot_plans (
     package_id  TEXT NOT NULL,
     revision_id TEXT NOT NULL,
@@ -210,7 +220,7 @@ _NOT_ARCHIVED = "coalesce(json_extract(data, '$.archived'), 0) = 0"
 # Tables of a story's work kept per revision; a published revise run moves them forward.
 _REVISION_TABLES = (
     "generated_images", "design_options", "shot_takes", "shot_prompts", "shot_plans",
-    "shot_plan_versions", "scene_readings",
+    "shot_plan_versions", "scene_readings", "shot_video_prompts",
 )  # fmt: skip
 
 
@@ -1102,6 +1112,44 @@ class SqliteRepository:
             r = SceneReading.model_validate_json(raw)
             r.status, r.error = "failed", error
             self.save_scene_reading(r)
+        return len(rows)
+
+    def save_video_prompt(self, prompt: ShotVideoPrompt) -> None:
+        self._exec(
+            "INSERT INTO shot_video_prompts (package_id, revision_id, shot_id, status, data) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (package_id, revision_id, shot_id) DO UPDATE "
+            "SET status = excluded.status, data = excluded.data",
+            (prompt.package_id, prompt.revision_id, prompt.shot_id, prompt.status,
+             prompt.model_dump_json()),
+        )  # fmt: skip
+
+    def get_video_prompt(
+        self, package_id: str, revision_id: str, shot_id: str
+    ) -> ShotVideoPrompt | None:
+        raw = self._one(
+            "SELECT data FROM shot_video_prompts WHERE package_id = ? AND revision_id = ? "
+            "AND shot_id = ?",
+            (package_id, revision_id, shot_id),
+        )
+        return ShotVideoPrompt.model_validate_json(raw) if raw else None
+
+    def list_video_prompts(self, package_id: str, revision_id: str) -> list[ShotVideoPrompt]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM shot_video_prompts WHERE package_id = ? AND revision_id = ?",
+                (package_id, revision_id),
+            ).fetchall()
+        return [ShotVideoPrompt.model_validate_json(r[0]) for r in rows]
+
+    def fail_unfinished_video_prompts(self, error: str) -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM shot_video_prompts WHERE status = 'writing'"
+            ).fetchall()
+        for (raw,) in rows:
+            p = ShotVideoPrompt.model_validate_json(raw)
+            p.status, p.error = "failed", error
+            self.save_video_prompt(p)
         return len(rows)
 
     def fail_unfinished_shot_takes(self, error: str) -> int:

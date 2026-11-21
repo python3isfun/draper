@@ -96,6 +96,10 @@ class FixtureModelClient:
                 from ..shot_frames import fixture_plan
 
                 output = fixture_plan(request)
+            case "video_prompt":
+                from ..shots.video_prompt import fixture_video_prompt
+
+                output = fixture_video_prompt(request)
             case "shot_reading":
                 from ..shot_reading import fixture_reading
 

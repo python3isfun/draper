@@ -152,6 +152,41 @@ class ShotPlan(BaseModel):
         return next((s for s in self.sub_shots if s.index == index), None)
 
 
+class PromptBlock(BaseModel):
+    """One cut of a shot's video prompt: its text (pictures as `{pic:<id>}`) and its camera
+    sentence, kept apart so video production can swap it."""
+
+    sub_shot: int = Field(ge=1)
+    text: str
+    camera: str
+
+
+class ShotVideoPrompt(BaseModel):
+    """A shot's H3 video prompt (video_prompt.py), written by the text model from the plan,
+    keyframes and scene reading in force, recorded as `written_from`: once they change it is
+    out of date. Pictures are `{pic:<ref id>}`. `problems` make it unusable (it isn't
+    exported); `advice` are weaker findings, kept for a person to judge."""
+
+    package_id: str
+    revision_id: str
+    shot_id: str
+    status: Literal["writing", "done", "failed"] = "writing"
+    source: Literal["model", "template"] = "model"
+    blocks: list[PromptBlock] = Field(default_factory=list)
+    sound: str = ""
+    notes: str = ""
+    problems: list[str] = Field(default_factory=list)
+    advice: list[str] = Field(default_factory=list)
+    written_from: str = ""  # the fingerprint of its inputs (video_prompt.fingerprint)
+    model: str | None = None
+    error: str | None = None
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    @property
+    def busy(self) -> bool:
+        return self.status == "writing"
+
+
 class ShotPlanVersion(BaseModel):
     """A shot's cut plan as it was before it was replaced (by the planner, a person or a
     restore), with the keyframes approved for it then ({take_id: draw n}), so it can be

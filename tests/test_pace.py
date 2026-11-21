@@ -141,7 +141,7 @@ def busiest_id(b) -> str:
 
 
 def test_the_references_are_cut_to_nine_in_order(package, monkeypatch):
-    import drama_agent.shot_specs as specs
+    import drama_agent.shots.clip_refs as specs
 
     monkeypatch.setattr(specs, "VIDEO_MAX_REFERENCES", 3)
     shot = busiest(package)

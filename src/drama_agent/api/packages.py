@@ -116,6 +116,7 @@ def register(app: FastAPI, ctx: Any) -> None:
                 plans=repo.list_shot_plans(pkg.package_id, pkg.revision_id),
                 readings=repo.list_scene_readings(pkg.package_id, pkg.revision_id),
                 pace=story_pace(repo, pkg.package_id),
+                video_prompts=repo.list_video_prompts(pkg.package_id, pkg.revision_id),
             )
         except BaseException:
             tmp.unlink(missing_ok=True)

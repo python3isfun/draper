@@ -12,6 +12,7 @@ from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 from ..shot_frames import PromptVersion, ShotPlan, ShotPlanVersion, ShotTake, approval_changes
 from ..shot_reading import SceneReading
+from ..shots.models import ShotVideoPrompt
 
 
 class Repository(Protocol):
@@ -99,6 +100,12 @@ class Repository(Protocol):
     ) -> SceneReading | None: ...
     def list_scene_readings(self, package_id: str, revision_id: str) -> list[SceneReading]: ...
     def fail_unfinished_scene_readings(self, error: str) -> int: ...
+    def save_video_prompt(self, prompt: ShotVideoPrompt) -> None: ...
+    def get_video_prompt(
+        self, package_id: str, revision_id: str, shot_id: str
+    ) -> ShotVideoPrompt | None: ...
+    def list_video_prompts(self, package_id: str, revision_id: str) -> list[ShotVideoPrompt]: ...
+    def fail_unfinished_video_prompts(self, error: str) -> int: ...
     # The asset library (library/): characters, sets, their looks, states and items
     def list_package_ids(self) -> list[str]: ...
     def save_library_asset(self, asset: LibraryAsset) -> None: ...
@@ -145,6 +152,7 @@ class InMemoryRepository:
         self.plan_versions: list[ShotPlanVersion] = []
         self.prompt_versions: list[PromptVersion] = []
         self.scene_readings: dict[tuple[str, str, str], SceneReading] = {}
+        self.video_prompts: dict[tuple[str, str, str], ShotVideoPrompt] = {}
         self.library: dict[str, LibraryAsset] = {}
         self.casting: dict[tuple[str, str], Casting] = {}
         self.asset_images: dict[str, AssetImage] = {}
@@ -238,7 +246,7 @@ class InMemoryRepository:
                 if row.package_id == package_id and row.revision_id == from_revision:
                     store[key] = row.model_copy(update={"revision_id": to_revision})
                     moved += 1
-        for keyed in (self.shot_plans, self.scene_readings):
+        for keyed in (self.shot_plans, self.scene_readings, self.video_prompts):
             for key, row in list(keyed.items()):
                 if row.package_id == package_id and row.revision_id == from_revision:
                     del keyed[key]
@@ -496,6 +504,27 @@ class InMemoryRepository:
         for r in self.scene_readings.values():
             if r.busy:
                 r.status, r.error, n = "failed", error, n + 1
+        return n
+
+    def save_video_prompt(self, prompt: ShotVideoPrompt) -> None:
+        key = (prompt.package_id, prompt.revision_id, prompt.shot_id)
+        self.video_prompts[key] = prompt.model_copy(deep=True)
+
+    def get_video_prompt(
+        self, package_id: str, revision_id: str, shot_id: str
+    ) -> ShotVideoPrompt | None:
+        p = self.video_prompts.get((package_id, revision_id, shot_id))
+        return p.model_copy(deep=True) if p else None
+
+    def list_video_prompts(self, package_id: str, revision_id: str) -> list[ShotVideoPrompt]:
+        return [p.model_copy(deep=True) for (pid, rid, _), p in self.video_prompts.items()
+                if (pid, rid) == (package_id, revision_id)]  # fmt: skip
+
+    def fail_unfinished_video_prompts(self, error: str) -> int:
+        n = 0
+        for p in self.video_prompts.values():
+            if p.busy:
+                p.status, p.error, n = "failed", error, n + 1
         return n
 
     # The asset library ---------------------------------------------------

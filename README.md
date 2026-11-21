@@ -504,9 +504,38 @@ the shot before it in the scene, when there is one, so light, set dressing and e
 carry across the cut. Each prompt version keeps the pictures it was written for. The export's
 `sub_shots.json` gives each cut's `now`: every person's state and their chosen picture.
 
+**Each shot's H3 video prompt is written here.** Once every cut of a shot has an approved
+keyframe, the text model writes the shot's MiniMax H3 video prompt (the `video_prompt` step,
+`shots/video_prompt.py`) from the same plan, keyframes, scene reading and pictures, to the H3
+video prompt skill dramer's renders were measured against: where the camera stands before the
+set, every person bound to their pictures and clothes in one sentence, every line quoted word
+for word after "says in English:" with whose lips move, only what is there (never what isn't),
+the action timed to the cut, one camera sentence in MiniMax's wording, and one sound sentence
+last. It is one block per cut, with no timestamps (dramer adds "[Shot N] At <timecode>" from
+the plan), and names pictures as `{pic:...}`. A program then checks it: each cut's lines word
+for word and in order, every picture sent named and no other, no one who isn't in the shot
+named (not even "off frame"), a camera sentence per cut, and under H3's 7,000 characters; and,
+as advice, negations, a speaking verb with no quoted line, a silent cut that doesn't say so,
+missing lips or sound sentences, camera wording, and 150 to 500 words. With findings, it is
+written once more with them, and the better of the two is kept. On the Keyframes tab
+(**Details**), each shot shows its prompt with the pictures as labels, its state (not
+written, writing, current, out of date, failed), its findings and the shot's dialogue pace
+(more spoken words than the clip holds at about 2.5 words a second). **Write prompt** / **Write
+again** writes it sooner or again, and **Write video prompts** writes every shot's that is
+missing, failed or out of date. A prompt is out of date as soon as what it was written from
+changes (the plan, an approved keyframe, a chosen picture, a line).
+
 **The shot specs are the contract for video production.**
-`03_storyboard/shot_specs.json` (`spec_version` 2) gives, per shot, everything dramer makes
+`03_storyboard/shot_specs.json` (`spec_version` 3) gives, per shot, everything dramer makes
 the clip from, so dramer stores and sends it instead of working it out again:
+
+- `prompt` (new in version 3): the shot's video prompt in format `h3-paragraph/1`: `blocks`
+  (one per cut: `sub_shot`, `text`, `camera`, the camera sentence kept apart so a series
+  style can swap it), `sound`, `notes`, `advice` (the check's weaker findings), `model` and
+  `written_at`. Pictures are `{pic:<file name>}`, the name of a file in `references`;
+  dramer turns each into `<Picture N>` in the order it sends and drops the sentences of a
+  picture it doesn't send. Null when the shot has no current prompt that passes the hard
+  checks (`not_ready` says why); dramer then writes one itself;
 
 - `spec`, in dramer's shape: `summary`, `action`, `camera`, `lighting` (from the set sheet),
   `target_duration_ms` (the plan's clip, or the storyboard's length for an unplanned shot),
@@ -516,24 +545,29 @@ the clip from, so dramer stores and sends it instead of working it out again:
   people's states; null for a shot nobody planned that has no keyframe);
 - `references`: the pictures to send, in priority order, each with `file` (a path from the
   export's root), `kind` (keyframe, chosen, look, face, set, prop), `entity_id`, `name`,
-  `sub_shots` (the cuts a keyframe or a chosen picture is for) and `likeness`. A shot whose
-  every cut has an approved keyframe is `keyframe_first`: its keyframes, then the faces (to
-  hold each likeness), the props, each person's picture and the set. Any other shot: its
-  keyframes, each person's picture (the reading's choice, else the storyboard look), the set,
-  the props, the pictures chosen for later cuts, then the faces. Keyframes are references the
+  `sub_shots` (the cuts a keyframe or a chosen picture is for), `likeness` and `named`
+  (whether the prompt names it; null without a prompt). Keyframes and faces always come first
+  (`shots/clip_refs.py`), so a consumer that sends fewer keeps those. A shot whose every cut
+  has an approved keyframe is `keyframe_first`: its keyframes, the faces, then the props,
+  each person's picture and the set. Any other shot: its keyframes, the faces, each person's
+  picture (the reading's choice, else the storyboard look), the set, the props, then the
+  pictures chosen for later cuts. Keyframes are references the
   video matches, not start frames. At most `max_references` (9, what dramer sends H3 with a
   clip) are listed; those that didn't fit are in `references_left_out`, and a consumer with a smaller
   limit drops from the end;
 - `cast`: each person, the place and each prop with a note (a person as the reading found
   them in their first cut, else their storyboard look);
 - `ready`, and `not_ready` saying why not: the plan's problems, each cut with no approved
-  keyframe, any line the shot list cues that the script no longer has, and keyframe work
-  still running on it (`keyframe_work_running`);
+  keyframe, any line the shot list cues that the script no longer has, keyframe work still
+  running on it (`keyframe_work_running`, a prompt being written included), and no current
+  video prompt;
+- `warnings`: worth a look, not blocking: more spoken words than the clip holds at a slow
+  read (about 2.5 words a second);
 - `spec.carried`: the lines spoken in the shot before that run over the cut into this one
   (also noted in `continuity_notes`).
 
 At the top, `pace` is the story's pace and `readiness` says how far the keyframe pass has got:
-shots and shots ready, cuts planned and cuts with an approved keyframe, shots with keyframe
+shots and shots ready, shots with a prompt, cuts planned and cuts with an approved keyframe, shots with keyframe
 work still running (a plan being written, a keyframe drawn or checked), and a `note` for
 production: still running (don't render from this revision yet), complete, or what is missing.
 People in each cut's `people`, `placement` and `off_screen` are named as on the cast sheet,
@@ -853,7 +887,8 @@ restart, and separate worker processes aren't possible.
 **Per-step models.** `MCPHUB_MODEL` is the default for every pipeline step. Override it
 for individual steps with `MCPHUB_MODEL_INGEST`, `MCPHUB_MODEL_OUTLINE`,
 `MCPHUB_MODEL_SCRIPT`, `MCPHUB_MODEL_STORYBOARD`, `MCPHUB_MODEL_REVIEW` and the keyframe steps
-(`MCPHUB_MODEL_SHOT_PLAN`, `_SHOT_FRAMES`, `_SHOT_CHECK`, `_SHOT_READING`; reading a scene
+(`MCPHUB_MODEL_SHOT_PLAN`, `_SHOT_FRAMES`, `_SHOT_CHECK`, `_SHOT_READING`,
+`_VIDEO_PROMPT`; reading a scene
 defaults to `gpt-6-luna`), e.g. a cheaper
 model for the light steps:
 
@@ -917,7 +952,8 @@ src/drama_agent/
                    images.py re-exports it all under the old names
   shots/           Shot keyframes: models.py, common.py, picks.py, plans.py, history.py,
                    approvals.py, staleness.py, references.py, takes.py, writer.py, planner.py,
-                   judge.py,
+                   judge.py, inserts.py, clip_refs.py (the pictures a clip is sent with),
+                   video_prompt.py (the shot's H3 video prompt),
                    runner.py (ShotFrameRunner), board.py. shot_frames.py re-exports it all
   library/         The asset library: characters and sets across stories (models, sync,
                    views, matching, reuse)

@@ -10,12 +10,22 @@ from ..models import ProductionPackage
 from ..models.images import GeneratedImage
 from ..shot_reading import SceneReading
 from .approvals import approved_take
+from .clip_refs import exportable
 from .common import _names, intimate_scene
-from .models import PromptVersion, ShotPlan, ShotTake
+from .models import PromptVersion, ShotPlan, ShotTake, ShotVideoPrompt
 from .picks import shot_picks
 from .plans import current_sub, plan_of, plan_problems, shot_lines, sub_shot_lines
 from .references import sub_shot_references
 from .staleness import keyframe_judge, outdated_keyframes, plan_outdated
+from .video_prompt import (
+    approved_frames,
+    carried_lines,
+    dialogue_pace,
+    fingerprint,
+    prompt_inputs,
+    prompt_state,
+    word_count,
+)
 
 # ---------------------------------------------------------------------------
 # Board view
@@ -29,11 +39,13 @@ def shot_board(
     versions: list[PromptVersion] | None = None,
     readings: list[SceneReading] | None = None,
     pace: str | None = None,
+    video_prompts: list[ShotVideoPrompt] | None = None,
 ) -> list[dict[str, Any]]:
     """Every shot with its sub-shot plan and its scene's reading, and per sub-shot what it
     draws from (each person's chosen picture, state and why), what is missing, its prompt
     versions, its takes and its approved keyframe. With the story's `pace`, a plan's
-    problems include a listener held longer than it allows."""
+    problems include a listener held longer than it allows. Each shot also has its video
+    prompt (video_prompt.py): how it stands against the shot as it is now, and its text."""
     names = _names(pkg)
     stored = {p.shot_id: p for p in plans}
     judge = keyframe_judge(pkg, images, takes)
@@ -43,6 +55,9 @@ def shot_board(
     for scene_id in {s.scene_id for s in pkg.shot_list}:
         print_ = shot_reading.fingerprint(pkg, scene_id, stored, images)
         fresh_of[scene_id] = shot_reading.fresh(by_scene.get(scene_id), print_)
+    prompts = {p.shot_id: p for p in video_prompts or []}
+    usable = exportable(images)
+    carried = carried_lines(pkg)
     out = []
     for shot in pkg.shot_list:
         reading = fresh_of.get(shot.scene_id)
@@ -137,6 +152,46 @@ def shot_board(
                 "cuts": plan.cuts,
             },
             "sub_shots": subs,
+            "video_prompt": video_prompt_view(
+                pkg, shot, plan, takes, images, reading, prompts.get(shot.shot_id), usable,
+                carried,
+            ),
             "busy": (own is not None and own.busy) or any(t.busy for t in mine),
         })  # fmt: skip
     return out
+
+
+def video_prompt_view(
+    pkg: ProductionPackage,
+    shot: Any,
+    plan: ShotPlan,
+    takes: list[ShotTake],
+    images: list[GeneratedImage],
+    reading: SceneReading | None,
+    stored: ShotVideoPrompt | None,
+    usable: set[str],
+    carried: set[tuple[str, str]],
+) -> dict[str, Any]:
+    """A shot's video prompt for the board: its state against the shot now (none, writing,
+    failed, current, outdated), its text and findings, a label for each picture it names
+    (by ref id), the shot's dialogue-pace warning, and whether every cut has its approved
+    keyframe (when it is written on its own)."""
+    context, ids = prompt_inputs(pkg, shot, plan, takes, images, reading, usable, carried)
+    labels = {}
+    for p in context["pictures"]:
+        ref = ids[p["pic"][5:-1]]
+        kind = {"chosen": "look", "keyframe": "keyframe"}.get(p["kind"], p["kind"])
+        labels[ref] = (f"keyframe of cut {p['cuts'][0]}" if p["kind"] == "keyframe" and p["cuts"]
+                       else f"{p['of']} \u00b7 {kind}" if p["of"] else kind)  # fmt: skip
+    frames = approved_frames(pkg, shot, plan, takes)
+    view: dict[str, Any] = {
+        "state": prompt_state(stored, fingerprint(context, ids)),
+        "pictures": labels,
+        "pace": dialogue_pace(pkg, shot, plan.sub_shots[-1].end_ms, carried),
+        "keyframes_done": bool(frames) and all(frames.values()),
+    }
+    if stored is not None:
+        view |= stored.model_dump(mode="json", include={
+            "blocks", "sound", "notes", "problems", "advice", "error", "model", "updated_at"})  # fmt: skip
+        view["words"] = word_count(stored.blocks, stored.sound)
+    return view

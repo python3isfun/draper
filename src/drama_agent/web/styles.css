@@ -917,3 +917,8 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .sb-insert textarea { width: 100%; }
 .sb-insert label { display: inline-flex; align-items: center; gap: 4px; }
 .sb-insert label input { width: auto; margin: 0; }
+
+/* Video prompt (Keyframes, Details) */
+.vp-block { margin: 6px 0; }
+.vp-text { white-space: pre-wrap; line-height: 1.5; }
+.chip.vp-pic { font-size: 11px; padding: 0 6px; vertical-align: baseline; }

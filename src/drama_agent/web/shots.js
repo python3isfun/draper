@@ -690,6 +690,50 @@ function renderSubShot(pkg, shot, sub, total) {
     !blocked && renderNewFrameTake(pkg, shot, sub));
 }
 
+// The shot's H3 video prompt (shots/video_prompt.py): written from its plan, keyframes and
+// reading once every cut has an approved keyframe (or sooner, by hand), checked by rule, and
+// exported while it is current. Pictures show as chips with what they are.
+const VP_STATE = {
+  none: ["", "not written"], writing: ["info", "writing…"], failed: ["bad", "failed"],
+  current: ["ok", "current"], outdated: ["warn", "out of date"],
+};
+function vpText(text, pictures) {
+  return text.split(/(\{pic:[^{}\s]+\})/).map((part) => {
+    const m = part.match(/^\{pic:([^{}\s]+)\}$/);
+    return m ? h("span", { class: "chip vp-pic", title: m[1] }, pictures[m[1]] || "picture not sent") : part;
+  });
+}
+function renderVideoPrompt(pkg, shot) {
+  const vp = shot.video_prompt;
+  if (!vp) return null;
+  const [kind, label] = VP_STATE[vp.state] || ["", vp.state];
+  const blocks = vp.blocks || [];
+  const hint = vp.state === "none" && !vp.keyframes_done ? "It is written on its own once every cut has an approved keyframe." : "";
+  return h("div", { class: "plan vp" },
+    h("div", { class: "take-head" },
+      h("h4", { style: "margin:0" }, "Video prompt"),
+      h("span", { class: `chip ${kind}`, title: vp.state === "outdated" ? "The plan, keyframes or pictures changed since it was written; the export leaves it out" : "" }, label),
+      blocks.length > 0 && h("span", { class: "muted small" }, `${vp.words} words${vp.model ? ` · ${vp.model}` : ""}`),
+      h("span", { class: "take-actions" },
+        h("button", { type: "button", class: "btn ghost small", disabled: vp.state === "writing" || shot.plan.status === "writing",
+          title: "Write the H3 video prompt from this shot's plan, keyframes and pictures as they are now",
+          onclick: (e) => frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/video-prompt`, e.currentTarget, { revision_id: pkg.revision_id }) },
+          blocks.length ? "Write again" : "Write prompt"))),
+    hint && h("p", { class: "small muted" }, hint),
+    vp.pace && h("p", { class: "small warn-text" }, `Dialogue: ${vp.pace}.`),
+    vp.error && h("p", { class: "small warn-text" }, vp.error),
+    (vp.problems || []).length > 0 && h("div", { class: "small warn-text" },
+      h("strong", {}, "Not exported: "), h("ul", { class: "plain" }, vp.problems.map((x) => h("li", {}, x)))),
+    blocks.map((b) => h("div", { class: "vp-block" },
+      h("div", { class: "small" }, h("strong", {}, blocks.length > 1 ? `[Shot ${b.sub_shot}]` : "Shot"), h("span", { class: "muted" }, ` · camera: ${b.camera}`)),
+      h("p", { class: "small vp-text" }, vpText(b.text, vp.pictures || {})))),
+    vp.sound && h("p", { class: "small vp-text" }, h("strong", {}, "Sound: "), vp.sound),
+    vp.notes && h("p", { class: "small muted" }, `Notes: ${vp.notes}`),
+    (vp.advice || []).length > 0 && h("details", { class: "small muted" },
+      h("summary", {}, `${vp.advice.length} thing${vp.advice.length > 1 ? "s" : ""} the check would improve`),
+      h("ul", { class: "plain" }, vp.advice.map((x) => h("li", {}, x)))));
+}
+
 function renderShotCard(pkg, shot) {
   const subs = shot.sub_shots;
   const done = subs.filter((s) => s.approved).length;
@@ -705,6 +749,7 @@ function renderShotCard(pkg, shot) {
     renderPlan(pkg, shot),
     renderReading(pkg, shot),
     subs.map((s) => renderSubShot(pkg, shot, s, subs.length)),
+    renderVideoPrompt(pkg, shot),
   );
 }
 
@@ -998,6 +1043,9 @@ function renderKeyframes(pkg) {
   const subApproved = shots.reduce((n, s) => n + s.sub_shots.filter((x) => x.approved).length, 0);
   const blocked = shots.filter((s) => s.sub_shots[0].missing.length).length;
   const outdated = shots.filter((s) => s.sub_shots.some((x) => (x.outdated || []).length)).length;
+  const vpState = (s) => (s.video_prompt || {}).state;
+  const prompted = shots.filter((s) => vpState(s) === "current").length;
+  const unwritten = shots.filter((s) => ["none", "failed", "outdated"].includes(vpState(s))).length;
   const episodes = [...new Set(shots.map((s) => s.episode_id))];
   const shown = frames.episode === "all" ? shots : shots.filter((s) => s.episode_id === frames.episode);
   const controls = h("section", { class: "card" },
@@ -1009,6 +1057,7 @@ function renderKeyframes(pkg) {
       h("span", { class: "chip" }, `${subApproved}/${subTotal} sub-shot keyframes approved`),
       blocked > 0 && h("span", { class: "chip warn" }, `${blocked} waiting for design picks`),
       outdated > 0 && h("span", { class: "chip warn", title: "Approved keyframes drawn before a design change" }, `${outdated} with out-of-date keyframes`),
+      h("span", { class: `chip ${prompted === shots.length ? "ok" : ""}`, title: "Shots whose H3 video prompt is current: written from the plan, keyframes and pictures as they are" }, `${prompted}/${shots.length} video prompts`),
       v.busy > 0 && h("span", { class: "chip info" }, `${v.busy} running`)),
     h("div", { class: "design-row" },
       h("label", {}, "Draws ", numberSelect(frames.draws, 4, (n) => { frames.draws = n; }, "Draws per round")),
@@ -1028,6 +1077,11 @@ function renderKeyframes(pkg) {
         if (out) frames.notes = out.skipped.map((s) => `${s.shot_id}: ${s.reason}`);
         framesRender();
       } }, `Redraw out-of-date keyframes (${outdated} shots)`),
+      unwritten > 0 && h("button", { type: "button", class: "btn", title: "Write the H3 video prompt of every shot whose prompt is missing, failed or out of date (each shot's prompt is otherwise written once all its cuts have approved keyframes)", onclick: async (e) => {
+        const out = await frameAction(`${framesBase(pkg)}/video-prompts`, e.currentTarget, { revision_id: pkg.revision_id });
+        if (out) frames.notes = out.skipped.map((id) => `${id}: still being planned or written`);
+        framesRender();
+      } }, `Write video prompts (${unwritten} shots)`),
       episodes.length > 1 && h("select", { "aria-label": "Episode", onchange: (e) => { frames.episode = e.target.value; framesRender(); } },
         h("option", { value: "all", selected: frames.episode === "all" }, "All episodes"),
         episodes.map((ep) => h("option", { value: ep, selected: frames.episode === ep }, ep)))),

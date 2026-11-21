@@ -38,6 +38,7 @@ from .models import (
     PromptVersion,
     ShotPlan,
     ShotTake,
+    ShotVideoPrompt,
     SubShot,
     TakeStatus,
     score,
@@ -50,10 +51,21 @@ from .planner import (
     plan_instructions,
     planned_sub_shots,
 )
-from .plans import CUT_COUNT, TOO_LONG, advisory, check_plan
+from .plans import CUT_COUNT, TOO_LONG, advisory, check_plan, plan_of
 from .references import sub_shot_references
 from .staleness import design_print, keyframe_judge
 from .takes import next_round, plan_take
+from .video_prompt import (
+    VIDEO_PROMPT_STAGE,
+    VideoPromptOutput,
+    fingerprint,
+    others_of,
+    prompt_inputs,
+    to_refs,
+    video_instructions,
+    worse,
+)
+from .video_prompt import prompt_findings as video_findings
 from .writer import (
     FramePromptOutput,
     is_hard,
@@ -134,6 +146,7 @@ class ShotFrameRunner:
             self.repo.fail_unfinished_shot_takes(error)
             + self.repo.fail_unfinished_shot_plans(error)
             + self.repo.fail_unfinished_scene_readings(error)
+            + self.repo.fail_unfinished_video_prompts(error)
         )
 
     # -- reading the scene (shot_reading.py) ----------------------------------
@@ -406,6 +419,79 @@ class ShotFrameRunner:
                          previous=previous)  # fmt: skip
         else:
             self.repo.save_shot_plan(plan)
+
+    # -- the shot's video prompt (video_prompt.py) ------------------------------
+
+    def video_inputs(
+        self, pkg: ProductionPackage, shot: Shot
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """What the shot's video prompt is written from now, and its pictures' ids."""
+        plan = plan_of(pkg, shot, self.repo.get_shot_plan(pkg.package_id, pkg.revision_id,
+                                                          shot.shot_id))  # fmt: skip
+        return prompt_inputs(
+            pkg, shot, plan,
+            self.repo.list_shot_takes(pkg.package_id, pkg.revision_id),
+            self.repo.list_images(pkg.package_id, pkg.revision_id),
+            self.fresh_reading(pkg, shot.scene_id),
+        )  # fmt: skip
+
+    def start_video_prompt(self, vp: ShotVideoPrompt) -> None:
+        """Write a shot's video prompt in the background (the API saved it as "writing",
+        still holding the prompt it replaces)."""
+        task = asyncio.create_task(self._video_prompt(vp))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _video_prompt(self, vp: ShotVideoPrompt) -> None:
+        async with self._planning:
+            try:
+                await self._write_video_prompt(vp)
+            except asyncio.CancelledError:
+                vp.status, vp.error = "failed", "Interrupted. Write it again."
+                self.repo.save_video_prompt(vp)
+                raise
+            except Exception as exc:  # the prompt it replaces stays shown, marked failed
+                log.warning("video prompt failed for %s", vp.shot_id, exc_info=True)
+                vp.status = "failed"
+                vp.error = f"The video prompt couldn't be written: {str(exc)[:300]}"
+                vp.updated_at = utcnow()
+                self.repo.save_video_prompt(vp)
+
+    async def _write_video_prompt(self, vp: ShotVideoPrompt) -> None:
+        """Write the prompt, check it, and once more with what the check found (the better
+        of the two is kept, its findings with it)."""
+        pkg = self.repo.get_package(vp.package_id, vp.revision_id)
+        if pkg is None:
+            raise RuntimeError("the package revision is gone")
+        shot = shot_of(pkg, vp.shot_id)
+        context, ids = self.video_inputs(pkg, shot)
+        others = others_of(pkg, shot)
+        kept: tuple[VideoPromptOutput, tuple[list[str], list[str]]] | None = None
+        ask = context
+        request = None
+        for attempt in range(2):
+            request = GenerationRequest(
+                stage=VIDEO_PROMPT_STAGE,  # type: ignore[arg-type]
+                instructions=video_instructions(),
+                context=ask,
+                attempt=attempt,
+            )
+            out = await self.text.generate(request, VideoPromptOutput)
+            found = video_findings(out, context, others)
+            if kept is None or not worse(found, kept[1]):
+                kept = (out, found)
+            if not found[0] and not found[1]:
+                break
+            ask = context | {"previous": out.model_dump(), "problems": [*found[0], *found[1]]}
+        assert kept is not None and request is not None
+        out, (vp.problems, vp.advice) = kept
+        vp.blocks = [b.model_copy(update={"text": to_refs(b.text, ids)}) for b in out.blocks]
+        vp.sound, vp.notes = out.sound.strip(), out.notes.strip()
+        vp.written_from = fingerprint(context, ids)
+        vp.model = request.model or getattr(self.text, "model_id", None)
+        vp.source = "model"
+        vp.status, vp.error, vp.updated_at = "done", None, utcnow()
+        self.repo.save_video_prompt(vp)
 
     async def aclose(self) -> None:
         for t in list(self._tasks):

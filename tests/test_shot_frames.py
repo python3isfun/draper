@@ -1682,10 +1682,12 @@ def test_shot_specs_are_complete_for_video_production(package):
     plan = two_cuts(package, shot)
     frames = {(shot.shot_id, 1): "a_s1.jpg", (shot.shot_id, 2): "a_s2.jpg"}
     out = _specs(package, [plan], frames)
-    assert out["spec_version"] == 2 and out["max_references"] == 9
+    assert out["spec_version"] == 3 and out["max_references"] == 9
     assert [s["shot_id"] for s in out["shots"]] == [s.shot_id for s in package.shot_list]
     mine = next(s for s in out["shots"] if s["shot_id"] == shot.shot_id)
-    assert mine["ready"] and mine["not_ready"] == [] and mine["keyframe_first"]
+    # Every cut has its keyframe; only the video prompt is missing (test_video_prompt.py).
+    assert mine["not_ready"] == ["it has no video prompt yet"] and mine["keyframe_first"]
+    assert mine["prompt"] is None and all(r["named"] is None for r in mine["references"])
     spec = mine["spec"]
     assert spec["action"] == shot.visual_action and spec["camera"]["shot_size"] == shot.framing
     assert spec["target_duration_ms"] == plan.sub_shots[-1].end_ms
@@ -1708,12 +1710,12 @@ def test_a_shot_without_its_keyframes_is_not_ready(package):
     out = _specs(package, [two_cuts(package, shot)], {(shot.shot_id, 1): "a_s1.jpg"})
     mine = next(s for s in out["shots"] if s["shot_id"] == shot.shot_id)
     assert not mine["ready"] and not mine["keyframe_first"]
-    assert mine["not_ready"] == ["[Shot 2] has no approved keyframe"]
-    # The keyframe it has, then each person's picture, the set, the props, the faces.
+    assert mine["not_ready"] == ["[Shot 2] has no approved keyframe", "it has no video prompt yet"]
+    # The keyframe it has, the faces, then each person's picture, the set and the props.
     kinds = [r["kind"] for r in mine["references"]]
-    assert kinds[0] == "keyframe" and kinds[1] in ("look", "face")
-    faces = [i for i, k in enumerate(kinds) if k == "face" and i > 1]
-    assert faces and kinds.index("set") < faces[0]
+    assert kinds[0] == "keyframe" and kinds[1] == "face"
+    faces = [i for i, k in enumerate(kinds) if k == "face"]
+    assert faces == list(range(1, len(faces) + 1)) and kinds.index("set") > faces[-1]
 
 
 def test_an_unplanned_shot_keeps_the_storyboard_length(package):

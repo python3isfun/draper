@@ -52,6 +52,7 @@ from .shot_reading import SceneReading
 from .shot_reading import fingerprint as reading_fingerprint
 from .shot_reading import fresh as fresh_reading
 from .shot_specs import SHOT_SPECS_PATH, shot_specs
+from .shots.models import ShotVideoPrompt
 
 MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".webm"}
 
@@ -467,9 +468,11 @@ def build_export(
     plans: list[ShotPlan] | None = None,
     readings: list[SceneReading] | None = None,
     pace: str | None = None,
+    video_prompts: list[ShotVideoPrompt] | None = None,
 ) -> str:
     """Write the hand-off zip to `dest`; returns the download file name. `pace` is the
-    story's pace as it applies now (pace.story_pace), recorded in the shot specs."""
+    story's pace as it applies now (pace.story_pace), recorded in the shot specs, and
+    `video_prompts` the shots' H3 video prompts (exported where current)."""
     takes = {o.option_id: o for o in options or []}
 
     def take_of(img: GeneratedImage) -> DesignOption | None:
@@ -655,6 +658,7 @@ def build_export(
         frame_rows: list[dict[str, Any]] = []
         files: dict[tuple[str, int], str] = {}
         by_ref: dict[str, str] = {}  # frame:<take>:<n> -> its file, for later sub-shots
+        frame_ids: dict[tuple[str, int], str] = {}  # (shot, sub-shot) -> frame:<take>:<n>
         for take, draw, sub in approved_keyframes(pkg, keyframes or [], plans or []):
             if (src := safe_path(draw.file)) is None:
                 continue
@@ -662,6 +666,7 @@ def build_export(
             name = f"{take.shot_id}_s{sub.index}.{ext}"
             files[(take.shot_id, sub.index)] = name
             by_ref[f"frame:{take.take_id}:{draw.n}"] = name
+            frame_ids[(take.shot_id, sub.index)] = f"frame:{take.take_id}:{draw.n}"
             media_file(f"05_assets/shot_keyframes/{name}", src)
             check = draw.check
             frame_rows.append(
@@ -713,9 +718,11 @@ def build_export(
         # Shots whose plan is being written or whose keyframes are being drawn or checked.
         working = {t.shot_id for t in keyframes or [] if t.busy}
         working |= {p.shot_id for p in plans or [] if p.busy}
+        working |= {p.shot_id for p in video_prompts or [] if p.busy}
         text(SHOT_SPECS_PATH,
              _json(shot_specs(pkg, stored, files, n, fresh, images, exported, outdated,
-                              working, pace)))  # fmt: skip
+                              working, pace, frame_ids,
+                              {p.shot_id: p for p in video_prompts or []})))  # fmt: skip
 
         # Design takes: the chosen take per deliverable, and every other option
         slot_names = {
