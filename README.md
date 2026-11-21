@@ -504,9 +504,32 @@ the shot before it in the scene, when there is one, so light, set dressing and e
 carry across the cut. Each prompt version keeps the pictures it was written for. The export's
 `sub_shots.json` gives each cut's `now`: every person's state and their chosen picture.
 
-**Each shot's H3 video prompt is written here.** Once every cut of a shot has an approved
-keyframe, the text model writes the shot's MiniMax H3 video prompt (the `video_prompt` step,
-`shots/video_prompt.py`) from the same plan, keyframes, scene reading and pictures, to the H3
+**Keyframes are made in two phases, and the editor locks the shot between them.** In the
+first, the script's plan and prompts draft rough keyframes; the editor reviews the sequence
+in the Gallery (**Looks right** approves a cut, **Fix** opens it to chat, redraw or pick
+another draw, **+** inserts a cut). The judge's check is advice while drafting: an approved
+keyframe is the shot, whatever the check said of it against the plan (it shows as "differs
+from the plan", not as a failure). Once every cut of a shot is approved (phase chip
+**Review**), **Read keyframes** has the vision model read each approved keyframe and write
+down what it shows in the plan's own words (shot size, camera position and height, who is
+where, clothes, props, background), with warnings for what changes between the cuts (a
+person who swaps sides, a prop that vanishes). The reading is shown next to the plan, cut by
+cut, **As planned → As drawn**, and every field is editable. **Lock shot** makes the
+corrected reading the plan's view (`source: keyframes`; timing, action and lines stay): the
+draft plan goes to the plan history, the keyframes stay approved, and the video prompt is
+written again. A locked shot can't be re-planned, edited or added to; to change a cut, fix
+or redraw its keyframe (which makes the reading stale and the video prompt out of date);
+**Unlock** restores the draft plan. The export marks each locked shot (`locked`, `planned_by:
+keyframes`) and counts them in `readiness.shots_locked`.
+
+**Each shot's H3 video prompt is written here, from its keyframes.** Once every cut of a
+shot has an approved keyframe, the text model writes the shot's MiniMax H3 video prompt (the
+`video_prompt` step, `shots/video_prompt.py`). The plan drafts the keyframes; once a cut has
+one, the keyframe drives its prompt: the writer is shown each cut's keyframe (and what its
+check found wrong against the plan) and describes the cut as the picture shows it (shot size,
+camera position, who is where, clothes, what is behind them), while the plan gives the action,
+timing, lines and camera movement. A keyframe the story can't use as it is (the wrong person,
+a prop missing) is reported in the prompt's notes for a redraw. The prompt follows the H3
 video prompt skill dramer's renders were measured against: where the camera stands before the
 set, every person bound to their pictures and clothes in one sentence, every line quoted word
 for word after "says in English:" with whose lips move, only what is there (never what isn't),
@@ -888,7 +911,7 @@ restart, and separate worker processes aren't possible.
 for individual steps with `MCPHUB_MODEL_INGEST`, `MCPHUB_MODEL_OUTLINE`,
 `MCPHUB_MODEL_SCRIPT`, `MCPHUB_MODEL_STORYBOARD`, `MCPHUB_MODEL_REVIEW` and the keyframe steps
 (`MCPHUB_MODEL_SHOT_PLAN`, `_SHOT_FRAMES`, `_SHOT_CHECK`, `_SHOT_READING`,
-`_VIDEO_PROMPT`; reading a scene
+`_VIDEO_PROMPT`, `_KEYFRAME_READING`; reading a scene
 defaults to `gpt-6-luna`), e.g. a cheaper
 model for the light steps:
 
@@ -953,7 +976,8 @@ src/drama_agent/
   shots/           Shot keyframes: models.py, common.py, picks.py, plans.py, history.py,
                    approvals.py, staleness.py, references.py, takes.py, writer.py, planner.py,
                    judge.py, inserts.py, clip_refs.py (the pictures a clip is sent with),
-                   video_prompt.py (the shot's H3 video prompt),
+                   video_prompt.py (the shot's H3 video prompt), lock.py (locking a shot to its
+                   keyframes),
                    runner.py (ShotFrameRunner), board.py. shot_frames.py re-exports it all
   library/         The asset library: characters and sets across stories (models, sync,
                    views, matching, reuse)

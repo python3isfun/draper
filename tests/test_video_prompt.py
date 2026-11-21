@@ -41,6 +41,9 @@ def test_the_prompt_is_written_once_every_cut_is_approved_and_exported(tmp_path)
         call = b.calls("video_prompt")[-1]
         assert "says in English" in call.instructions
         assert [c["index"] for c in call.context["cuts"]] == [1, 2]
+        # The writer sees each cut's keyframe, and what its check found against the plan.
+        assert [m.label for m in call.media] == [c["keyframe"] for c in call.context["cuts"]]
+        assert all(isinstance(c["keyframe_check"], list) for c in call.context["cuts"])
         # Every picture sent is named, the keyframes by their label.
         assert f"frame:{one['take_id']}:0" in vp["pictures"]
         text = " ".join(x["text"] for x in vp["blocks"])

@@ -3,7 +3,10 @@ program can check, and the offline template.
 
 Video production (dramer) renders each shot's clip with MiniMax H3 from a prompt and the
 shot's pictures (clip_refs.py). The prompt is written here, from the same plan, keyframes
-and scene reading the keyframes were drawn from, so it can't drift from them. It follows
+and scene reading the keyframes were drawn from, so it can't drift from them. The plan
+drafts the keyframes; once a cut has an approved keyframe, that picture drives its prompt:
+the writer sees it and describes the cut as it shows it (framing, camera position, who is
+where), with the plan giving the action, timing and lines. It follows
 dramer's H3 video prompt skill: where the camera stands before the set; every person bound
 to a picture and their clothes in one sentence; every line quoted word for word with
 "says in English:" and whose lips move; only what is there, never what isn't; time the
@@ -74,11 +77,26 @@ what it shows and its kind: `keyframe` (the approved picture of one cut: the cut
 its framing, positions and light; it is a reference, not a start frame), `chosen` or \
 `look` (a person in this shot's clothes, full body), `face` (a person's face), `set` (the \
 empty set), `prop`; `of` names the person, place or prop shown.
-- `cuts`: the shot's cuts in time order, each with `start_s` and `end_s`, its framing, \
-camera, action, who is on screen and on which side (`frame`), with their state now \
-(`now`: wearing, hair, holding, condition), who is off screen and on which side, its \
-`keyframe` picture (if any), and its `lines` (speaker, words, delivery, and `where`: \
-"on screen", "off screen <side>" or "voice").
+- `cuts`: the shot's cuts in time order, each with `start_s` and `end_s`, its planned \
+framing, camera, action, who is on screen and on which side (`frame`), with their state \
+now (`now`: wearing, hair, holding, condition), who is off screen and on which side, its \
+`keyframe` picture (if any; the picture itself is attached, labelled with its id), what \
+the keyframe's own check found wrong with it against the plan (`keyframe_check`), and its \
+`lines` (speaker, words, delivery, and `where`: "on screen", "off screen <side>" or \
+"voice").
+
+## The keyframe drives the cut
+
+The plan was written first and the keyframe drawn from it; the keyframe is what the clip \
+will match, so **where a cut has a keyframe, describe the cut as the keyframe shows it**: \
+look at the attached picture and take the shot size, the camera's position and height, \
+what it faces, who is where in the frame, their pose, clothes and what is behind them \
+from the picture, not from the plan's words. `keyframe_check` lists where the plan and \
+the picture are known to differ; follow the picture there. The plan still gives what \
+happens in the cut (its action, timing, lines) and the camera's movement. When a \
+keyframe differs from the plan in a way the story needs fixed (the wrong person, a prop \
+missing, a side flipped), say so in `notes` so the keyframe can be redrawn. A cut with \
+no keyframe is written from the plan.
 - `carried`: lines begun in the shot before, still being finished as this clip opens.
 - On a second try: `previous` (your prompt) and `problems` (what a check found). Fix \
 exactly those.
@@ -90,9 +108,9 @@ One `blocks` entry per cut, in cut order, each with `sub_shot` (its number), `te
 
 `text` is the cut in plain English prose, written in this order:
 
-1. **Framing and camera position first**: shot size, where the camera stands, its \
-height, what it faces ("A medium two-shot from the aisle, camera at chest height facing \
-the booth"). A reverse or over-the-shoulder angle is geometry ("camera behind his right \
+1. **Framing and camera position first**, as the keyframe shows them: shot size, where \
+the camera stands, its height, what it faces ("A medium two-shot from the aisle, camera \
+at chest height facing the booth"). A reverse or over-the-shoulder angle is geometry ("camera behind his right \
 shoulder, looking past him toward her").
 2. **Pictures, each with its role.** For the cut's keyframe: "{pic:A} is the reference \
 frame of this cut: it matches its framing, positions and light." For the set, once in the \
@@ -100,8 +118,8 @@ first cut where it is seen: what it keeps (architecture, furniture placement, pa
 3. **Each person, bound to their pictures, dressed and placed, in one sentence**: "the \
 woman from {pic:B} and {pic:C}, in an ivory blouse and charcoal pants, standing at frame \
 left". A name alone means nothing to H3; give the picture every time a person is \
-introduced in a cut. The clothes come from `now.wearing` (else the look). Keep each \
-person's screen side as the cut says.
+introduced in a cut. The clothes and the screen side are what the keyframe shows (else \
+`now.wearing` and the cut's `frame`).
 4. **Setting and light, briefly.** With a keyframe for the cut, don't take inventory of \
 the set: the picture shows it. In a close-up, say what is behind the face.
 5. **Action as timed verbs** covering the cut from its start to its end, in seconds from \
@@ -197,9 +215,12 @@ def prompt_context(
     images: list[GeneratedImage],
     usable: Any,
     carried: set[tuple[str, str]],
+    checks: dict[int, list[str]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """(what the writer is given, each picture's short id -> its ref id). The pictures are
-    those the clip is sent with (clip_references, with `usable`)."""
+    those the clip is sent with (clip_references, with `usable`); `checks` is what each
+    cut's keyframe check found wrong (frame_findings), left out of the fingerprint since
+    the keyframe's id already stands for it."""
     names = _names(pkg)
     script = _dialogue(pkg)
     refs, _, _ = clip_references(pkg, shot, plan, frames, reading, images, usable)
@@ -225,6 +246,8 @@ def prompt_context(
         ]  # fmt: skip
         f = frames.get(sub.index)
         cut["keyframe"] = f"{{pic:{ids[f]}}}" if f and f in ids else None
+        if cut["keyframe"]:
+            cut["keyframe_check"] = (checks or {}).get(sub.index, [])
         cuts.append(cut)
     context = {
         **base,
@@ -252,9 +275,10 @@ def prompt_inputs(
     and the pictures an export carries (`usable` and `carried` can be worked out once for
     many shots: exportable(images), carried_lines(pkg))."""
     ok = usable if usable is not None else exportable(images)
-    return prompt_context(pkg, shot, plan, approved_frames(pkg, shot, plan, takes), reading,
-                          images, ok.__contains__,
-                          carried if carried is not None else carried_lines(pkg))  # fmt: skip
+    frames = approved_frames(pkg, shot, plan, takes)
+    return prompt_context(pkg, shot, plan, frames, reading, images, ok.__contains__,
+                          carried if carried is not None else carried_lines(pkg),
+                          frame_findings(takes, frames))  # fmt: skip
 
 
 def prompt_state(stored: ShotVideoPrompt | None, now: str) -> str:
@@ -267,9 +291,26 @@ def prompt_state(stored: ShotVideoPrompt | None, now: str) -> str:
     return "current" if stored.written_from == now else "outdated"
 
 
+def frame_findings(takes: list[ShotTake], frames: dict[int, str | None]) -> dict[int, list[str]]:
+    """Per cut, what its approved keyframe's check found wrong with it (empty when it
+    passed or wasn't checked): the plan and the picture are known to differ there."""
+    out: dict[int, list[str]] = {}
+    for i, ref in frames.items():
+        if not ref:
+            continue
+        _, take_id, n = ref.split(":")
+        t = next((t for t in takes if t.take_id == take_id), None)
+        d = next((d for d in t.results if d.n == int(n)), None) if t else None
+        if d is not None and d.check is not None:
+            out[i] = [f"{x.item}: {x.finding}" for x in d.check.items if not x.passed]
+    return out
+
+
 def fingerprint(context: dict[str, Any], ids: dict[str, str]) -> str:
     """What a prompt was written from: it is out of date once this changes."""
-    raw = json.dumps([context, sorted(ids.items())], sort_keys=True, ensure_ascii=False)
+    cuts = [{k: v for k, v in c.items() if k != "keyframe_check"} for c in context["cuts"]]
+    raw = json.dumps([context | {"cuts": cuts}, sorted(ids.items())], sort_keys=True,
+                     ensure_ascii=False)  # fmt: skip
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 

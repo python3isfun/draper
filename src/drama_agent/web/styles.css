@@ -922,3 +922,12 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .vp-block { margin: 6px 0; }
 .vp-text { white-space: pre-wrap; line-height: 1.5; }
 .chip.vp-pic { font-size: 11px; padding: 0 6px; vertical-align: baseline; }
+
+/* Lock (Keyframes, Details): the keyframes' reading next to the plan */
+.lock-cut { display: grid; grid-template-columns: 96px 1fr; gap: 10px; margin: 8px 0; padding-top: 8px; border-top: 1px solid var(--border, #e5e5e5); }
+.lock-pic img { width: 96px; border-radius: 4px; display: block; }
+.lock-cols { display: grid; grid-template-columns: 1fr 1.4fr; gap: 12px; }
+.lock-col p { margin: 2px 0; }
+.lock-col label { display: block; margin: 4px 0; }
+.lock-field { width: 100%; box-sizing: border-box; font: inherit; }
+@media (max-width: 800px) { .lock-cols { grid-template-columns: 1fr; } }

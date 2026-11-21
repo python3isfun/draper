@@ -27,6 +27,15 @@ from .common import KEYFRAME_SIZES, NotReady, intimate_scene, shot_of
 from .history import replace_plan
 from .inserts import carry_takes, kept_cuts
 from .judge import JudgeOutput, judge_instructions
+from .lock import (
+    LOCK_STAGE,
+    KeyframeReading,
+    ReadingOutput,
+    frames_print,
+    lock_instructions,
+    reading_context,
+    seen_cuts,
+)
 from .models import (
     CHECK_STAGE,
     DEFAULT_PROVIDER,
@@ -58,6 +67,7 @@ from .takes import next_round, plan_take
 from .video_prompt import (
     VIDEO_PROMPT_STAGE,
     VideoPromptOutput,
+    approved_frames,
     fingerprint,
     others_of,
     prompt_inputs,
@@ -147,6 +157,7 @@ class ShotFrameRunner:
             + self.repo.fail_unfinished_shot_plans(error)
             + self.repo.fail_unfinished_scene_readings(error)
             + self.repo.fail_unfinished_video_prompts(error)
+            + self.repo.fail_unfinished_keyframe_readings(error)
         )
 
     # -- reading the scene (shot_reading.py) ----------------------------------
@@ -465,6 +476,11 @@ class ShotFrameRunner:
             raise RuntimeError("the package revision is gone")
         shot = shot_of(pkg, vp.shot_id)
         context, ids = self.video_inputs(pkg, shot)
+        # The writer sees each cut's keyframe: it describes the cut as the picture shows it.
+        media = []
+        for cut in context["cuts"]:
+            if (pic := cut.get("keyframe")) and (found := self._ref_file(ids[pic[5:-1]], "view")):
+                media.append(MediaPart(label=pic, path=found[0], mime=found[1]))
         others = others_of(pkg, shot)
         kept: tuple[VideoPromptOutput, tuple[list[str], list[str]]] | None = None
         ask = context
@@ -475,6 +491,7 @@ class ShotFrameRunner:
                 instructions=video_instructions(),
                 context=ask,
                 attempt=attempt,
+                media=media,
             )
             out = await self.text.generate(request, VideoPromptOutput)
             found = video_findings(out, context, others)
@@ -492,6 +509,59 @@ class ShotFrameRunner:
         vp.source = "model"
         vp.status, vp.error, vp.updated_at = "done", None, utcnow()
         self.repo.save_video_prompt(vp)
+
+    # -- reading the approved keyframes to lock the shot (lock.py) ---------------
+
+    def start_keyframe_reading(self, reading: KeyframeReading) -> None:
+        task = asyncio.create_task(self._keyframe_reading(reading))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _keyframe_reading(self, reading: KeyframeReading) -> None:
+        async with self._planning:
+            try:
+                await self._read_keyframes(reading)
+            except asyncio.CancelledError:
+                reading.status, reading.error = "failed", "Interrupted. Read them again."
+                self.repo.save_keyframe_reading(reading)
+                raise
+            except Exception as exc:
+                log.warning("keyframe reading failed for %s", reading.shot_id, exc_info=True)
+                reading.status = "failed"
+                reading.error = f"The keyframes couldn't be read: {str(exc)[:300]}"
+                reading.updated_at = utcnow()
+                self.repo.save_keyframe_reading(reading)
+
+    async def _read_keyframes(self, reading: KeyframeReading) -> None:
+        pkg = self.repo.get_package(reading.package_id, reading.revision_id)
+        if pkg is None:
+            raise RuntimeError("the package revision is gone")
+        shot = shot_of(pkg, reading.shot_id)
+        plan = plan_of(pkg, shot, self.repo.get_shot_plan(pkg.package_id, pkg.revision_id,
+                                                          shot.shot_id))  # fmt: skip
+        takes = self.repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        frames = approved_frames(pkg, shot, plan, takes)
+        if not frames or not all(frames.values()):
+            raise RuntimeError("every cut needs an approved keyframe first")
+        media = []
+        for i, ref in frames.items():
+            found = self._ref_file(ref or "", "view")
+            if found is None:
+                raise RuntimeError(f"cut {i}'s keyframe file is missing")
+            media.append(MediaPart(label=f"<Cut {i}>", path=found[0], mime=found[1]))
+        request = GenerationRequest(
+            stage=LOCK_STAGE,  # type: ignore[arg-type]
+            instructions=lock_instructions(),
+            context=reading_context(pkg, shot, plan),
+            media=media,
+        )
+        out = await self.text.generate(request, ReadingOutput)
+        reading.cuts = seen_cuts(pkg, shot, plan, out)
+        reading.warnings = [w.strip() for w in out.warnings if w.strip()]
+        reading.frames = frames_print(frames)
+        reading.model = request.model or getattr(self.text, "model_id", None)
+        reading.status, reading.error, reading.updated_at = "done", None, utcnow()
+        self.repo.save_keyframe_reading(reading)
 
     async def aclose(self) -> None:
         for t in list(self._tasks):
@@ -702,7 +772,8 @@ class ShotFrameRunner:
             _, take_id, n = ref_id.split(":")
             src = self.repo.get_shot_take(take_id)
             d = next((d for d in src.results if d.n == int(n)), None) if src else None
-            rel = d and (d.thumb if variant == "thumb" and d.thumb else d.file)
+            rel = d and (d.thumb if variant == "thumb" and d.thumb
+                         else d.view if variant == "view" and d.view else d.file)  # fmt: skip
             if not rel or d is None:
                 return None
             # A thumbnail is a JPEG whatever the draw's own type.

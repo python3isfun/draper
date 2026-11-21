@@ -12,6 +12,7 @@ from ..shot_reading import SceneReading
 from .approvals import approved_take
 from .clip_refs import exportable
 from .common import _names, intimate_scene
+from .lock import KeyframeReading, frames_print
 from .models import PromptVersion, ShotPlan, ShotTake, ShotVideoPrompt
 from .picks import shot_picks
 from .plans import current_sub, plan_of, plan_problems, shot_lines, sub_shot_lines
@@ -40,6 +41,7 @@ def shot_board(
     readings: list[SceneReading] | None = None,
     pace: str | None = None,
     video_prompts: list[ShotVideoPrompt] | None = None,
+    keyframe_readings: list[KeyframeReading] | None = None,
 ) -> list[dict[str, Any]]:
     """Every shot with its sub-shot plan and its scene's reading, and per sub-shot what it
     draws from (each person's chosen picture, state and why), what is missing, its prompt
@@ -56,6 +58,7 @@ def shot_board(
         print_ = shot_reading.fingerprint(pkg, scene_id, stored, images)
         fresh_of[scene_id] = shot_reading.fresh(by_scene.get(scene_id), print_)
     prompts = {p.shot_id: p for p in video_prompts or []}
+    lock_readings = {r.shot_id: r for r in keyframe_readings or []}
     usable = exportable(images)
     carried = carried_lines(pkg)
     out = []
@@ -152,6 +155,7 @@ def shot_board(
                 "cuts": plan.cuts,
             },
             "sub_shots": subs,
+            "lock": lock_view(pkg, shot, plan, takes, lock_readings.get(shot.shot_id)),
             "video_prompt": video_prompt_view(
                 pkg, shot, plan, takes, images, reading, prompts.get(shot.shot_id), usable,
                 carried,
@@ -195,3 +199,29 @@ def video_prompt_view(
             "blocks", "sound", "notes", "problems", "advice", "error", "model", "updated_at"})  # fmt: skip
         view["words"] = word_count(stored.blocks, stored.sound)
     return view
+
+
+def lock_view(
+    pkg: ProductionPackage,
+    shot: Any,
+    plan: ShotPlan,
+    takes: list[ShotTake],
+    reading: KeyframeReading | None,
+) -> dict[str, Any]:
+    """Where the shot stands between the two phases (lock.py): `draft` (keyframes still
+    being made), `review` (every cut approved, not locked), `locked`; and the keyframes'
+    reading, if one was made of the keyframes as they are now (`stale` when not)."""
+    frames = approved_frames(pkg, shot, plan, takes)
+    done = bool(frames) and all(frames.values())
+    out: dict[str, Any] = {
+        "state": "locked" if plan.source == "keyframes" else "review" if done else "draft",
+        "keyframes_done": done,
+        "reading": None,
+    }
+    if reading is not None:
+        out["reading"] = reading.model_dump(mode="json", include={
+            "status", "cuts", "warnings", "model", "error", "updated_at"})  # fmt: skip
+        out["reading"]["stale"] = reading.status == "done" and reading.frames != frames_print(
+            frames
+        )
+    return out

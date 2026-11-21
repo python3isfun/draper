@@ -12,6 +12,7 @@ from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 from ..shot_frames import PromptVersion, ShotPlan, ShotPlanVersion, ShotTake, approval_changes
 from ..shot_reading import SceneReading
+from ..shots.lock import KeyframeReading
 from ..shots.models import ShotVideoPrompt
 
 
@@ -106,6 +107,14 @@ class Repository(Protocol):
     ) -> ShotVideoPrompt | None: ...
     def list_video_prompts(self, package_id: str, revision_id: str) -> list[ShotVideoPrompt]: ...
     def fail_unfinished_video_prompts(self, error: str) -> int: ...
+    def save_keyframe_reading(self, reading: KeyframeReading) -> None: ...
+    def get_keyframe_reading(
+        self, package_id: str, revision_id: str, shot_id: str
+    ) -> KeyframeReading | None: ...
+    def list_keyframe_readings(
+        self, package_id: str, revision_id: str
+    ) -> list[KeyframeReading]: ...
+    def fail_unfinished_keyframe_readings(self, error: str) -> int: ...
     # The asset library (library/): characters, sets, their looks, states and items
     def list_package_ids(self) -> list[str]: ...
     def save_library_asset(self, asset: LibraryAsset) -> None: ...
@@ -153,6 +162,7 @@ class InMemoryRepository:
         self.prompt_versions: list[PromptVersion] = []
         self.scene_readings: dict[tuple[str, str, str], SceneReading] = {}
         self.video_prompts: dict[tuple[str, str, str], ShotVideoPrompt] = {}
+        self.keyframe_readings: dict[tuple[str, str, str], KeyframeReading] = {}
         self.library: dict[str, LibraryAsset] = {}
         self.casting: dict[tuple[str, str], Casting] = {}
         self.asset_images: dict[str, AssetImage] = {}
@@ -246,7 +256,8 @@ class InMemoryRepository:
                 if row.package_id == package_id and row.revision_id == from_revision:
                     store[key] = row.model_copy(update={"revision_id": to_revision})
                     moved += 1
-        for keyed in (self.shot_plans, self.scene_readings, self.video_prompts):
+        for keyed in (self.shot_plans, self.scene_readings, self.video_prompts,
+                      self.keyframe_readings):  # fmt: skip
             for key, row in list(keyed.items()):
                 if row.package_id == package_id and row.revision_id == from_revision:
                     del keyed[key]
@@ -525,6 +536,27 @@ class InMemoryRepository:
         for p in self.video_prompts.values():
             if p.busy:
                 p.status, p.error, n = "failed", error, n + 1
+        return n
+
+    def save_keyframe_reading(self, reading: KeyframeReading) -> None:
+        key = (reading.package_id, reading.revision_id, reading.shot_id)
+        self.keyframe_readings[key] = reading.model_copy(deep=True)
+
+    def get_keyframe_reading(
+        self, package_id: str, revision_id: str, shot_id: str
+    ) -> KeyframeReading | None:
+        r = self.keyframe_readings.get((package_id, revision_id, shot_id))
+        return r.model_copy(deep=True) if r else None
+
+    def list_keyframe_readings(self, package_id: str, revision_id: str) -> list[KeyframeReading]:
+        return [r.model_copy(deep=True) for (pid, rid, _), r in self.keyframe_readings.items()
+                if (pid, rid) == (package_id, revision_id)]  # fmt: skip
+
+    def fail_unfinished_keyframe_readings(self, error: str) -> int:
+        n = 0
+        for r in self.keyframe_readings.values():
+            if r.busy:
+                r.status, r.error, n = "failed", error, n + 1
         return n
 
     # The asset library ---------------------------------------------------

@@ -20,6 +20,7 @@ from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 from ..shot_frames import PromptVersion, ShotPlan, ShotPlanVersion, ShotTake, approval_changes
 from ..shot_reading import SceneReading
+from ..shots.lock import KeyframeReading
 from ..shots.models import ShotVideoPrompt
 
 # v1: objects. v2: job_queue. v3: trace tables + job_queue.pause_requested.
@@ -27,9 +28,9 @@ from ..shots.models import ShotVideoPrompt
 # v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. v10: shot_prompts.
 # v11: scene_readings. v12: the asset library (library_assets, story_casting, asset_images).
 # v13: shot_plan_versions (story_settings came in at v12, without a bump).
-# v14: shot_video_prompts.
+# v14: shot_video_prompts. v15: keyframe_readings.
 # Each step is additive, so older files upgrade in place (see _migrate).
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -202,6 +203,14 @@ CREATE TABLE IF NOT EXISTS shot_video_prompts (
     data        TEXT NOT NULL,
     PRIMARY KEY (package_id, revision_id, shot_id)
 );
+CREATE TABLE IF NOT EXISTS keyframe_readings (
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    shot_id     TEXT NOT NULL,
+    status      TEXT NOT NULL,              -- writing | done | failed
+    data        TEXT NOT NULL,
+    PRIMARY KEY (package_id, revision_id, shot_id)
+);
 CREATE TABLE IF NOT EXISTS shot_plans (
     package_id  TEXT NOT NULL,
     revision_id TEXT NOT NULL,
@@ -220,7 +229,7 @@ _NOT_ARCHIVED = "coalesce(json_extract(data, '$.archived'), 0) = 0"
 # Tables of a story's work kept per revision; a published revise run moves them forward.
 _REVISION_TABLES = (
     "generated_images", "design_options", "shot_takes", "shot_prompts", "shot_plans",
-    "shot_plan_versions", "scene_readings", "shot_video_prompts",
+    "shot_plan_versions", "scene_readings", "shot_video_prompts", "keyframe_readings",
 )  # fmt: skip
 
 
@@ -1150,6 +1159,44 @@ class SqliteRepository:
             p = ShotVideoPrompt.model_validate_json(raw)
             p.status, p.error = "failed", error
             self.save_video_prompt(p)
+        return len(rows)
+
+    def save_keyframe_reading(self, reading: KeyframeReading) -> None:
+        self._exec(
+            "INSERT INTO keyframe_readings (package_id, revision_id, shot_id, status, data) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (package_id, revision_id, shot_id) DO UPDATE "
+            "SET status = excluded.status, data = excluded.data",
+            (reading.package_id, reading.revision_id, reading.shot_id, reading.status,
+             reading.model_dump_json()),
+        )  # fmt: skip
+
+    def get_keyframe_reading(
+        self, package_id: str, revision_id: str, shot_id: str
+    ) -> KeyframeReading | None:
+        raw = self._one(
+            "SELECT data FROM keyframe_readings WHERE package_id = ? AND revision_id = ? "
+            "AND shot_id = ?",
+            (package_id, revision_id, shot_id),
+        )
+        return KeyframeReading.model_validate_json(raw) if raw else None
+
+    def list_keyframe_readings(self, package_id: str, revision_id: str) -> list[KeyframeReading]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM keyframe_readings WHERE package_id = ? AND revision_id = ?",
+                (package_id, revision_id),
+            ).fetchall()
+        return [KeyframeReading.model_validate_json(r[0]) for r in rows]
+
+    def fail_unfinished_keyframe_readings(self, error: str) -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM keyframe_readings WHERE status = 'writing'"
+            ).fetchall()
+        for (raw,) in rows:
+            r = KeyframeReading.model_validate_json(raw)
+            r.status, r.error = "failed", error
+            self.save_keyframe_reading(r)
         return len(rows)
 
     def fail_unfinished_shot_takes(self, error: str) -> int:

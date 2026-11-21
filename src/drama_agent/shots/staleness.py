@@ -84,7 +84,8 @@ PLAN_TEXT_CHANGED = (
 
 def plan_outdated(pkg: ProductionPackage, shot: Shot, plan: ShotPlan | None) -> str | None:
     """Why a stored cut plan may describe an earlier design, or None."""
-    if plan is None or plan.source == "single" or plan.status != "done":
+    # A locked plan describes the keyframes, not the design text: never outdated by it.
+    if plan is None or plan.source in ("single", "keyframes") or plan.status != "done":
         return None
     if revised_since(pkg, shot.shot_id, plan.updated_at):
         return PLAN_SHOT_REVISED

@@ -63,14 +63,21 @@ STAGE_MODEL_PREFIX = "MCPHUB_MODEL_"
 # to choose each shot's reference pictures is reasoning, done by gpt-6-luna.
 DEFAULT_STAGE_MODELS = {"shot_reading": "gpt-6-luna"}
 # The keyframe steps (shot_frames.py, shot_reading.py), overridable like the pipeline's.
-KEYFRAME_STAGES = ("shot_plan", "shot_frames", "shot_check", "shot_reading", "video_prompt")
+KEYFRAME_STAGES = (
+    "shot_plan",
+    "shot_frames",
+    "shot_check",
+    "shot_reading",
+    "video_prompt",
+    "keyframe_reading",
+)
 
 
 def stage_models_from_env() -> dict[str, str]:
     """Per-step model overrides: MCPHUB_MODEL_<STEP> for each pipeline step (INGEST, OUTLINE,
     SCRIPT, CAST, SETS, PROPS, STORYBOARD, REVIEW), IMAGE_PROMPTS (the call that writes
     image prompts) and the keyframe steps (SHOT_PLAN, SHOT_FRAMES, SHOT_CHECK, SHOT_READING,
-    VIDEO_PROMPT).
+    VIDEO_PROMPT, KEYFRAME_READING).
     Steps without one use DEFAULT_STAGE_MODELS, else MCPHUB_MODEL. A misspelt variable is an
     error rather than a silently ignored setting."""
     from .models.package import STAGES

@@ -57,6 +57,7 @@ from ..shot_frames import (
 )
 from ..shot_reading import SceneReading, candidates, scene_shots
 from ..shots.history import replace_plan, restore_plan
+from ..shots.lock import KeyframeReading, SeenCut, lock_shot, unlock_shot
 from ..shots.models import ShotVideoPrompt
 from ..shots.video_prompt import approved_frames, fingerprint, prompt_state
 from .schemas import UseKeyframeRequest
@@ -171,6 +172,12 @@ class ApproveRequest(BaseModel):
     next: bool = True
 
 
+class LockRequest(BaseModel):
+    revision_id: str | None = None
+    # The keyframes' reading as the editor confirmed it, one per cut, in order.
+    cuts: list[SeenCut]
+
+
 class VideoPromptsRequest(BaseModel):
     revision_id: str | None = None
     # Only these shots (None: every shot whose prompt is missing, failed or out of date).
@@ -208,8 +215,9 @@ def register(
         versions = repo.list_prompt_versions(pkg.package_id, pkg.revision_id)
         readings = repo.list_scene_readings(pkg.package_id, pkg.revision_id)
         prompts = repo.list_video_prompts(pkg.package_id, pkg.revision_id)
+        lock_readings = repo.list_keyframe_readings(pkg.package_id, pkg.revision_id)
         shots = shot_board(pkg, images, takes, plans, versions, readings,
-                           story_pace(repo, pkg.package_id), prompts)  # fmt: skip
+                           story_pace(repo, pkg.package_id), prompts, lock_readings)  # fmt: skip
         history = repo.count_plan_versions(pkg.package_id, pkg.revision_id)
         for shot in shots:  # a take asked to pause says so until it does
             shot["plan"]["history"] = history.get(shot["shot_id"], 0)  # earlier plans
@@ -223,7 +231,8 @@ def register(
             busy=sum(1 for t in takes if t.busy)
             + sum(1 for p in plans if p.busy)
             + sum(1 for r in readings if r.busy)
-            + sum(1 for p in prompts if p.busy),
+            + sum(1 for p in prompts if p.busy)
+            + sum(1 for r in lock_readings if r.busy),
             shots=shots,
             providers={name: c.model_id for name, c in runner.providers.items()},
             default_provider=runner.default_provider,
@@ -254,6 +263,11 @@ def register(
         context, ids = runner.video_inputs(pkg, shot)
         if prompt_state(stored, fingerprint(context, ids)) != "current":
             _start_prompt(pkg, shot.shot_id)
+
+    def _unlocked(stored: ShotPlan | None, shot_id: str) -> None:
+        if stored is not None and stored.source == "keyframes":
+            raise HTTPException(409, f"{shot_id} is locked to its keyframes; unlock it to change "
+                                "the plan")  # fmt: skip
 
     def _take_or_404(take_id: str) -> ShotTake:
         take = repo.get_shot_take(take_id)
@@ -364,6 +378,7 @@ def register(
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         if (stored is not None and stored.busy) or is_busy(takes, shot_id):
             raise HTTPException(409, f"{shot_id} is still being planned or drawn")
+        _unlocked(stored, shot_id)
         plan = ShotPlan(package_id=pkg.package_id, revision_id=pkg.revision_id, shot_id=shot_id)
         # The shot's clip, pace and cut count: as asked (null: the storyboard's clip, the
         # story's pace, the planner's count), else as its plan has them.
@@ -424,6 +439,7 @@ def register(
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         if (stored is not None and stored.busy) or is_busy(takes, shot_id):
             raise HTTPException(409, f"{shot_id} is still being planned or drawn")
+        _unlocked(stored, shot_id)
         n = len(now.sub_shots)
         if n >= MAX_SUB_SHOTS:
             raise HTTPException(422, f"{shot_id} already has {n} cuts, the most a shot holds")
@@ -482,6 +498,78 @@ def register(
         except ValueError as exc:
             raise HTTPException(422, f"That plan no longer fits the shot: {exc}") from None
         _auto_prompt(pkg, shot)
+        return RestoredPlan(plan=plan, keyframes_approved=back)
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/read-keyframes",
+        status_code=202,
+        response_model=KeyframeReading,
+    )
+    async def read_keyframes(package_id: str, shot_id: str, req: RevisionBody) -> KeyframeReading:
+        """Read the shot's approved keyframes (the vision model, in the background): what
+        each cut shows, in the plan's words, for the editor to correct and lock the shot
+        with (shots/lock.py). Every cut needs an approved keyframe."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        stored, plan = _plan(pkg, shot)
+        if stored is not None and stored.busy:
+            raise HTTPException(409, f"{shot_id} is being planned")
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        frames = approved_frames(pkg, shot, plan, takes)
+        if not frames or not all(frames.values()):
+            raise HTTPException(409, f"approve a keyframe for every cut of {shot_id} first")
+        reading = repo.get_keyframe_reading(pkg.package_id, pkg.revision_id, shot_id)
+        if reading is not None and reading.busy:
+            raise HTTPException(409, f"{shot_id}'s keyframes are being read")
+        reading = KeyframeReading(package_id=pkg.package_id, revision_id=pkg.revision_id,
+                                  shot_id=shot_id)  # fmt: skip
+        repo.save_keyframe_reading(reading)
+        runner.start_keyframe_reading(reading)
+        return reading
+
+    @app.post("/v1/drama-packages/{package_id}/keyframes/{shot_id}/lock", response_model=ShotPlan)
+    async def lock_keyframes(package_id: str, shot_id: str, req: LockRequest) -> ShotPlan:
+        """Lock the shot: the reading of its keyframes (as the editor confirmed it, one entry
+        per cut) becomes its plan's view; the draft plan goes to the history; the keyframes
+        stay approved; the video prompt is written again from it."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        stored, plan = _plan(pkg, shot)
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        if (stored is not None and stored.busy) or is_busy(takes, shot_id):
+            raise HTTPException(409, f"{shot_id} is still being planned or drawn")
+        frames = approved_frames(pkg, shot, plan, takes)
+        if not frames or not all(frames.values()):
+            raise HTTPException(409, f"approve a keyframe for every cut of {shot_id} first")
+        try:
+            new = lock_shot(repo, pkg, shot, plan, req.cuts)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        _auto_prompt(pkg, shot)
+        return new
+
+    @app.post(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/unlock", response_model=RestoredPlan
+    )
+    async def unlock_keyframes(package_id: str, shot_id: str, req: RevisionBody) -> RestoredPlan:
+        """Unlock the shot: the draft plan the lock replaced is restored (its keyframes stay
+        approved), so cuts can be planned, edited and inserted again."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        stored, _ = _plan(pkg, shot)
+        if stored is None or stored.source != "keyframes":
+            raise HTTPException(409, f"{shot_id} isn't locked")
+        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        if is_busy(takes, shot_id):
+            raise HTTPException(409, f"{shot_id} is still being drawn")
+        try:
+            plan, back = unlock_shot(repo, pkg, shot, stored)
+        except KeyError:
+            raise HTTPException(
+                409, f"{shot_id}'s draft plan is no longer in its history"
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(422, f"That plan no longer fits the shot: {exc}") from None
         return RestoredPlan(plan=plan, keyframes_approved=back)
 
     @app.post(

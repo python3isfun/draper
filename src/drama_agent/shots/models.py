@@ -125,7 +125,8 @@ class ShotPlan(BaseModel):
     revision_id: str
     shot_id: str
     status: Literal["writing", "done", "failed"] = "done"
-    source: Literal["single", "model", "user"] = "single"
+    # keyframes: locked, each cut's view as its approved keyframe shows it (lock.py).
+    source: Literal["single", "model", "user", "keyframes"] = "single"
     # The clip length asked for when planning (None: the storyboard's, see clip_ms).
     clip_ms: int | None = None
     # This shot's own pace (None: the story's) and how many sub-shots it is cut into (None:
@@ -199,7 +200,7 @@ class ShotPlanVersion(BaseModel):
     plan: ShotPlan
     approved: dict[str, int] = Field(default_factory=dict)
     replaced_at: datetime = Field(default_factory=utcnow)
-    replaced_by: Literal["model", "user", "restore"] = "model"
+    replaced_by: Literal["model", "user", "restore", "lock"] = "model"
 
 
 class PromptVersion(BaseModel):

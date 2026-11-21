@@ -10,7 +10,8 @@
 const frames = { key: null, view: null, error: "", notes: [], timer: null, loading: false,
   draws: 2, rounds: 3, provider: null, directions: {}, prompts: {}, plans: {}, planOpts: {}, history: {}, episode: "all",
   sel: {}, notes2: {}, compare: {}, diffs: new Map(), vdraws: {}, verr: {},
-  send: { key: null, targets: null, error: "" } };  // "Send to a look": the draw it is open on
+  send: { key: null, targets: null, error: "" },
+  lockEdit: {} };  // the keyframes' reading as the editor is correcting it, per shot  // "Send to a look": the draw it is open on
 
 const framesKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
 const framesBase = (pkg) => `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/keyframes`;
@@ -76,8 +77,9 @@ async function frameAction(url, button, body, method = "POST") {
 
 const TAKE_STATUS = { pending: "waiting", writing: "writing the prompt…", drawing: "drawing…", checking: "checking…", failed: "failed" };
 
-function checkBadge(d) {
+function checkBadge(d, approved = false) {
   if (d.status === "failed") return h("span", { class: "chip bad" }, "draw failed");
+  if (approved) return h("span", { class: "chip ok", title: d.check ? `Checked against the plan: ${d.check.score}. Approved: this is the shot.` : "" }, "approved ✓");
   if (!d.check) return h("span", { class: "chip warn", title: d.check_error || "" }, d.check_error ? "not checked" : "checking…");
   return h("span", { class: `chip ${d.check.passed ? "ok" : "bad"}`, title: d.check.summary || "" },
     `${d.check.passed ? "pass" : "fail"} · ${d.check.score}`);
@@ -100,7 +102,7 @@ function renderFrameDraw(take) {
               onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, { n: d.n }) },
               h("img", { src: drawUrl(take, d.n), alt: label, loading: "lazy" }), lookalikeTag(take.likeness), idTag(`take:${take.take_id}:${d.n}`)),
       h("figcaption", {},
-        h("div", { class: "keyframe-cap" }, `${label}${approved ? " ✓ approved" : ""}`, checkBadge(d)),
+        h("div", { class: "keyframe-cap" }, label, checkBadge(d, approved)),
         d.status === "done" && h("a", { href: drawUrl(take, d.n, "content"), target: "_blank", rel: "noopener", class: "muted small" }, "open"),
         approved && h("button", { type: "button", class: "btn ghost small",
           onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, null, "DELETE") }, "Withdraw"),
@@ -224,7 +226,7 @@ function renderFrameHero(sub) {
     h("div", { class: "pick-hero-text" },
       h("span", { class: `chip ${approved ? "ok" : "warn"}` }, approved ? "✓ Approved keyframe" : "Not approved yet"),
       h("strong", {}, take.imported_from ? frameSourceChip(take) : `Round ${take.round}, draw ${d.n + 1}`),
-      checkBadge(d),
+      approved ? (d.check && !d.check.passed && h("span", { class: "chip", title: d.check.summary || "" }, `differs from the plan · ${d.check.score}`)) : checkBadge(d),
       d.check && d.check.summary && h("p", { class: "small muted" }, d.check.summary),
       !approved && h("p", { class: "small muted" }, "The newest draw. Approve a draw below; the export and the next cut use the approved one."),
       (sub.outdated || []).length > 0 && approved && h("p", { class: "small warn-text" }, `Out of date: ${sub.outdated.join("; ")}`),
@@ -508,7 +510,8 @@ function renderPlanEditor(pkg, shot) {
 function renderPlan(pkg, shot) {
   const p = shot.plan;
   const editing = frames.plans[shot.shot_id];
-  const source = { single: "the whole shot as one sub-shot", model: "planned by the text model", user: "your plan" }[p.source];
+  const source = { single: "the whole shot as one sub-shot", model: "planned by the text model", user: "your plan", keyframes: "locked: each cut as its approved keyframe shows it" }[p.source];
+  const locked = p.source === "keyframes";
   return h("div", { class: "plan" },
     h("div", { class: "take-head" },
       h("h4", { style: "margin:0" }, `Sub-shots (${shot.sub_shots.length})`),
@@ -516,7 +519,7 @@ function renderPlan(pkg, shot) {
       p.status === "failed" && h("span", { class: "chip bad", title: p.error || "" }, "plan failed"),
       !editing && h("span", { class: "take-actions" },
         planSettings(pkg, shot),
-        h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, title: "Ask the text model where the cuts go, at this shot's pace and cut count",
+        h("button", { type: "button", class: "btn ghost small", disabled: shot.busy || locked, title: locked ? "Unlock the shot to plan it again" : "Ask the text model where the cuts go, at this shot's pace and cut count",
           onclick: async (e) => {
             const o = planOpts(pkg, shot);
             await frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget,
@@ -526,7 +529,7 @@ function renderPlan(pkg, shot) {
         p.history > 0 && h("button", { type: "button", class: "btn ghost small", "aria-expanded": String(!!frames.history[historyKey(pkg, shot)]),
           title: "Earlier cut plans of this shot, each with the keyframes approved for it", onclick: () => toggleHistory(pkg, shot) },
           `History (${p.history})`),
-        h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, onclick: () => {
+        h("button", { type: "button", class: "btn ghost small", disabled: shot.busy || locked, title: locked ? "Unlock the shot to edit its plan" : "", onclick: () => {
           frames.plans[shot.shot_id] = { clip_s: Math.min(15, Math.max(4, Math.ceil(shot.clip_ms / 1000))), rows: shot.sub_shots.map((s) => ({ start_s: s.start_ms / 1000, framing: s.framing, camera: s.camera, action: s.action, pos: positionsOf(s) })) };
           framesRender();
         } }, "Edit"))),
@@ -742,15 +745,91 @@ function renderShotCard(pkg, shot) {
       h("h3", {}, shot.shot_id, h("span", { class: "muted small" }, ` · ${shot.place} · ${secs(shot.clip_ms)} clip`)),
       h("span", { class: "chips" },
         shot.intimacy && h("span", { class: "chip warn", title: "Scene staged with intimacy: clothed staging only, and never from a likeness" }, `intimacy: ${shot.intimacy}`),
-        h("span", { class: `chip ${done === subs.length ? "ok" : "warn"}` }, `${done}/${subs.length} keyframes approved`))),
+        h("span", { class: `chip ${done === subs.length ? "ok" : "warn"}` }, `${done}/${subs.length} keyframes approved`),
+        phaseChip(shot))),
     h("p", { class: "small" }, h("strong", {}, shot.framing), " ", shot.camera),
     h("p", { class: "small" }, shot.action),
     h("p", { class: "small muted" }, shot.people.length ? `On screen: ${shot.people.map((p) => p.name).join(", ")}` : "No one on screen"),
     renderPlan(pkg, shot),
     renderReading(pkg, shot),
     subs.map((s) => renderSubShot(pkg, shot, s, subs.length)),
+    renderLock(pkg, shot),
     renderVideoPrompt(pkg, shot),
   );
+}
+
+// The two phases of a shot's keyframes (shots/lock.py). Draft: the plan and prompts make
+// rough keyframes, the editor reviews, fixes and approves. Locked: the approved keyframes
+// are the shot; their reading (corrected here) replaces the plan's view, and the video
+// prompt is written from it.
+const PHASE = { draft: ["", "Draft"], review: ["info", "Review: all approved, not locked"], locked: ["ok", "Locked to keyframes"] };
+function phaseChip(shot) {
+  const [kind, label] = PHASE[(shot.lock || {}).state] || ["", ""];
+  return label && h("span", { class: `chip ${kind}`, title: "Draft: keyframes are still being made from the plan. Review: every cut has an approved keyframe; read them and lock the shot. Locked: the keyframes drive the plan and the video prompt." }, label);
+}
+const SIDES3 = ["left", "center", "right"];
+function renderLock(pkg, shot) {
+  const lock = shot.lock;
+  if (!lock) return null;
+  const base = `${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}`;
+  const names = Object.fromEntries(shot.people.map((p) => [p.id, p.name]));
+  const head = (...actions) => h("div", { class: "take-head" }, h("h4", { style: "margin:0" }, "Lock"), phaseChip(shot), h("span", { class: "take-actions" }, ...actions));
+  if (lock.state === "locked") {
+    return h("div", { class: "plan lock" },
+      head(h("button", { type: "button", class: "btn ghost small", disabled: shot.busy, title: "Restore the draft plan the lock replaced; the keyframes stay approved", onclick: (e) => frameAction(`${base}/unlock`, e.currentTarget, { revision_id: pkg.revision_id }) }, "Unlock")),
+      h("p", { class: "small muted" }, "Each cut above is described as its approved keyframe shows it. To change a cut, fix or redraw its keyframe; to re-plan the cuts, unlock first."));
+  }
+  if (lock.state === "draft") {
+    return h("div", { class: "plan lock" }, head(),
+      h("p", { class: "small muted" }, "Approve a keyframe for every cut, then read the keyframes and lock the shot: from then on they drive the plan and the video prompt."));
+  }
+  const r = lock.reading;
+  const reading = r && r.status === "done" && !r.stale;
+  const readBtn = h("button", { type: "button", class: "btn small", disabled: r && r.status === "writing",
+    title: "The vision model reads each approved keyframe and writes down what it shows, in the plan's words, for you to correct",
+    onclick: async (e) => { delete frames.lockEdit[shot.shot_id]; await frameAction(`${base}/read-keyframes`, e.currentTarget, { revision_id: pkg.revision_id }); } },
+    r && r.status === "writing" ? "Reading…" : reading ? "Read again" : "Read keyframes");
+  if (!reading) {
+    return h("div", { class: "plan lock" }, head(readBtn),
+      r && r.status === "failed" && h("p", { class: "small warn-text" }, r.error),
+      r && r.stale && h("p", { class: "small warn-text" }, "The keyframes changed since they were read: read them again."),
+      h("p", { class: "small muted" }, "Every cut has an approved keyframe. Read them to see each cut as drawn next to how it was planned; correct the reading, then lock."));
+  }
+  const edit = frames.lockEdit[shot.shot_id] || (frames.lockEdit[shot.shot_id] = r.cuts.map((c) => JSON.parse(JSON.stringify(c))));
+  const field = (c, key, rows) => h(rows ? "textarea" : "input", { class: "lock-field", rows, value: c[key], "aria-label": key, oninput: (e) => { c[key] = e.target.value; } });
+  const rows = edit.map((c, k) => {
+    const sub = shot.sub_shots[k];
+    return h("div", { class: "lock-cut" },
+      h("div", { class: "lock-pic" }, sub && subFrame(sub) ? h("img", { src: drawUrl(subFrame(sub).take, subFrame(sub).d.n), alt: `cut ${c.index}` }) : null, h("div", { class: "small muted" }, `cut ${c.index}`)),
+      h("div", { class: "lock-cols" },
+        h("div", { class: "lock-col muted small" }, h("strong", {}, "As planned"),
+          h("p", {}, sub && sub.framing), h("p", {}, sub && sub.camera),
+          h("p", {}, sub && sub.people.map((id, i) => `${sub.people_names[i]} (${sub.placement[id] || "?"})`).join(", "))),
+        h("div", { class: "lock-col small" }, h("strong", {}, "As drawn (edit as needed)"),
+          h("label", {}, "Framing and camera position ", field(c, "framing", 3)),
+          h("label", {}, "Camera movement ", field(c, "camera")),
+          h("div", { class: "design-row" }, shot.people.map((p) => h("label", { class: "small" }, `${p.name} `,
+            h("select", { "aria-label": `${p.name}'s side`, onchange: (e) => {
+              const v = e.target.value;
+              c.people = c.people.filter((id) => id !== p.id); delete c.placement[p.id]; delete c.off_screen[p.id];
+              if (SIDES3.includes(v)) { c.people.push(p.id); c.placement[p.id] = v; }
+              else if (v.startsWith("off ")) c.off_screen[p.id] = v.slice(4);
+            } },
+              h("option", { value: "", selected: !c.placement[p.id] && !c.off_screen[p.id] }, "absent"),
+              SIDES3.map((s) => h("option", { value: s, selected: c.placement[p.id] === s }, `on screen, ${s}`)),
+              ["left", "right"].map((s) => h("option", { value: `off ${s}`, selected: c.off_screen[p.id] === s }, `off screen, ${s}`)))))),
+          h("label", {}, "Clothes, props, pose, background ", field(c, "note", 3)))));
+  });
+  return h("div", { class: "plan lock" },
+    head(readBtn,
+      h("button", { type: "button", class: "btn small primary-outline", disabled: shot.busy, title: "Make this reading the shot's plan: the keyframes drive the plan and the video prompt from now on",
+        onclick: async (e) => {
+          const out = await frameAction(`${base}/lock`, e.currentTarget, { revision_id: pkg.revision_id, cuts: edit });
+          if (out) delete frames.lockEdit[shot.shot_id];
+        } }, "Lock shot")),
+    h("p", { class: "small muted" }, `Read by ${r.model || "the model"}. Where the keyframe and the plan differ, the keyframe is right: correct the reading if it misread a picture, then lock.`),
+    (r.warnings || []).length > 0 && h("div", { class: "small warn-text" }, h("strong", {}, "Between the cuts:"), h("ul", { class: "plain" }, r.warnings.map((w) => h("li", {}, w)))),
+    rows);
 }
 
 // Keyframe grid: every cut's keyframe as a compact grid in export order, so a scene (or one
@@ -834,6 +913,7 @@ function sbPersonRefs(group) {
 const MAX_CUTS = 5;  // shots/models.py MAX_SUB_SHOTS
 
 function insertBlocked(shot) {
+  if (shot.plan.source === "keyframes") return `${shot.shot_id} is locked to its keyframes: unlock it to add a cut`;
   if (shot.sub_shots.length >= MAX_CUTS) return `${shot.shot_id} already has ${MAX_CUTS} cuts, the most a shot holds`;
   if (shot.busy) return `${shot.shot_id} is being planned or drawn: wait for it to finish`;
   return "";
@@ -1023,7 +1103,10 @@ function renderFrameGallery(shots) {
       h("div", { class: "sb-cap" },
         h("span", {}, h("strong", {}, galLabel(c)), h("span", { class: "muted" }, ` · ${c.shot.episode_id} · ${c.shot.scene_id} · ${c.shot.place} · from ${secs(c.sub.start_ms)}`)),
         h("span", {}, h("span", { class: `chip ${tone}`, title: (c.sub.outdated || []).join("; ") }, text), " ",
-          h("a", { href: "#", class: "small", onclick: (e) => { e.preventDefault(); framesOpenShot(c.shot.shot_id, c.sub.index); } }, "Details"))),
+          phaseChip(c.shot), " ",
+          c.frame && !c.frame.approved && c.shot.plan.source !== "keyframes" && h("button", { type: "button", class: "btn small primary-outline", title: "Approve this draw as the cut's keyframe",
+            onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(c.frame.take.take_id)}/approve`, e.currentTarget, { n: c.frame.d.n }) }, "Looks right"),
+          " ", h("button", { type: "button", class: "btn ghost small", title: "Open the cut: chat with the image model, draw again, pick another draw", onclick: () => framesOpenShot(c.shot.shot_id, c.sub.index) }, c.frame ? "Fix" : "Draw"))),
       h("p", { class: "small" }, h("strong", {}, c.sub.framing || c.shot.framing), " — ", c.sub.action || c.shot.action),
       h("p", { class: "small muted" }, c.sub.people_names.length ? `On screen: ${c.sub.people_names.join(", ")}` : "No one on screen")),
     strip);

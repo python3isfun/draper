@@ -244,6 +244,8 @@ def shot_specs(
                 "keyframe_work_running": shot.shot_id in (working or set()),
                 "keyframe_first": all_frames,
                 "planned_by": plan.source,
+                # Locked: each cut's view is what its approved keyframe shows (shots/lock.py).
+                "locked": plan.source == "keyframes",
                 # The pace this shot was planned at: its own, else the story's.
                 "pace": plan.pace or pace,
                 "spec": {
@@ -291,7 +293,9 @@ def readiness(shots: list[dict[str, Any]]) -> dict[str, Any]:
                 f"({framed} approved keyframes over {len(cuts)} planned cuts, {unplanned} "
                 "shots not planned). Each shot's not_ready says what it lacks.")  # fmt: skip
     prompted = sum(1 for s in shots if s["prompt"])
-    return {"shots": len(shots), "shots_ready": ready, "shots_with_prompt": prompted, "shots_planned": len(shots) - unplanned,
+    locked = sum(1 for s in shots if s["locked"])
+    return {"shots": len(shots), "shots_ready": ready, "shots_with_prompt": prompted,
+            "shots_locked": locked, "shots_planned": len(shots) - unplanned,
             "cuts_planned": len(cuts), "cuts_with_keyframe": framed,
             "keyframe_work_running": running, "note": note}  # fmt: skip
 
