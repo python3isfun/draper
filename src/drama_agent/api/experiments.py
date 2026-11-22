@@ -221,17 +221,18 @@ def register(app: FastAPI, ctx: Any) -> None:
 
     def _start_frame(pkg: ProductionPackage, target: ExpTarget, wanted: str | None) -> Any:
         """The keyframe draw a keyframe chat starts from, as a pick-like picture: the one
-        asked for ("<take_id>:<n>"), else the sub-shot's approved draw, else its newest
-        finished draw; None when it has none."""
-        takes = [t for t in repo.list_shot_takes(pkg.package_id, pkg.revision_id)
-                 if t.shot_id == target.shot_id and t.sub_shot == target.sub_shot]  # fmt: skip
+        asked for ("<take_id>:<n>", any keyframe draw of the story: a cut not drawn yet
+        starts from the keyframe before it), else the sub-shot's approved draw, else its
+        newest finished draw; None when it has none."""
+        every = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
+        takes = [t for t in every if t.shot_id == target.shot_id and t.sub_shot == target.sub_shot]
         found = None
         if wanted:
             take_id, _, n = wanted.rpartition(":")
-            take = next((t for t in takes if t.take_id == take_id), None)
+            take = next((t for t in every if t.take_id == take_id), None)
             d = take and next((d for d in take.results if str(d.n) == n), None)
             if take is None or d is None or d.status != "done" or not d.file:
-                raise HTTPException(404, f"no keyframe draw {wanted} of this sub-shot")
+                raise HTTPException(404, f"no keyframe draw {wanted} in this story")
             found = (take, d)
         else:
             ok = [(t, d) for t in takes for d in t.results if d.status == "done" and d.file]

@@ -23,6 +23,7 @@ const exp = {
   likeness: {},  // results that show a real person's likeness, by reference
   used: {},  // results made a design picture's pick from this chat, by reference
   notice: "",  // what Use as pick did (shown under the chat's title)
+  said: {},  // what Use as keyframe did for each image, beside its button
   // The chats of the picture the open chat is for, newest first: its history row.
   siblings: { key: null, list: [] },
   // The workbench panel's element when the chat is open over a character or set page
@@ -97,6 +98,7 @@ async function expRoute(sid) {
     exp.error = "";
     exp.renaming = false;
     exp.used = {};
+    exp.said = {};
     exp.notice = "";
   }
   await loadExpSessions();
@@ -532,7 +534,9 @@ function expImage(ref, current, label, result, gref = ref) {
         type: "button", class: "btn small", disabled: !!exp.used[ref],
         title: `Make this the approved keyframe of ${exp.view.session.target.label || "the sub-shot this chat is for"}`,
         onclick: (e) => useKeyframe(ref, e.currentTarget),
-      }, exp.used[ref] ? "Now the keyframe" : "Use as keyframe"),
+      }, exp.used[ref] === "take" ? "Now a take" : exp.used[ref] ? "Now the keyframe" : "Use as keyframe"),
+      // What Use as keyframe did (or why it couldn't), beside the button that was clicked.
+      exp.said[ref] && h("span", { class: `small ${exp.used[ref] ? "muted" : "warn-text"}` }, exp.said[ref]),
     ),
   );
 }
@@ -568,19 +572,35 @@ async function usePick(ref, button) {
 
 // Use as keyframe (docs/library-layers.md): the image becomes an approved take of the
 // sub-shot the chat is for. The keyframes after it that were drawn from the old one are
-// withdrawn, as with any new approval.
+// withdrawn, as with any new approval. When it can't be approved yet because the cut
+// before has no approved keyframe (approvals chain in order), it is brought in as a take,
+// to approve on the Keyframes tab once the cut before is done.
 async function useKeyframe(ref, button) {
   const n = exp.labels[ref];
   if (n == null) return;
   button.disabled = true;
+  const url = `/v1/experiments/${encodeURIComponent(exp.view.session.session_id)}/use-keyframe`;
+  const label = exp.view.session.target.label || "its sub-shot";
   try {
-    await api(`/v1/experiments/${encodeURIComponent(exp.view.session.session_id)}/use-keyframe`, { method: "POST", body: JSON.stringify({ image: n }) });
+    await api(url, { method: "POST", body: JSON.stringify({ image: n }) });
     exp.used[ref] = true;
-    exp.notice = `#${n} is now the approved keyframe of ${exp.view.session.target.label || "its sub-shot"}; it is being checked like any draw.`;
+    exp.said[ref] = `#${n} is now the approved keyframe of ${label}; it is being checked like any draw.`;
     if (exp.host) benchRefreshPage();
   } catch (e) {
-    exp.notice = e.message;
+    if (/approve a keyframe of sub-shot/.test(e.message)) {
+      try {
+        await api(url, { method: "POST", body: JSON.stringify({ image: n, approve: false }) });
+        exp.used[ref] = "take";
+        exp.said[ref] = `#${n} is now a take of ${label}, not yet approved: ${e.message}. Approve it on the Keyframes tab once the cut before has its keyframe.`;
+        if (exp.host) benchRefreshPage();
+      } catch (e2) {
+        exp.said[ref] = e2.message;
+      }
+    } else {
+      exp.said[ref] = e.message;
+    }
   }
+  exp.notice = exp.said[ref];
   renderExp();
 }
 

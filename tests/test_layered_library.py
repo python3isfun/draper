@@ -215,13 +215,12 @@ def test_keyframe_chats_are_checked(tmp_path):
         )
         ok = {"package_id": b.pid, "shot_id": sid_, "sub_shot": 1}
         assert b.http.post(url, json={"kind": "face", "target": ok}).status_code == 422
-        # No draw yet: the chat starts empty, and its images can't become a keyframe
-        # before the sub-shot has a take to stand beside.
+        # No draw yet: the chat starts empty, with no image to use.
         chat = b.http.post(url, json={"target": ok}).json()
         assert b.http.get(f"{url}/{chat['session_id']}").json()["turns"] == []
         assert (
             b.http.post(f"{url}/{chat['session_id']}/use-keyframe", json={"image": 1}).status_code
-            == 409
+            == 404
         )
 
 
@@ -412,3 +411,34 @@ def test_set_and_prop_studies(tmp_path):
         _study_wait(b, s_prop["session_id"])
         call = [c for c in b.text.calls if c.stage == "face_describe"][-1]
         assert "prop master" in call.instructions and not call.context["anchored"]
+
+
+def test_a_cut_not_drawn_yet_gets_its_keyframe_from_a_chat(tmp_path):
+    """A chat for a cut with no draw starts from the keyframe before it, and its image
+    becomes the cut's take, with the references a draw of it would have."""
+    from .test_video_prompt import _approved_two_cuts
+
+    with Board(tmp_path) as b:
+        sid, one, _ = _approved_two_cuts(b)
+        for t in b.takes(sid, 2):  # cut 2 as if never drawn
+            b.http.delete(f"/v1/shot-takes/{t['take_id']}")
+        assert b.takes(sid, 2) == []
+        target = {"package_id": b.pid, "shot_id": sid, "sub_shot": 2}
+        r = b.http.post(
+            "/v1/experiments", json={"target": target, "from_frame": f"{one['take_id']}:0"}
+        )
+        assert r.status_code == 201, r.text
+        chat = r.json()
+        [start] = b.http.get(f"/v1/experiments/{chat['session_id']}").json()["turns"]
+        assert start["from_image"] == f"frame:{one['take_id']}:0"
+        r = b.http.post(f"/v1/experiments/{chat['session_id']}/use-keyframe", json={"image": 1})
+        assert r.status_code == 201, r.text
+        kt = r.json()
+        assert kt["sub_shot"] == 2 and kt["approved"] == 0
+        assert kt["references"][0]["ref_id"] == f"frame:{one['take_id']}:0"  # continues from cut 1
+        assert (
+            b.http.post(
+                "/v1/experiments", json={"target": target, "from_frame": "stk_nope:0"}
+            ).status_code
+            == 404
+        )

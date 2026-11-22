@@ -184,8 +184,9 @@ class ExpSessionCreate(BaseModel):
     # face study (nothing in it yet) instead of starting another one: "Develop in a chat"
     # or "Create from text" clicked again.
     reuse_empty: bool = False
-    # A keyframe chat: the draw it starts from ("<take_id>:<n>"); else the sub-shot's
-    # approved keyframe, else its newest finished draw.
+    # A keyframe chat: the draw it starts from ("<take_id>:<n>", any keyframe draw of the
+    # story, e.g. the cut before's for a cut not drawn yet); else the sub-shot's approved
+    # keyframe, else its newest finished draw.
     from_frame: str | None = None
 
 

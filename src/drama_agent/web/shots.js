@@ -176,19 +176,30 @@ const frameLabel = (shotId, sub) => `${shotId}, keyframe ${sub}`;
 // A chat for this sub-shot's keyframe, started from a draw ("<take>:<n>"; none: its
 // approved draw, else its newest), opened in the workbench panel. Clicked again before
 // writing anything, the same chat opens.
-async function frameChat(take, fromFrame, button) {
+async function frameChat(take, fromFrame, button, { float = false } = {}) {
   if (button) button.disabled = true;
   const label = frameLabel(take.shot_id, take.sub_shot);
   try {
     const target = { package_id: take.package_id, shot_id: take.shot_id, sub_shot: take.sub_shot, label };
     const s = await api("/v1/experiments", { method: "POST", body: JSON.stringify({ target, reuse_empty: true, from_frame: fromFrame }) });
-    openBench("chat", s.session_id, label);
+    openBench("chat", s.session_id, label, { float });
   } catch (e) {
     frames.error = e.message;
     framesRender();
   } finally {
     if (button) button.disabled = false;
   }
+}
+
+// The keyframe a chat for a cut not drawn yet starts from: the approved keyframe of the
+// cut before, else of the shot before (what its own draw would continue from).
+function chatStart(shot, sub) {
+  const prev = shot.sub_shots.find((x) => x.index === sub.index - 1);
+  const f = prev && subFrame(prev);
+  if (f && f.approved) return { ref: `${f.take.take_id}:${f.d.n}`, label: `the keyframe of cut ${prev.index}` };
+  const r = (sub.references || []).find((x) => x.kind === "previous_shot");
+  if (r) { const m = r.ref_id.match(/^frame:(.+):(\d+)$/); if (m) return { ref: `${m[1]}:${m[2]}`, label: "the previous shot's keyframe" }; }
+  return null;
 }
 
 // "from chat #3": a take brought back from a chat, linked to it.
@@ -237,10 +248,15 @@ function renderFrameHero(sub) {
 function renderFrameBench(pkg, shot, sub) {
   const mine = (frames.chats || []).filter((c) => c.target.shot_id === shot.shot_id && c.target.sub_shot === sub.index);
   const any = sub.takes.some((t) => t.results.some((d) => d.status === "done"));
+  // A cut with no draw yet starts its chat from the keyframe before it (the cut before,
+  // else the previous shot's), as a draw of it would.
+  const before = any ? null : chatStart(shot, sub);
   return h("div", { class: "design-row small" },
-    h("button", { type: "button", class: "btn small", disabled: !any,
-      title: any ? "Change the keyframe in a chat with the image model, starting from the approved (or newest) draw. A result's Use as keyframe brings it back as an approved take." : "Draw a take first",
-      onclick: (e) => frameChat({ package_id: pkg.package_id, shot_id: shot.shot_id, sub_shot: sub.index }, null, e.currentTarget) }, "Develop in a chat"),
+    h("button", { type: "button", class: "btn small",
+      title: any ? "Change the keyframe in a chat with the image model, starting from the approved (or newest) draw. A result's Use as keyframe brings it back as an approved take."
+        : before ? `Make this cut's keyframe in a chat with the image model, starting from ${before.label}. A result's Use as keyframe brings it back as a take of this cut.`
+        : "Make this cut's keyframe in a chat with the image model (no picture to start from: mention the set and people by their @numbers). A result's Use as keyframe brings it back as a take of this cut.",
+      onclick: (e) => frameChat({ package_id: pkg.package_id, shot_id: shot.shot_id, sub_shot: sub.index }, before ? before.ref : null, e.currentTarget) }, "Develop in a chat"),
     mine.length > 0 && h("span", { class: "muted" }, "Chats:"),
     mine.slice(0, 6).map((c) => h("a", { href: `#exp=${encodeURIComponent(c.session_id)}`, title: `Updated ${timeAgo(c.updated_at)}`,
       onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); openBench("chat", c.session_id, c.title); } },
@@ -974,6 +990,8 @@ function sbTile(c, items, at, add = false) {
       ? h("button", { type: "button", class: "sb-img", title: `${tip} (click to enlarge; arrows step through this row)`, "aria-label": `Enlarge ${label}`, onclick: () => enlarge(items, at) },
           h("img", { src: drawUrl(frame.take, frame.d.n), alt: label, loading: "lazy" }), lookalikeTag(frame.take.likeness), idTag(`take:${frame.take.take_id}:${frame.d.n}`))
       : h("div", { class: "sb-img sb-none", title: sub.missing.length ? `First: ${sub.missing.join("; ")}` : tip }, status[1]),
+    h("button", { type: "button", class: "sb-edit", title: frame ? "Quick edit: change this keyframe in a chat with the image model, in a small window over the grid. A result's Use as keyframe brings it back as an approved take." : "Make this cut's keyframe in a chat with the image model, starting from the keyframe before it.",
+      "aria-label": `Quick edit ${label}`, onclick: (e) => frameChat({ package_id: frames.pkg.package_id, shot_id: shot.shot_id, sub_shot: sub.index }, frame ? null : (chatStart(shot, sub) || {}).ref || null, e.currentTarget, { float: true }) }, frame ? "✎ Edit" : "✎ Make"),
     h("figcaption", {},
       h("div", { class: "sb-cap" }, h("strong", {}, label), h("span", { class: "muted" }, secs(sub.start_ms))),
       h("div", { class: "sb-cap" },

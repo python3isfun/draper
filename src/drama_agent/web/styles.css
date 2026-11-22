@@ -682,7 +682,18 @@ td.mono { white-space: nowrap; }
 .bench-error { margin-left: 6px; }
 .bench-body .face-photo img { max-height: 360px; width: auto; max-width: 100%; object-fit: contain; }
 /* Wide windows: the page makes room for the panel instead of sitting under it. */
-@media (min-width: 1400px) { body.bench-open .main { margin-right: 680px; } }
+@media (min-width: 1400px) { body.bench-open:not(.bench-floating) .main { margin-right: 680px; } }
+/* Floating: a small window over the page, moved by its head, resized by its corner. */
+.bench.bench-floating {
+  border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  resize: both; overflow: hidden; min-width: 320px; min-height: 300px;
+}
+.bench.bench-floating .bench-head { cursor: move; user-select: none; border-radius: 10px 10px 0 0; }
+.bench.bench-floating .bench-body { padding: 10px; }
+.bench.bench-floating .exp-transcript img, .bench.bench-floating .exp-current img { max-height: 40vh; }
+/* In a small window the composer sits in the flow: sticky, it would cover the transcript. */
+.bench.bench-floating .exp-composer { position: static; box-shadow: none; }
+.bench.bench-floating .exp { gap: 8px; }
 .lib-scratch { margin-top: 12px; }
 
 /* "Lookalike": a picture that shows a real person's likeness (content rule 3). The label
@@ -912,6 +923,9 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .sb-tile:hover .sb-add, .sb-add:focus-visible, .sb-add.on { opacity: 1; }
 .sb-add.on { background: var(--accent); color: #fff; }
 .sb-add:disabled { border-color: var(--border); color: var(--muted); cursor: not-allowed; }
+/* Quick edit on a tile: opens the cut's chat as a floating window over the grid. */
+.sb-edit { position: absolute; top: 6px; right: 6px; z-index: 2; padding: 2px 7px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; opacity: 0; }
+.sb-tile:hover .sb-edit, .sb-edit:focus-visible { opacity: 0.95; }
 .sb-insert { margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent-soft); display: flex; flex-direction: column; gap: 6px; }
 .sb-insert p { margin: 0; }
 .sb-insert textarea { width: 100%; }

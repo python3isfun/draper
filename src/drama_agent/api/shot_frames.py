@@ -41,6 +41,7 @@ from ..shot_frames import (
     current_sub,
     design_print,
     frame_ref,
+    frame_size,
     intimate_scene,
     is_busy,
     is_hard,
@@ -59,6 +60,8 @@ from ..shot_reading import SceneReading, candidates, scene_shots
 from ..shots.history import replace_plan, restore_plan
 from ..shots.lock import KeyframeReading, SeenCut, lock_shot, unlock_shot
 from ..shots.models import ShotVideoPrompt
+from ..shots.references import sub_shot_references
+from ..shots.staleness import keyframe_judge
 from ..shots.video_prompt import approved_frames, fingerprint, prompt_state
 from .schemas import UseKeyframeRequest
 
@@ -973,8 +976,28 @@ def register(
                     and current_sub(pkg, shot, plan, x) is not None),
                    key=lambda x: x.created_at, default=None)  # fmt: skip
         if base is None:
-            raise HTTPException(409, f"draw a take of sub-shot {t.sub_shot} first: a chat's "
-                                "image takes its references from one")  # fmt: skip
+            # A cut nobody has drawn yet: the take is patterned on what a draw of it would
+            # be (its references, size, design), without drawing.
+            images = repo.list_images(pkg.package_id, pkg.revision_id)
+            reading = _reading(pkg, shot)
+            try:
+                base = plan_take(pkg, images, takes, plan, sub_shot=t.sub_shot or 1, draws=1,
+                                 auto=False, reading=reading, **runner.take_options(None))  # fmt: skip
+            except (NotReady, ValueError):
+                # Not drawable now (a pick missing, the cut before out of date): the editor
+                # made the picture anyway; it keeps whatever references there are.
+                sub = plan.sub(t.sub_shot or 1)
+                if sub is None:
+                    raise HTTPException(
+                        404, f"{shot.shot_id} has no sub-shot {t.sub_shot}"
+                    ) from None
+                refs, _ = sub_shot_references(pkg, images, takes, shot, sub, reading=reading,
+                                              judge=keyframe_judge(pkg, images, takes))  # fmt: skip
+                base = ShotTake(take_id="pattern", package_id=pkg.package_id,
+                                revision_id=pkg.revision_id, shot_id=shot.shot_id,
+                                sub_shot=sub.index, spec=sub, run_id="pattern", references=refs,
+                                size=frame_size(pkg), design_print=design_print(pkg, shot),
+                                likeness=any(r.likeness for r in refs))  # fmt: skip
         if req.approve and t.sub_shot and t.sub_shot > 1:
             prev = approved_take(takes, shot.shot_id, t.sub_shot - 1)
             if prev is None or (

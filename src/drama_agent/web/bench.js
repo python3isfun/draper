@@ -10,9 +10,11 @@
 
 const bench = { kind: null, sid: null };
 
-// Open a chat ("chat") or a study ("face") in the panel.
-function openBench(kind, sid, label) {
+// Open a chat ("chat") or a study ("face") in the panel; `float` opens it as a small
+// window over the page instead of the side panel.
+function openBench(kind, sid, label, { float = false } = {}) {
   closeBench({ refresh: false });
+  setBenchFloat(float);
   bench.kind = kind;
   bench.sid = sid;
   const host = h("div", { class: "bench-host" });
@@ -26,7 +28,7 @@ function openBench(kind, sid, label) {
     Object.assign(face, { host, sid, view: null, mounted: null, error: "", used: {}, notice: "" });
     loadFaceStudy();
   } else {
-    Object.assign(exp, { host, sid, view: null, mounted: null, error: "", used: {}, notice: "", renaming: false });
+    Object.assign(exp, { host, sid, view: null, mounted: null, error: "", used: {}, said: {}, notice: "", renaming: false });
     loadExpSession();
   }
 }
@@ -132,6 +134,60 @@ async function benchStartChat(target) {
 // The photos a study or chat takes.
 const isPhotoType = (file) => /^image\/(jpeg|png|webp)$/.test(file.type);
 const photoTypeError = (file) => `${file.name}: use a JPEG, PNG or WebP photo.`;
+
+// Floating mode: the panel as a small window over the page, moved by its head and resized
+// by its corner, so a keyframe can be edited right over the grid it sits in. Its place and
+// size are remembered per viewer (browser storage, best effort).
+const BENCH_KEY = "bench-float";
+const benchFloat = { on: false, box: null };
+function benchLoadFloat() {
+  try { benchFloat.box = JSON.parse(localStorage.getItem(BENCH_KEY) || "null"); } catch { benchFloat.box = null; }
+}
+function benchSaveFloat() {
+  try { localStorage.setItem(BENCH_KEY, JSON.stringify(benchFloat.box)); } catch { /* storage off */ }
+}
+function benchPlace() {
+  const el = $("#bench");
+  if (!benchFloat.on) { el.style.cssText = ""; return; }
+  const b = benchFloat.box || { x: Math.max(16, window.innerWidth - 480), y: 72, w: 440, h: Math.min(720, window.innerHeight - 100) };
+  const w = Math.min(Math.max(320, b.w), window.innerWidth - 16);
+  const hgt = Math.min(Math.max(300, b.h), window.innerHeight - 16);
+  const x = Math.min(Math.max(0, b.x), window.innerWidth - 80);
+  const y = Math.min(Math.max(0, b.y), window.innerHeight - 48);
+  benchFloat.box = { x, y, w, h: hgt };
+  el.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${hgt}px;right:auto;bottom:auto`;
+}
+function setBenchFloat(on) {
+  benchFloat.on = on;
+  if (on && !benchFloat.box) benchLoadFloat();
+  $("#bench").classList.toggle("bench-floating", on);
+  document.body.classList.toggle("bench-floating", on);
+  $("#bench-float").textContent = on ? "Dock" : "Float";
+  benchPlace();
+}
+$("#bench-float").addEventListener("click", () => setBenchFloat(!benchFloat.on));
+// Drag by the head (not its buttons or links).
+$("#bench .bench-head").addEventListener("pointerdown", (e) => {
+  if (!benchFloat.on || e.button || e.target.closest("button, a")) return;
+  const el = $("#bench");
+  const start = { x: e.clientX - el.offsetLeft, y: e.clientY - el.offsetTop };
+  const move = (ev) => { benchFloat.box = { ...benchFloat.box, x: ev.clientX - start.x, y: ev.clientY - start.y }; benchPlace(); };
+  const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); benchSaveFloat(); };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  e.preventDefault();
+});
+// The size the viewer resized it to (the corner handle is the browser's) is kept.
+new ResizeObserver(() => {
+  const el = $("#bench");
+  if (!benchFloat.on || el.hidden) return;
+  const r = el.getBoundingClientRect();
+  if (Math.round(r.width) !== benchFloat.box.w || Math.round(r.height) !== benchFloat.box.h) {
+    benchFloat.box = { ...benchFloat.box, w: Math.round(r.width), h: Math.round(r.height) };
+    benchSaveFloat();
+  }
+}).observe($("#bench"));
+window.addEventListener("resize", () => { if (benchFloat.on) benchPlace(); });
 
 $("#bench-close").addEventListener("click", () => closeBench());
 
