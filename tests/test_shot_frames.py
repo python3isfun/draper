@@ -53,6 +53,7 @@ from drama_agent.shot_frames import (
     template_prompt,
     writer_instructions,
 )
+from drama_agent.shots.staleness import KF_BEFORE_CHANGED, KF_BEFORE_MISSING, outdated_keyframes
 from drama_agent.store import InMemoryRepository
 from drama_agent.store.sqlite import SqliteRepository
 
@@ -286,10 +287,11 @@ def test_a_runner_saving_its_copy_never_undoes_an_approval(kind, package, tmp_pa
 
 
 @pytest.mark.parametrize("kind", ["memory", "sqlite"])
-def test_changing_an_earlier_keyframe_withdraws_the_later_ones(kind, package, tmp_path):
+def test_approval_is_one_draw_per_cut_and_moves_nothing_else(kind, package, tmp_path):
     repo = InMemoryRepository() if kind == "memory" else SqliteRepository(tmp_path / "t.db")
     images = done_images(package)
-    plan = two_cuts(package, busiest(package))
+    shot = busiest(package)
+    plan = two_cuts(package, shot)
     one = finished(plan_take(package, images, [], plan))
     two = finished(plan_take(package, images, [one], plan, sub_shot=2))
     other = finished(plan_take(package, images, [one, two], plan), approved=None)
@@ -298,15 +300,20 @@ def test_changing_an_earlier_keyframe_withdraws_the_later_ones(kind, package, tm
         if t.approved is not None:
             repo.approve_shot_draw(t.take_id, 0)
     assert repo.get_shot_take(two.take_id).approved == 0
-    repo.approve_shot_draw(one.take_id, 0)  # the same keyframe again: the next stays
-    assert repo.get_shot_take(two.take_id).approved == 0
-    repo.approve_shot_draw(other.take_id, 0)  # another sub-shot 1 keyframe: the next goes
+    repo.approve_shot_draw(other.take_id, 0)  # another cut 1 keyframe: cut 1 switches
     assert repo.get_shot_take(one.take_id).approved is None
-    assert repo.get_shot_take(two.take_id).approved is None
-    repo.approve_shot_draw(one.take_id, 0)
-    repo.approve_shot_draw(two.take_id, 0)
-    repo.approve_shot_draw(one.take_id, None)  # withdrawn: the next goes too
-    assert repo.get_shot_take(two.take_id).approved is None
+    assert repo.get_shot_take(other.take_id).approved == 0
+    # Cut 2 stays approved, drawn from a keyframe that isn't the approved one: out of date.
+    takes = repo.list_shot_takes(package.package_id, package.revision_id)
+    assert repo.get_shot_take(two.take_id).approved == 0
+    assert outdated_keyframes(package, images, takes, [plan]) == {two.take_id: [KF_BEFORE_CHANGED]}
+    repo.approve_shot_draw(other.take_id, None)  # withdrawn: cut 2 still holds
+    takes = repo.list_shot_takes(package.package_id, package.revision_id)
+    assert repo.get_shot_take(two.take_id).approved == 0
+    assert outdated_keyframes(package, images, takes, [plan]) == {two.take_id: [KF_BEFORE_MISSING]}
+    repo.approve_shot_draw(one.take_id, 0)  # the keyframe it was drawn from: up to date
+    takes = repo.list_shot_takes(package.package_id, package.revision_id)
+    assert outdated_keyframes(package, images, takes, [plan]) == {}
 
 
 def test_a_changed_plan_makes_its_keyframes_stale(package):
@@ -757,15 +764,20 @@ def test_directions_and_deleting_an_approved_keyframe(tmp_path):
         assert first["approved"] is None and second["approved"] == 0  # one per sub-shot
         [two] = b.wait() and b.takes(sid, 2)  # started by the approval
         b.http.post(f"/v1/shot-takes/{two['take_id']}/approve", json={"n": 0})
-        # A keyframe drawn from another sub-shot 1 draw can't be approved.
+        # Approval is a plain switch: another cut 1 keyframe approved, cut 2 (drawn from
+        # the old one) stays approved and is marked out of date; back, it is up to date.
         b.http.post(f"/v1/shot-takes/{first['take_id']}/approve", json={"n": 0})
-        r = b.http.post(f"/v1/shot-takes/{two['take_id']}/approve", json={"n": 0})
-        assert r.status_code == 409 and "isn't approved now" in r.json()["detail"]
+        subs = b.shot(sid)["sub_shots"]
+        assert subs[1]["approved"] == [two["take_id"], 0] and subs[1]["outdated"] == [
+            KF_BEFORE_CHANGED
+        ]
         b.http.post(f"/v1/shot-takes/{second['take_id']}/approve", json={"n": 0})
-        b.http.post(f"/v1/shot-takes/{two['take_id']}/approve", json={"n": 0})
-        # Deleting the approved sub-shot 1 take withdraws sub-shot 2 drawn from it.
+        assert b.shot(sid)["sub_shots"][1]["outdated"] == []
+        # Deleting the approved cut 1 take leaves cut 2 approved, out of date.
         assert b.http.delete(f"/v1/shot-takes/{second['take_id']}").status_code == 204
-        assert [s["approved"] for s in b.shot(sid)["sub_shots"]] == [None, None]
+        subs = b.shot(sid)["sub_shots"]
+        assert [s["approved"] for s in subs] == [None, [two["take_id"], 0]]
+        assert subs[1]["outdated"] == [KF_BEFORE_MISSING]
 
 
 def test_your_own_prompt_is_checked_and_not_rewritten(tmp_path):

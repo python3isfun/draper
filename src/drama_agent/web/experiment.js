@@ -571,10 +571,8 @@ async function usePick(ref, button) {
 }
 
 // Use as keyframe (docs/library-layers.md): the image becomes an approved take of the
-// sub-shot the chat is for. The keyframes after it that were drawn from the old one are
-// withdrawn, as with any new approval. When it can't be approved yet because the cut
-// before has no approved keyframe (approvals chain in order), it is brought in as a take,
-// to approve on the Keyframes tab once the cut before is done.
+// sub-shot the chat is for. A later cut drawn from the old keyframe stays approved, marked
+// out of date.
 async function useKeyframe(ref, button) {
   const n = exp.labels[ref];
   if (n == null) return;
@@ -587,18 +585,7 @@ async function useKeyframe(ref, button) {
     exp.said[ref] = `#${n} is now the approved keyframe of ${label}; it is being checked like any draw.`;
     if (exp.host) benchRefreshPage();
   } catch (e) {
-    if (/approve a keyframe of sub-shot/.test(e.message)) {
-      try {
-        await api(url, { method: "POST", body: JSON.stringify({ image: n, approve: false }) });
-        exp.used[ref] = "take";
-        exp.said[ref] = `#${n} is now a take of ${label}, not yet approved: ${e.message}. Approve it on the Keyframes tab once the cut before has its keyframe.`;
-        if (exp.host) benchRefreshPage();
-      } catch (e2) {
-        exp.said[ref] = e2.message;
-      }
-    } else {
-      exp.said[ref] = e.message;
-    }
+    exp.said[ref] = e.message;
   }
   exp.notice = exp.said[ref];
   renderExp();

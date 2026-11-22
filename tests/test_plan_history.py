@@ -5,6 +5,7 @@ import pytest
 
 from drama_agent.models.package import utcnow
 from drama_agent.shot_frames import ShotPlan, ShotPlanVersion, SubShot
+from drama_agent.shots.staleness import KF_BEFORE_MISSING
 from drama_agent.store import InMemoryRepository
 from drama_agent.store.sqlite import SqliteRepository
 
@@ -116,7 +117,7 @@ def test_a_re_plan_with_another_clip_keeps_the_old_plans_own_clip(tmp_path):
         assert v["plan"]["sub_shots"][-1]["end_ms"] == 15000
 
 
-def test_a_restore_counts_only_the_approvals_that_hold(tmp_path):
+def test_a_restore_counts_the_approvals_whose_draw_still_exists(tmp_path):
     with Board(tmp_path, text=TwoCuts()) as b:
         b.design()
         shot = b.busiest()
@@ -124,13 +125,16 @@ def test_a_restore_counts_only_the_approvals_that_hold(tmp_path):
         b.http.post(f"{b.base}/{sid}/plan", json=b.two_cuts(shot))
         _draw_and_approve_both(b, sid)
         first = b.takes(sid)[0]["take_id"]
+        second = b.takes(sid, 2)[0]["take_id"]
         b.http.post(f"{b.base}/{sid}/plan", json={})
         b.wait()
-        # The first cut's take is gone: the second, drawn from it, can't be approved alone.
+        # The first cut's take is gone: the second comes back approved on its own, marked
+        # out of date (the cut before it has no keyframe).
         b.repo.delete_shot_take(first)
         r = b.http.post(f"{b.base}/{sid}/plans/1/restore", json={})
-        assert r.status_code == 200 and r.json()["keyframes_approved"] == 0
-        assert _approved(b, sid) == [None, None]
+        assert r.status_code == 200 and r.json()["keyframes_approved"] == 1
+        assert _approved(b, sid) == [None, [second, 0]]
+        assert b.shot(sid)["sub_shots"][1]["outdated"] == [KF_BEFORE_MISSING]
 
 
 def test_a_plan_that_no_longer_fits_the_shot_is_not_restored(tmp_path):

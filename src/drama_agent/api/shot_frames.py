@@ -894,8 +894,10 @@ def register(
     @app.post("/v1/shot-takes/{take_id}/approve", response_model=ShotTake)
     async def approve_draw(take_id: str, req: ApproveRequest) -> ShotTake:
         """Approve one draw as its sub-shot's keyframe (replacing any other approval of
-        that sub-shot). A person may approve a draw the check failed; the export says so.
-        With `next`, the next sub-shot's keyframe starts, drawn from this one."""
+        that sub-shot). A plain switch: a person may approve a draw the check failed, or one
+        drawn from a picture that isn't the approved keyframe before it; the cut is then
+        marked out of date and the export says so. With `next`, the next sub-shot's
+        keyframe starts, drawn from this one."""
         take = _take_or_404(take_id)
         pkg = _writable(take.package_id, take.revision_id)
         d = next((d for d in take.results if d.n == req.n), None)
@@ -907,16 +909,6 @@ def register(
             raise HTTPException(409, f"{shot.shot_id} is being planned; approve once it is done")
         if current_sub(pkg, shot, plan, take) is None:
             raise HTTPException(409, "the sub-shot plan changed since this take was drawn")
-        takes = repo.list_shot_takes(take.package_id, take.revision_id)
-        if take.sub_shot > 1:
-            prev = approved_take(takes, take.shot_id, take.sub_shot - 1)
-            drawn_from = take.references[0].ref_id if take.references else ""
-            if prev is None or drawn_from != frame_ref(prev):
-                raise HTTPException(
-                    409,
-                    f"this keyframe was drawn from a keyframe of sub-shot {take.sub_shot - 1} "
-                    "that isn't approved now",
-                )
         out = repo.approve_shot_draw(take_id, req.n)
         following = plan.sub(take.sub_shot + 1)
 
@@ -929,8 +921,7 @@ def register(
             # Unless the next cut keeps an approved keyframe (one kept across an inserted cut
             # is redrawn when the user chooses: it is marked out of date).
             and approved_take(takes_now(), take.shot_id, following.index) is None
-            # Unless the next cut already has a take drawn from this keyframe (takes drawn
-            # from another, or for an older plan, can't be approved after it).
+            # Unless the next cut already has a take drawn from this keyframe.
             and not _drawn_from(pkg, shot, plan, following.index, frame_ref(out))
         ):
             with contextlib.suppress(NotReady, ValueError):
@@ -998,13 +989,6 @@ def register(
                                 sub_shot=sub.index, spec=sub, run_id="pattern", references=refs,
                                 size=frame_size(pkg), design_print=design_print(pkg, shot),
                                 likeness=any(r.likeness for r in refs))  # fmt: skip
-        if req.approve and t.sub_shot and t.sub_shot > 1:
-            prev = approved_take(takes, shot.shot_id, t.sub_shot - 1)
-            if prev is None or (
-                base.references[:1] and base.references[0].ref_id != frame_ref(prev)
-            ):
-                raise HTTPException(409, f"approve a keyframe of sub-shot {t.sub_shot - 1} "
-                                    "and draw a take from it first")  # fmt: skip
         turns = repo.list_exp_turns(session_id)
         ref = image_labels(turns).get(req.image)
         if ref is None:
@@ -1125,7 +1109,7 @@ def register(
     @app.delete("/v1/shot-takes/{take_id}", status_code=204)
     async def delete_take(take_id: str) -> None:
         """Delete a take and its draws' files. If it held the approved keyframe, that
-        approval and those of later sub-shots drawn from it are withdrawn."""
+        approval goes with it; a later cut drawn from it stays approved, out of date."""
         take = _take_or_404(take_id)
         _writable(take.package_id, take.revision_id)
         if take.busy:

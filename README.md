@@ -417,7 +417,14 @@ once, in order (`POST .../keyframes/{shot_id}/insert` with `after`, the cut it f
 moved to their new numbers. The cut right after the new one was drawn from the cut before
 the insert: it stays approved but out of date ("a cut was inserted before it") until it is
 redrawn from the new cut's keyframe, and approving the new cut doesn't withdraw it or start
-a redraw of it. With **Draw its keyframe** (`draw`, the default) the new cut is drawn once
+a redraw of it.
+
+**Approval is a plain switch.** Any finished draw can be approved, one per cut, and
+withdrawn; approving or withdrawing one never changes another cut's approval. What a
+keyframe was drawn from is a note, not a rule: a cut whose approved keyframe doesn't
+continue from the approved keyframe before it (the cut before was re-approved, withdrawn,
+deleted, or has no keyframe yet) stays approved and is marked out of date, in the window
+and in the export's warnings, until it is redrawn or the editor leaves it so. With **Draw its keyframe** (`draw`, the default) the new cut is drawn once
 planned, if the cut before it is approved. A shot holds at most 5 cuts, each at least 1 s
 inside the clip; a plan that can't fit keeps the shot as it was and says why. The plan from
 before the insert goes to the shot's plan history.

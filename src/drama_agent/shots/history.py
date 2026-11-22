@@ -87,7 +87,6 @@ def restore_plan(
     repo.delete_plan_version(pkg.package_id, pkg.revision_id, shot.shot_id, version)
     by_id = {t.take_id: t for t in repo.list_shot_takes(pkg.package_id, pkg.revision_id)}
     back = 0
-    # Earlier cuts first: a later cut's approval needs the one before it approved.
     for take_id, n in sorted(v.approved.items(),
                              key=lambda kv: getattr(by_id.get(kv[0]), "sub_shot", 0)):  # fmt: skip
         t = by_id.get(take_id)
@@ -95,8 +94,6 @@ def restore_plan(
             continue
         if not any(d.n == n and d.status == "done" for d in t.results):
             continue
-        # Approving can be undone at once by the chain rule (a later cut must be drawn from
-        # the approved cut before it): only an approval that holds counts.
-        if repo.approve_shot_draw(take_id, n).approved == n:
-            back += 1
+        repo.approve_shot_draw(take_id, n)
+        back += 1
     return plan, back

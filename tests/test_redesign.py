@@ -17,6 +17,7 @@ from drama_agent.images import (
 )
 from drama_agent.shot_frames import _cached, design_print
 from drama_agent.shot_reading import fingerprint
+from drama_agent.shots.staleness import KF_BEFORE_CHANGED
 
 from .test_shot_frames import Board, member
 
@@ -129,7 +130,7 @@ def test_a_redesigned_set_is_redrawn_in_order_and_its_keyframes_follow(tmp_path)
         assert b.shot(sid)["sub_shots"][0]["outdated"] == []
 
 
-def test_approving_a_redrawn_cut_redraws_the_next_one(tmp_path):
+def test_approving_a_redrawn_cut_leaves_the_next_one_approved_and_out_of_date(tmp_path):
     with Board(tmp_path) as b:
         b.design()
         shot = b.busiest()
@@ -140,15 +141,23 @@ def test_approving_a_redrawn_cut_redraws_the_next_one(tmp_path):
         b.http.post(f"/v1/shot-takes/{one['take_id']}/approve", json={"n": 0})
         [two] = b.wait() and b.takes(sid, 2)
         b.http.post(f"/v1/shot-takes/{two['take_id']}/approve", json={"n": 0, "next": False})
-        # A new first cut is approved: the second, drawn from the old one, is redrawn.
+        # A new first cut is approved: the second, drawn from the old one, stays approved
+        # (approval moves nothing else), marked out of date, and isn't redrawn by itself.
         b.http.post(f"{b.base}/{sid}", json={"draws": 1})
         b.wait()
         again = b.takes(sid)[-1]
         b.http.post(f"/v1/shot-takes/{again['take_id']}/approve", json={"n": 0})
         b.wait()
         second = b.shot(sid)["sub_shots"][1]
-        assert len(second["takes"]) == 2
-        b.http.post(f"/v1/shot-takes/{second['takes'][-1]['take_id']}/approve", json={"n": 0})
+        assert second["approved"] == [two["take_id"], 0]
+        assert second["outdated"] == [KF_BEFORE_CHANGED]
+        assert len(second["takes"]) == 1
+        # Redrawn from the new cut 1 and approved, it is up to date.
+        b.http.post(f"{b.base}/{sid}", json={"sub_shot": 2, "draws": 1})
+        b.wait()
+        redrawn = b.takes(sid, 2)[-1]
+        assert redrawn["references"][0]["ref_id"] == f"frame:{again['take_id']}:0"
+        b.http.post(f"/v1/shot-takes/{redrawn['take_id']}/approve", json={"n": 0})
         assert b.shot(sid)["sub_shots"][1]["outdated"] == []
 
 

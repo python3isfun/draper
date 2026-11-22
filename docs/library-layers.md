@@ -92,8 +92,8 @@ Each cut (sub-shot), on the shot's page and on the story's Keyframes tab, has:
   anything, the same chat opens. Mention a look's or set's `@number` in the chat to bring
   its picture in.
 - In the chat, **Use as keyframe** on any image brings it back as a take of that cut
-  ("From a chat", linked to the chat), approved, then checked like any draw. The later
-  cuts' approvals drawn from the old keyframe are withdrawn, as with any new approval.
+  ("From a chat", linked to the chat), approved, then checked like any draw. A later cut
+  drawn from the old keyframe stays approved, marked out of date.
 - Rounds, approve, withdraw, check again, prompt versions and New take work as on the
   Keyframes tab.
 
@@ -109,8 +109,7 @@ API:
   one draw, the chat's image (`imported_from` "experiment <id> #<n>"). It copies the
   newest take of that cut drawn for the plan in force (references, design print, size), so
   it stands where a drawn keyframe stands: approved, exported, and drawn from by the next
-  cut. It's refused (409) while the cut is being drawn, before the cut has any take, or,
-  for a later cut, when its pattern wasn't drawn from the approved keyframe before it.
+  cut. It's refused (409) while the cut is being drawn.
 
 ## Carried items and the story's Props
 

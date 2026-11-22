@@ -129,20 +129,24 @@ def test_kept_cuts_holds_the_old_views():
         kept_cuts(old, [new[0], _cut(2, "wide", 1000), new[2]], 1)
 
 
-def test_a_moved_keyframe_holds_only_while_its_own_keyframe_is_approved(tmp_path):
+def test_a_moved_keyframe_holds_whatever_cut_1_does(tmp_path):
     with Board(tmp_path) as b:
         sid, _, two = _approved_two_cuts(b)
         b.http.post(f"{b.base}/{sid}/insert", json={"after": 1, "note": "a glance", "draw": False})
         b.wait()
         assert b.shot(sid)["sub_shots"][2]["approved"] == [two["take_id"], 0]
-        # Another keyframe approved for cut 1: cut 3 was drawn from the old one, so it goes.
+        # Another keyframe approved for cut 1: cut 3 stays approved, still out of date for
+        # the insert (approval never withdraws another cut's keyframe).
         b.http.post(f"{b.base}/{sid}", json={"draws": 1})
         b.wait()
         other = b.takes(sid)[-1]
         r = b.http.post(f"/v1/shot-takes/{other['take_id']}/approve", json={"n": 0, "next": False})
         assert r.status_code == 200
         subs = b.shot(sid)["sub_shots"]
-        assert subs[0]["approved"] == [other["take_id"], 0] and subs[2]["approved"] is None
+        assert subs[0]["approved"] == [other["take_id"], 0]
+        assert subs[2]["approved"] == [two["take_id"], 0] and subs[2]["outdated"] == [
+            KF_CUT_INSERTED
+        ]
 
 
 def test_undo_and_redo_of_an_insert_move_only_the_keyframes_it_moved(tmp_path):

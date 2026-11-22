@@ -9,7 +9,7 @@
 
 const frames = { key: null, view: null, error: "", notes: [], timer: null, loading: false,
   draws: 2, rounds: 3, provider: null, directions: {}, prompts: {}, plans: {}, planOpts: {}, history: {}, episode: "all",
-  sel: {}, notes2: {}, compare: {}, diffs: new Map(), vdraws: {}, verr: {},
+  sel: {}, notes2: {}, compare: {}, diffs: new Map(), vdraws: {}, verr: {}, derr: {},
   send: { key: null, targets: null, error: "" },
   lockEdit: {} };  // the keyframes' reading as the editor is correcting it, per shot  // "Send to a look": the draw it is open on
 
@@ -58,9 +58,12 @@ async function loadFrames(pkg) {
   }
 }
 
-async function frameAction(url, button, body, method = "POST") {
+// `at`: a draw key (take_id:n) the refusal is shown under, beside the button clicked, as
+// well as at the top of the panel (which may be scrolled away).
+async function frameAction(url, button, body, method = "POST", at = null) {
   if (button) button.disabled = true;
   frames.error = "";
+  if (at) delete frames.derr[at];
   let out = null;
   let failed = "";
   try {
@@ -71,6 +74,7 @@ async function frameAction(url, button, body, method = "POST") {
   await loadFrames(frames.pkg || state.pkg);
   // The action's own error wins: reloading the board succeeds and would clear it.
   if (failed) frames.error = failed;
+  if (failed && at) frames.derr[at] = failed;
   framesRender();
   return out;
 }
@@ -99,10 +103,11 @@ function renderFrameDraw(take) {
               h("img", { class: "draw-waiting", src: drawUrl(take, d.n), alt: label, loading: "lazy", title: "Approve once the round is finished" }),
               lookalikeTag(take.likeness), idTag(`take:${take.take_id}:${d.n}`))
           : h("button", { type: "button", class: "draw-pick", title: approved ? "Approved" : "Approve this keyframe",
-              onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, { n: d.n }) },
+              onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, { n: d.n }, "POST", `${take.take_id}:${d.n}`) },
               h("img", { src: drawUrl(take, d.n), alt: label, loading: "lazy" }), lookalikeTag(take.likeness), idTag(`take:${take.take_id}:${d.n}`)),
       h("figcaption", {},
         h("div", { class: "keyframe-cap" }, label, checkBadge(d, approved)),
+        frames.derr[`${take.take_id}:${d.n}`] && h("p", { class: "small warn-text", role: "alert" }, `Not approved: ${frames.derr[`${take.take_id}:${d.n}`]}`),
         d.status === "done" && h("a", { href: drawUrl(take, d.n, "content"), target: "_blank", rel: "noopener", class: "muted small" }, "open"),
         approved && h("button", { type: "button", class: "btn ghost small",
           onclick: (e) => frameAction(`/v1/shot-takes/${encodeURIComponent(take.take_id)}/approve`, e.currentTarget, null, "DELETE") }, "Withdraw"),

@@ -19,7 +19,9 @@ from .references import previous_shot_frame
 # Why an approved keyframe is out of date.
 KF_TEXT_CHANGED = "the set, look or prop text changed since it was drawn"
 
-KF_BEFORE_CHANGED = "the keyframe it continues from has changed"
+KF_BEFORE_CHANGED = "the keyframe it continues from isn't the approved keyframe before it"
+
+KF_BEFORE_MISSING = "the cut before it has no approved keyframe"
 
 KF_SHOT_REVISED = "a revision changed the shot since it was drawn"
 
@@ -100,7 +102,8 @@ def keyframe_judge(
     """A function telling why a keyframe take is out of date (empty when it isn't): the
     design text it was written against changed, a design picture it was drawn from was
     replaced or is out of date (see images.outdated_pictures), or the keyframe it continues
-    from (the cut before, or the previous shot's) changed or is out of date itself."""
+    from (the cut before, or the previous shot's) isn't the approved one any more, is gone,
+    or is out of date itself. Approval itself never checks this: approvals.py."""
     from ..images import PICTURE_OUTDATED, PICTURE_REPLACED, is_current, outdated_pictures
 
     shots = {s.shot_id: s for s in pkg.shot_list}
@@ -129,8 +132,12 @@ def keyframe_judge(
                        else (p := approved_take(takes, t.shot_id, t.sub_shot - 1))
                        and FrameRef(ref_id=frame_ref(p), role="", kind="previous_frame"))  # fmt: skip
                 if now is None or now.ref_id != r.ref_id:
-                    inserted = t.moved_by_insert and r.kind != "previous_shot"
-                    out.append(KF_CUT_INSERTED if inserted else KF_BEFORE_CHANGED)
+                    if t.moved_by_insert and r.kind != "previous_shot":
+                        out.append(KF_CUT_INSERTED)
+                    elif now is None and r.kind != "previous_shot":
+                        out.append(KF_BEFORE_MISSING)
+                    else:
+                        out.append(KF_BEFORE_CHANGED)
                     continue
                 before_id = r.ref_id.split(":")[1]
                 before = next((x for x in takes if x.take_id == before_id), None)
