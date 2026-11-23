@@ -222,7 +222,8 @@ def test_a_clip_prompt_numbers_the_pictures_sent_and_drops_the_rest(package):
                          blocks=[
                              PromptBlock(sub_shot=1, text="In the room from {pic:img_set}, the woman "
                                          "from {pic:frame:t1:0} waits. Her coat from {pic:img_look} "
-                                         "is wet. She says in English: \"Hi.\"", camera="static shot"),
+                                         "is wet. The woman from {pic:img_look} says in English: "
+                                         "\"Hi.\"", camera="static shot"),
                              PromptBlock(sub_shot=2, text="Close on her face from {pic:frame:t2:0}.",
                                          camera="push in with small amplitude at slow speed")])  # fmt: skip
     text = clip_prompt(vp, plan, ["frame:t1:0", "frame:t2:0", "img_set"])
@@ -230,10 +231,18 @@ def test_a_clip_prompt_numbers_the_pictures_sent_and_drops_the_rest(package):
         "[Shot 1] In the room from <Picture 3>, the woman from <Picture 1> waits."
     )
     assert "img_look" not in text and "Her coat" not in text  # not sent: its sentence goes
-    assert 'She says in English: "Hi." The camera holds a static shot.' in text
+    # The spoken line survives even though the speaker's picture is not sent; its citation
+    # is stripped, so the clip keeps its voice.
+    assert 'The woman says in English: "Hi." The camera holds a static shot.' in text
     assert f"[Shot 2] At {plan.sub_shots[1].timecode}, Close on her face from <Picture 2>." in text
     assert "Camera motion: push in with small amplitude at slow speed." in text
     assert text.endswith("Only the rain.")
+
+    # Keyframes only (the fast option): the descriptive lines about unsent pictures go, but
+    # the spoken line stays, with no picture citation left in it.
+    fast = clip_prompt(vp, plan, ["frame:t1:0", "frame:t2:0"])
+    assert 'The woman says in English: "Hi."' in fast
+    assert "{pic:" not in fast and "img_look" not in fast and "img_set" not in fast
 
 
 def test_a_clip_is_current_only_for_the_print_it_was_rendered_from():

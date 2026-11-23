@@ -28,6 +28,19 @@ from .video_prompt import PIC
 ClipStatus = Literal["pending", "rendering", "done", "failed"]
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
+# A sentence carrying a spoken line ("... says in English: ..."): kept even when the
+# speaker's picture is not sent, so the dialogue (and so the clip's voice) survives.
+_SPEECH = re.compile(r"\bsays? in\b")
+
+
+def _drop_pics(sentence: str, refs: list[str]) -> str:
+    """`sentence` with each `{pic:<ref>}` in `refs` removed, along with a " from "/" and "
+    that introduces it, so "the woman from {pic:A} says ..." becomes "the woman says ..."."""
+    for ref in refs:
+        tok = "{pic:" + ref + "}"
+        sentence = sentence.replace(" and " + tok, "").replace(" from " + tok, "")
+        sentence = sentence.replace(tok, "")
+    return re.sub(r"\s{2,}", " ", sentence).strip()
 
 
 class ClipRef(BaseModel):
@@ -104,9 +117,13 @@ def clip_prompt(vp: ShotVideoPrompt, plan: ShotPlan, sent: list[str]) -> str:
         sub = plan.sub(block.sub_shot)
         kept = []
         for sentence in _SENTENCE.split(block.text.strip()):
-            pics = PIC.findall(sentence)
-            if any(p not in labels for p in pics):
-                continue
+            missing = [p for p in PIC.findall(sentence) if p not in labels]
+            if missing:
+                # Keep a spoken line even when the speaker's picture is not sent (drop the
+                # citation); a purely descriptive sentence about an unsent picture goes.
+                if not _SPEECH.search(sentence):
+                    continue
+                sentence = _drop_pics(sentence, missing)
             kept.append(PIC.sub(lambda m: labels[m.group(1)], sentence))
         text = " ".join(s for s in kept if s)
         if (cam := _camera_sentence(block.camera)) and cam.lower() not in text.lower():
