@@ -1008,8 +1008,21 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .ep-editor-block { margin-bottom: 6px; }
 .ep-editor label { display: block; margin: 4px 0 2px; }
 .ep-field { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; }
-.ep-pics { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.ep-pic { cursor: copy; font-size: 11px; }
+.ep-pics { margin-top: 6px; }
+.ep-pic-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.ep-pic { margin: 0; width: 96px; font-size: 11px; }
+.ep-pic-open { padding: 0; border: 1px solid var(--border); border-radius: 4px; background: none; cursor: zoom-in; display: block; }
+.ep-pic-open img { width: 96px; height: 96px; object-fit: cover; border-radius: 4px; display: block; }
+.ep-pic figcaption { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; word-break: break-all; }
+.ep-pic-token { cursor: copy; font-size: 10px; }
+.ep-pic-token:hover { text-decoration: underline; }
+.ep-pic-chip { display: inline-flex; align-items: center; gap: 4px; cursor: zoom-in; border: none; font: inherit; }
+.ep-pic-chip img { width: 20px; height: 20px; object-fit: cover; border-radius: 3px; }
 .ep-cuts { margin: 4px 0 0; padding-left: 20px; }
 .ep-cuts li { margin: 2px 0; }
 .ep-step-controls .plan-setting { font-size: 12px; margin-right: 4px; }
+.ep-stats { margin-top: 2px; }
+.ep-stats summary { cursor: pointer; }
+.ep-stats-table { border-collapse: collapse; font-size: 11px; margin-top: 2px; }
+.ep-stats-table td { padding: 1px 6px 1px 0; vertical-align: top; }
+.ep-stats-table td:first-child { white-space: nowrap; }

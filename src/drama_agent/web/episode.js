@@ -290,7 +290,7 @@ function renderShotSteps(pkg, run, row) {
       vp.error && h("div", { class: "small warn-text" }, vp.error),
       editing ? renderPromptEditor(pkg, run, row, vpUrl) : (vp.blocks || []).length > 0 && h("details", { class: "small ep-prompt" },
         h("summary", { class: "muted" }, "Prompt text"),
-        vp.blocks.map((b) => h("p", { class: "vp-text" }, h("strong", {}, vp.blocks.length > 1 ? `[Shot ${b.sub_shot}] ` : ""), vpText(b.text, vp.pictures || {}), h("span", { class: "muted" }, ` · camera: ${b.camera}`))),
+        vp.blocks.map((b) => h("p", { class: "vp-text" }, h("strong", {}, vp.blocks.length > 1 ? `[Shot ${b.sub_shot}] ` : ""), epPicText(b.text, vp.pictures || {}), h("span", { class: "muted" }, ` · camera: ${b.camera}`))),
         vp.sound && h("p", { class: "vp-text" }, h("strong", {}, "Sound: "), vp.sound)),
       stepHolds(run, row, (kind) => kind === "prompt"))));
 
@@ -354,11 +354,67 @@ function renderTake(pkg, run, row, c, usedId) {
   return h("div", { class: `ep-take ${used ? "used" : ""} ${c.state === "outdated" ? "outdated" : ""}` },
     c.has_file && h("video", { controls: true, preload: "none", src: clipUrl(c.clip_id), poster: c.has_poster ? clipUrl(c.clip_id, "poster") : null, class: "ep-clip" }),
     h("div", { class: "small muted" }, who, c.state === "outdated" && h("span", { class: "chip warn", title: "The prompt or the pictures changed since this take was rendered" }, "out of date")),
+    renderStats(c),
     used ? h("div", { class: "small ok-text" }, "In the episode") : null,
     h("div", { class: "ep-take-actions" },
       !used && c.has_file && h("button", { type: "button", class: "btn small", title: "Cut the episode from this take", onclick: (e) => epAction(clipUrl(c.clip_id, "use"), e.currentTarget, {}) }, "Use"),
       c.has_file && h("a", { class: "btn ghost small", href: clipUrl(c.clip_id), download: `${row.shot_id}-s${c.seed ?? 0}.mp4` }, "Download"),
       del));
+}
+
+// A finished take's render statistics: when it began and ended, how long the render took
+// (and the wait before it), the picture size, the file's length and size.
+const epSecs = (s) => (s == null ? "" : s < 60 ? `${Math.round(s)} s` : `${Math.floor(s / 60)} min ${String(Math.round(s % 60)).padStart(2, "0")} s`);
+const epBytes = (n) => (n == null ? "" : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+function renderStats(c) {
+  if (!c.finished_at) return null;
+  // Clips from before the render clock was recorded: the time from queueing to the end.
+  const total = (new Date(c.finished_at) - new Date(c.created_at)) / 1000;
+  const took = c.render_s != null ? epSecs(c.render_s) : epSecs(total);
+  const rows = [
+    ["Queued", clock(c.created_at)],
+    ["Began", c.started_at ? clock(c.started_at) : "–"],
+    ["Ended", clock(c.finished_at)],
+    ["Took", c.render_s != null ? took + (c.queue_s > 1 ? ` + ${epSecs(c.queue_s)} queued` : "") : `${took} incl. queue`],
+    ["Picture", c.width && c.height ? `${c.width}x${c.height}` : "–"],
+    ["Length", c.media_s != null ? `${c.media_s.toFixed(1)} s` : `${c.duration_s} s asked`],
+    ["Size", c.bytes != null ? epBytes(c.bytes) : "–"],
+  ];
+  return h("details", { class: "small ep-stats" },
+    h("summary", { class: "muted" }, [took, c.width && c.height ? `${c.width}x${c.height}` : "", epBytes(c.bytes)].filter(Boolean).join(" · ")),
+    h("table", { class: "ep-stats-table" }, rows.map(([k, v]) => h("tr", {}, h("td", { class: "muted" }, k), h("td", {}, v)))));
+}
+
+// The prompt's text with each `{pic:<ref>}` as a chip showing the picture: its thumbnail and
+// label, enlarged on click.
+function epPicText(text, pictures) {
+  const refs = Object.keys(pictures);
+  return text.split(/(\{pic:[^{}\s]+\})/).map((part) => {
+    const m = part.match(/^\{pic:([^{}\s]+)\}$/);
+    if (!m) return part;
+    const ref = m[1];
+    const label = pictures[ref];
+    if (!label) return h("span", { class: "chip vp-pic", title: ref }, "picture not sent");
+    return h("button", { type: "button", class: "chip vp-pic ep-pic-chip", title: `${ref} · click to enlarge`,
+      onclick: () => enlarge(refs.map((r) => ({ src: refSrc({ ref_id: r }, "content"), caption: `{pic:${r}} · ${pictures[r]}` })), refs.indexOf(ref)) },
+      h("img", { src: refSrc({ ref_id: ref }), alt: "" }), label);
+  });
+}
+
+// Put a picture token into the editor's text at the cursor of the field last focused (the
+// first cut's text when none was), and keep the draft in step.
+function insertToken(d, token) {
+  const el = d.focus && document.contains(d.focus) ? d.focus : document.querySelector(".ep-editor textarea");
+  if (!el) return;
+  const at = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? at;
+  const before = el.value.slice(0, at), after = el.value.slice(end);
+  const pad = before && !/\s$/.test(before) ? " " : "";
+  el.value = `${before}${pad}${token}${after && !/^\s/.test(after) ? " " : ""}${after}`;
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  const pos = (before + pad + token).length;
+  el.focus();
+  el.setSelectionRange(pos, pos);
 }
 
 function elapsed(since) {
@@ -396,13 +452,20 @@ function renderPromptEditor(pkg, run, row, vpUrl) {
   return h("div", { class: "ep-editor" },
     d.blocks.map((b, i) => h("div", { class: "ep-editor-block" },
       h("label", { class: "small muted" }, d.blocks.length > 1 ? `Cut ${b.sub_shot}` : "Text"),
-      h("textarea", { class: "ep-field", rows: 4, oninput: (e) => { d.blocks[i].text = e.target.value; } }, b.text),
+      h("textarea", { class: "ep-field", rows: 4, oninput: (e) => { d.blocks[i].text = e.target.value; }, onfocus: (e) => { d.focus = e.target; } }, b.text),
       h("label", { class: "small muted" }, "Camera"),
       h("input", { class: "ep-field", value: b.camera, oninput: (e) => { d.blocks[i].camera = e.target.value; } }))),
     h("label", { class: "small muted" }, "Sound"),
     h("textarea", { class: "ep-field", rows: 2, oninput: (e) => { d.sound = e.target.value; } }, d.sound),
-    Object.keys(pics).length > 0 && h("div", { class: "small muted ep-pics" }, "Pictures you can name: ",
-      Object.entries(pics).map(([ref, label]) => h("code", { class: "ep-pic", title: label, onclick: () => navigator.clipboard && navigator.clipboard.writeText(`{pic:${ref}}`) }, `{pic:${ref}}`, " ", h("span", { class: "muted" }, label)))),
+    Object.keys(pics).length > 0 && h("div", { class: "small ep-pics" },
+      h("div", { class: "muted" }, "Pictures the prompt can name. Click one to put its token where the cursor is; click the picture to enlarge."),
+      h("div", { class: "ep-pic-grid" }, Object.entries(pics).map(([ref, label], i, all) =>
+        h("figure", { class: "ep-pic" },
+          h("button", { type: "button", class: "ep-pic-open", title: `Enlarge: ${label}`, onclick: () => enlarge(all.map(([r, l]) => ({ src: refSrc({ ref_id: r }, "content"), caption: `{pic:${r}} · ${l}` })), i) },
+            h("img", { src: refSrc({ ref_id: ref }), alt: label, loading: "lazy" })),
+          h("figcaption", {},
+            h("code", { class: "ep-pic-token", title: "Insert this token into the text", onclick: () => insertToken(d, `{pic:${ref}}`) }, `{pic:${ref}}`),
+            h("span", { class: "muted" }, label)))))),
     d.error && h("div", { class: "small warn-text" }, d.error),
     h("div", { class: "ep-take-actions" },
       h("button", { type: "button", class: "btn small", onclick: (e) => save(e.currentTarget, false) }, "Save"),

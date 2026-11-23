@@ -683,7 +683,7 @@ class EpisodeRunner:
         inputs = self.clip_inputs(pkg, shot, plan, vp, takes, images, clip.fast)
         if inputs is None:
             raise RuntimeError("no reference picture can be sent with the clip")
-        clip.status = "rendering"
+        clip.status, clip.started_at = "rendering", utcnow()
         clip.prompt, clip.references = inputs.prompt, inputs.references
         clip.duration_s, clip.ratio, clip.written_from = (
             inputs.duration_s,
@@ -698,6 +698,13 @@ class EpisodeRunner:
         rel = f"clips/{pkg.package_id}/{clip.clip_id}.mp4"
         poster = f"clips/{pkg.package_id}/{clip.clip_id}.jpg"
         await asyncio.to_thread(self._write_file, rel, result.data)
+        clip.bytes = len(result.data)
+        try:
+            info = await asyncio.to_thread(asm.probe, self.media.path(rel))
+            clip.width, clip.height = info["width"], info["height"]
+            clip.media_s = round(info["duration_s"], 3)
+        except asm.AssembleError:
+            log.warning("clip %s could not be probed", clip.clip_id, exc_info=True)
         try:
             await asyncio.to_thread(asm.poster_of, self.media.path(rel), self.media.path(poster))
         except asm.AssembleError:

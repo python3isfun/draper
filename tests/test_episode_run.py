@@ -136,6 +136,17 @@ def test_the_fast_option_lowers_the_resolution_and_sends_keyframes_only(tmp_path
         # The clips record that they were rendered fast.
         clips = s.repo.list_shot_clips(s.pid, s.pkg.revision_id)
         assert clips and all(c.fast for c in clips)
+        # Each clip records its render statistics: times, size and the probed picture.
+        for c in clips:
+            assert c.started_at and c.finished_at and c.created_at <= c.started_at <= c.finished_at
+            assert c.render_s is not None and c.render_s >= 0 and c.queue_s is not None
+            assert c.bytes and c.bytes > 0 and c.width and c.height and c.media_s
+        view = next(x for x in run["shots"] if x["clip"]["clip_id"] == clips[0].clip_id)["clip"]
+        assert (
+            view["bytes"] == clips[0].bytes
+            and view["width"] == clips[0].width
+            and "render_s" in view
+        )
 
 
 @needs_ffmpeg

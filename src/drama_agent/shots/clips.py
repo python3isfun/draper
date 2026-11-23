@@ -76,12 +76,32 @@ class ShotClip(BaseModel):
     seed: int | None = None  # the render's seed; another seed is another take of the shot
     run_id: str | None = None  # the episode run that rendered it, if one did
     error: str | None = None
-    created_at: datetime = Field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=utcnow)  # queued
+    started_at: datetime | None = None  # the render began (after the queue)
     finished_at: datetime | None = None
+    # The rendered file: its size and the picture as probed (None until rendered).
+    bytes: int | None = None
+    width: int | None = None
+    height: int | None = None
+    media_s: float | None = None  # the file's actual length
 
     @property
     def busy(self) -> bool:
         return self.status in ("pending", "rendering")
+
+    @property
+    def render_s(self) -> float | None:
+        """Seconds the render itself took (queue time excluded), once finished."""
+        if self.started_at is None or self.finished_at is None:
+            return None
+        return (self.finished_at - self.started_at).total_seconds()
+
+    @property
+    def queue_s(self) -> float | None:
+        """Seconds it waited for its turn, once the render began."""
+        if self.started_at is None:
+            return None
+        return (self.started_at - self.created_at).total_seconds()
 
 
 def clip_ratio(pkg: ProductionPackage) -> str:
@@ -208,7 +228,10 @@ def clip_view(clip: ShotClip | None, state: str) -> dict[str, Any]:
     if clip is not None:
         out |= clip.model_dump(mode="json", include={
             "clip_id", "status", "duration_s", "ratio", "model", "error", "created_at",
-            "finished_at", "run_id", "fast", "seed"})  # fmt: skip
+            "started_at", "finished_at", "run_id", "fast", "seed", "bytes", "width", "height",
+            "media_s"})  # fmt: skip
+        out["render_s"] = clip.render_s
+        out["queue_s"] = clip.queue_s
         out["has_file"] = bool(clip.file)
         out["has_poster"] = bool(clip.poster)
         out["pictures"] = [r.model_dump() for r in clip.references]
