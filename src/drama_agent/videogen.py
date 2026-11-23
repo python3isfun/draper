@@ -64,7 +64,12 @@ class VideoClient(Protocol):
     max_references: int
 
     async def generate(
-        self, prompt: str, duration_s: int, ratio: str, references: list[VideoReference]
+        self,
+        prompt: str,
+        duration_s: int,
+        ratio: str,
+        references: list[VideoReference],
+        short_edge: int | None = None,
     ) -> VideoResult: ...
 
 
@@ -111,7 +116,12 @@ class MiniMaxVideoClient:
         await self._http.aclose()
 
     def body(
-        self, prompt: str, duration_s: int, ratio: str, references: list[VideoReference]
+        self,
+        prompt: str,
+        duration_s: int,
+        ratio: str,
+        references: list[VideoReference],
+        short_edge: int | None = None,
     ) -> dict:
         content: list[dict] = [{"type": "text", "text": prompt}]
         for r in references:
@@ -123,13 +133,18 @@ class MiniMaxVideoClient:
             "model": self.model_id,
             "content": content,
             "duration": max(MIN_CLIP_S, min(MAX_CLIP_S, int(duration_s))),
-            "resolution": self.resolution,
+            "resolution": f"{short_edge}P" if short_edge else self.resolution,
             "ratio": ratio if ratio in H3_RATIOS else "adaptive",
             "generate_audio": True,
         }
 
     async def generate(
-        self, prompt: str, duration_s: int, ratio: str, references: list[VideoReference]
+        self,
+        prompt: str,
+        duration_s: int,
+        ratio: str,
+        references: list[VideoReference],
+        short_edge: int | None = None,
     ) -> VideoResult:
         if len(references) > MAX_VIDEO_REFERENCES:
             raise VideoGenError(f"at most {MAX_VIDEO_REFERENCES} reference pictures")
@@ -137,7 +152,7 @@ class MiniMaxVideoClient:
             raise VideoGenError(f"the prompt is over {MAX_PROMPT_CHARS} characters")
         if not references:
             raise VideoGenError("a clip needs at least one reference picture")
-        task_id = await self._create(self.body(prompt, duration_s, ratio, references))
+        task_id = await self._create(self.body(prompt, duration_s, ratio, references, short_edge))
         url = await self._wait(task_id)
         return VideoResult(await self._download(url), model=self.model_id, task_id=task_id)
 
@@ -226,7 +241,12 @@ class MCPHubVideoClient(MiniMaxVideoClient):
         self._http.headers["X-API-Key"] = api_key
 
     def body(
-        self, prompt: str, duration_s: int, ratio: str, references: list[VideoReference]
+        self,
+        prompt: str,
+        duration_s: int,
+        ratio: str,
+        references: list[VideoReference],
+        short_edge: int | None = None,
     ) -> dict:
         conditions = []
         for r in references:
@@ -238,7 +258,7 @@ class MCPHubVideoClient(MiniMaxVideoClient):
             "seed": self.seed,
             "prompt": prompt,
             "target": {
-                "short_edge": self.short_edge,
+                "short_edge": short_edge or self.short_edge,
                 "aspect_ratio": ratio if ratio in H3_RATIOS else "auto",
                 "duration_seconds": max(MIN_CLIP_S, min(MAX_CLIP_S, int(duration_s))),
             },
@@ -334,10 +354,16 @@ class FixtureVideoClient:
         self.calls: list[dict] = []
 
     async def generate(
-        self, prompt: str, duration_s: int, ratio: str, references: list[VideoReference]
+        self,
+        prompt: str,
+        duration_s: int,
+        ratio: str,
+        references: list[VideoReference],
+        short_edge: int | None = None,
     ) -> VideoResult:
         self.calls.append({"prompt": prompt, "duration_s": duration_s, "ratio": ratio,
-                           "references": [r.name for r in references]})  # fmt: skip
+                           "references": [r.name for r in references],
+                           "short_edge": short_edge})  # fmt: skip
         if not references:
             raise VideoGenError("a clip needs at least one reference picture")
         if not ffmpeg_available():

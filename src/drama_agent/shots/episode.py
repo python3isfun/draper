@@ -40,7 +40,7 @@ from ..models.storyboard import Shot
 from ..videogen import VideoClient, VideoReference
 from . import assemble as asm
 from .approvals import approved_take, is_busy
-from .clip_refs import clip_references, exportable
+from .clip_refs import VIDEO_MAX_REFERENCES, clip_references, exportable
 from .clips import (
     ClipRef,
     ShotClip,
@@ -59,6 +59,10 @@ from .picks import shot_picks
 from .plans import current_sub, plan_of
 from .takes import plan_take
 from .video_prompt import approved_frames, fingerprint, prompt_state
+
+# The fast option: a lower short edge and fewer reference pictures, to render sooner.
+FAST_SHORT_EDGE = 512
+FAST_MAX_REFERENCES = 3
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +93,9 @@ class RunSettings(BaseModel):
     assemble: bool = True
     # Shots whose keyframes are made at once (renders are one at a time anyway).
     parallel: int = Field(2, ge=1, le=6)
+    # Render faster, rougher: a lower resolution and the cuts' keyframes as the only
+    # reference pictures. Trades likeness and detail stability for speed.
+    fast: bool = False
 
 
 class RunEvent(BaseModel):
@@ -141,6 +148,7 @@ class ClipInputs:
     duration_s: int
     ratio: str
     print: str
+    short_edge: int | None = None
 
 
 def episode_shots(pkg: ProductionPackage, episode_id: str) -> list[Shot]:
@@ -507,7 +515,7 @@ class EpisodeRunner:
             # The clip.
             ckey = f"{sid}:clip"
             clip = latest_clip(clips, sid)
-            inputs = self.clip_inputs(pkg, shot, plan, vp, takes, images)
+            inputs = self.clip_inputs(pkg, shot, plan, vp, takes, images, run.settings.fast)
             cs = clip_state(clip, inputs.print if inputs else None)
             if cs == "current":
                 continue
@@ -533,7 +541,7 @@ class EpisodeRunner:
             else:
                 run.event("Rendering the clip." if cs == "none"
                           else "The clip is out of date; rendering it again.", shot_id=sid)  # fmt: skip
-            self.start_render(pkg, shot, run_id=run.run_id)
+            self.start_render(pkg, shot, run_id=run.run_id, fast=run.settings.fast)
             rendering += 1
 
         run.holds = holds
@@ -575,32 +583,51 @@ class EpisodeRunner:
         vp: ShotVideoPrompt,
         takes: list[ShotTake],
         images: list[GeneratedImage],
+        fast: bool = False,
     ) -> ClipInputs | None:
         """What the shot's clip is rendered from now: the prompt as H3 takes it, the
-        pictures in the order sent (those with a file), its length and ratio, and the
-        print of all that. None when no picture can be sent."""
+        pictures in the order sent (those with a file), its length and ratio, the short
+        edge, and the print of all that. None when no picture can be sent. `fast` lowers
+        the resolution and sends only the cuts' keyframes."""
         frames = approved_frames(pkg, shot, plan, takes)
         reading = self.frames.fresh_reading(pkg, shot.scene_id)
-        sent, _, _ = clip_references(pkg, shot, plan, frames, reading, images,
-                                     exportable(images).__contains__)  # fmt: skip
+        sent, _, _ = clip_references(
+            pkg,
+            shot,
+            plan,
+            frames,
+            reading,
+            images,
+            exportable(images).__contains__,
+            limit=FAST_MAX_REFERENCES if fast else VIDEO_MAX_REFERENCES,
+            keyframes_only=fast,
+        )
         usable = [r for r in sent if (f := self.frames._ref_file(r["ref_id"])) and f[0].is_file()]
         if not usable:
             return None
         ids = [r["ref_id"] for r in usable]
         prompt = clip_prompt(vp, plan, ids)
         secs = clip_seconds(plan, shot.duration_ms)
+        short_edge = FAST_SHORT_EDGE if fast else None
         refs = [ClipRef(ref_id=r["ref_id"], label=f"<Picture {i}>", kind=r["kind"], about=r["about"])
                 for i, r in enumerate(usable, 1)]  # fmt: skip
         return ClipInputs(
-            prompt, ids, refs, secs, clip_ratio(pkg), clip_print(vp, prompt, ids, secs)
+            prompt,
+            ids,
+            refs,
+            secs,
+            clip_ratio(pkg),
+            clip_print(vp, prompt, ids, secs, short_edge),
+            short_edge,
         )
 
     def start_render(
-        self, pkg: ProductionPackage, shot: Shot, run_id: str | None = None
+        self, pkg: ProductionPackage, shot: Shot, run_id: str | None = None, fast: bool = False
     ) -> ShotClip:
-        """A new clip of the shot, rendered in the background (one at a time)."""
+        """A new clip of the shot, rendered in the background (one at a time). `fast`
+        renders it at a lower resolution with keyframes-only references."""
         clip = ShotClip(package_id=pkg.package_id, revision_id=pkg.revision_id,
-                        shot_id=shot.shot_id, run_id=run_id)  # fmt: skip
+                        shot_id=shot.shot_id, run_id=run_id, fast=fast)  # fmt: skip
         self.repo.save_shot_clip(clip)
         task = asyncio.create_task(self._render(clip.clip_id))
         self._renders[clip.clip_id] = task
@@ -639,7 +666,7 @@ class EpisodeRunner:
             raise RuntimeError("the shot has no finished video prompt")
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         images = repo.list_images(pkg.package_id, pkg.revision_id)
-        inputs = self.clip_inputs(pkg, shot, plan, vp, takes, images)
+        inputs = self.clip_inputs(pkg, shot, plan, vp, takes, images, clip.fast)
         if inputs is None:
             raise RuntimeError("no reference picture can be sent with the clip")
         clip.status = "rendering"
@@ -651,7 +678,9 @@ class EpisodeRunner:
         )
         repo.save_shot_clip(clip)
         refs = await asyncio.to_thread(self._reference_bytes, inputs.sent)
-        result = await self.video.generate(inputs.prompt, inputs.duration_s, inputs.ratio, refs)
+        result = await self.video.generate(
+            inputs.prompt, inputs.duration_s, inputs.ratio, refs, inputs.short_edge
+        )
         rel = f"clips/{pkg.package_id}/{clip.clip_id}.mp4"
         poster = f"clips/{pkg.package_id}/{clip.clip_id}.jpg"
         await asyncio.to_thread(self._write_file, rel, result.data)
@@ -716,7 +745,7 @@ class EpisodeRunner:
             # A prompt that fails a check still renders once its hold is released.
             usable = vp is not None and (not vp.problems or run.freed(f"{sid}:prompt"))
             if vstate == "current" and usable:
-                inputs = self.clip_inputs(pkg, shot, plan, vp, takes, images)
+                inputs = self.clip_inputs(pkg, shot, plan, vp, takes, images, run.settings.fast)
                 cstate = clip_state(clip, inputs.print if inputs else None)
             elif clip is not None:
                 cstate = (

@@ -56,11 +56,17 @@ def clip_references(
     reading: SceneReading | None,
     images: list[GeneratedImage],
     usable: Callable[[str], bool],
+    *,
+    limit: int = VIDEO_MAX_REFERENCES,
+    keyframes_only: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
     """(the pictures sent, the pictures left out, each person's state note). `frames` maps
     each cut to its approved keyframe (frame:<take>:<n>) where the shot's keyframes count;
     `usable` says whether a design picture can be sent (it is in the export). Each picture
-    is {ref_id, kind, entity_id, sub_shots, likeness, about}."""
+    is {ref_id, kind, entity_id, sub_shots, likeness, about}. `limit` caps how many are
+    sent (default VIDEO_MAX_REFERENCES); `keyframes_only` sends just the cuts' keyframes
+    (the fast option: least data to condition on), falling back to the usual priority order
+    for a shot that has no keyframe yet."""
     all_frames = bool(frames) and all(frames.values())
     chosen = {sub.index: chosen_pictures(pkg, shot, sub, reading) for sub in plan.sub_shots}
 
@@ -105,9 +111,12 @@ def clip_references(
         rest = [*faces, *props, *firsts, *later, *sets]
     else:
         rest = [*faces, *firsts, *sets, *props, *later]
+    if keyframes_only and refs:
+        rest = []
     seen = {r["ref_id"] for r in refs}
     for r in rest:
         if r["ref_id"] not in seen:
             seen.add(r["ref_id"])
             refs.append(r)
-    return refs[:VIDEO_MAX_REFERENCES], refs[VIDEO_MAX_REFERENCES:], notes
+    cap = max(1, min(limit, VIDEO_MAX_REFERENCES))
+    return refs[:cap], refs[cap:], notes

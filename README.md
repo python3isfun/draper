@@ -690,6 +690,13 @@ it was rendered from is the shot's current prompt and the same pictures would be
 change to either marks it out of date, like a video prompt. The Keyframes board shows each
 shot's clip (`clip`), and **Render again** renders one shot now.
 
+The **Fast** option (a run setting, and `fast` on a single render) renders sooner and
+rougher: the short edge drops to `512` (from the client's default) and only the cuts'
+keyframes are sent, capped at three, rather than the usual nine pictures. It trades
+likeness and detail stability for speed; resolution and clip length are the real levers,
+the reference count a smaller one. A clip's print records whether it was rendered fast, so
+switching the option marks the existing clips out of date.
+
 The video model is chosen like the text and image models, opt-in: `DRAMA_VIDEO_CLIENT`
 is `fixture` (default: plain coloured clips of the right length, made with ffmpeg, so the
 flow runs offline and in tests), `mcphub` (MiniMax-H3 Ref2VA on MCPHub's GPU route, the

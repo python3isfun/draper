@@ -59,6 +59,7 @@ class ShotClip(BaseModel):
     model: str | None = None
     task_id: str | None = None
     written_from: str = ""
+    fast: bool = False  # low resolution + keyframes-only references, to render faster
     run_id: str | None = None  # the episode run that rendered it, if one did
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -121,11 +122,17 @@ def clip_prompt(vp: ShotVideoPrompt, plan: ShotPlan, sent: list[str]) -> str:
     return " ".join(parts).strip()
 
 
-def clip_print(vp: ShotVideoPrompt, prompt: str, sent: list[str], duration_s: int) -> str:
+def clip_print(
+    vp: ShotVideoPrompt,
+    prompt: str,
+    sent: list[str],
+    duration_s: int,
+    short_edge: int | None = None,
+) -> str:
     """What a clip is rendered from: the prompt as written (its inputs' fingerprint and its
     text) and the pictures sent, in order."""
     h = hashlib.sha256()
-    for part in (vp.written_from, prompt, str(duration_s), *sent):
+    for part in (vp.written_from, prompt, str(duration_s), str(short_edge or ""), *sent):
         h.update(part.encode())
         h.update(b"\0")
     return h.hexdigest()[:24]

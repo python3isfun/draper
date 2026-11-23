@@ -32,6 +32,7 @@ class SettingsPatch(BaseModel):
     render: bool | None = None
     assemble: bool | None = None
     parallel: int | None = Field(None, ge=1, le=6)
+    fast: bool | None = None
 
 
 class ReleaseRequest(BaseModel):
@@ -44,6 +45,7 @@ class ShotRequest(BaseModel):
 
 class RevisionBody(BaseModel):
     revision_id: str | None = None
+    fast: bool = False
 
 
 class EpisodeItem(BaseModel):
@@ -256,7 +258,7 @@ def register(
         if any(c.busy for c in repo.list_shot_clips(pkg.package_id, pkg.revision_id)
                if c.shot_id == shot_id):  # fmt: skip
             raise HTTPException(409, f"{shot_id}'s clip is being rendered")
-        return episodes.start_render(pkg, shot)
+        return episodes.start_render(pkg, shot, fast=req.fast)
 
     @app.get("/v1/shot-clips/{clip_id}", response_model=ShotClip)
     async def get_clip(clip_id: str) -> ShotClip:

@@ -4,7 +4,7 @@
 // providerName(), stickyDetails() from shots.js.
 
 const ep = { key: null, episodes: null, episode: null, run: null, error: "", timer: null, loading: false,
-  settings: { draws: 2, max_rounds: 3, provider: null, holds: [], render: true, assemble: true, parallel: 2, approve_failed: true },
+  settings: { draws: 2, max_rounds: 3, provider: null, holds: [], render: true, assemble: true, parallel: 2, approve_failed: true, fast: false },
   skip: new Set(), busy: false, events: false, prompts: {} };
 
 const epKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
@@ -126,7 +126,9 @@ function renderEpisodeControls(pkg) {
       h("label", { title: "Off: stop at the video prompts (the shot specs); render nothing" },
         h("input", { type: "checkbox", checked: s.render, onchange: (e) => { s.render = e.target.checked; } }), " Render clips"),
       h("label", { title: "Off: leave the clips as they are; don't cut the episode together" },
-        h("input", { type: "checkbox", checked: s.assemble, onchange: (e) => { s.assemble = e.target.checked; } }), " Assemble the episode")),
+        h("input", { type: "checkbox", checked: s.assemble, onchange: (e) => { s.assemble = e.target.checked; } }), " Assemble the episode"),
+      h("label", { title: "Render faster and rougher: a lower resolution (512) and only the cuts' keyframes as reference pictures. Trades likeness and detail stability for speed." },
+        h("input", { type: "checkbox", checked: s.fast, onchange: (e) => { s.fast = e.target.checked; } }), " Fast (low res, keyframes only)")),
     h("div", { class: "design-row" },
       h("button", { type: "button", class: "btn primary", disabled: running || !chosen || ep.busy, onclick: async (e) => {
         const body = { revision_id: pkg.revision_id, ...s, skip_shots: [...ep.skip] };
@@ -227,7 +229,7 @@ function renderRunShots(pkg, run) {
               ? h("button", { type: "button", class: "btn small", onclick: (e) => epAction(`${base}/retry`, e.currentTarget, { shot_id: row.shot_id }) }, "Include")
               : h("button", { type: "button", class: "btn ghost small", title: "Leave this shot out of the run and the assembly", onclick: (e) => epAction(`${base}/settings`, e.currentTarget, { skip_shots: [...skip, row.shot_id] }, "PATCH") }, "Skip")),
             (row.stage === "waiting" || clip.state === "failed") && h("button", { type: "button", class: "btn small", title: "Forget this shot's failed tries and holds", onclick: (e) => epAction(`${base}/retry`, e.currentTarget, { shot_id: row.shot_id }) }, "Retry"),
-            run.settings.render && vp.state === "current" && !vp.problems.length && clip.state !== "rendering" && h("button", { type: "button", class: "btn small", title: "Render this shot's clip again now", onclick: (e) => epAction(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`, e.currentTarget, { revision_id: pkg.revision_id }) }, "Render again")));
+            run.settings.render && vp.state === "current" && !vp.problems.length && clip.state !== "rendering" && h("button", { type: "button", class: "btn small", title: "Render this shot's clip again now", onclick: (e) => epAction(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`, e.currentTarget, { revision_id: pkg.revision_id, fast: run.settings.fast }) }, "Render again")));
       }))));
 }
 
