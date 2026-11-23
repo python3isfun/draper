@@ -67,6 +67,10 @@ from .video_prompt import approved_frames, fingerprint, prompt_state
 # The fast option: a lower short edge, with only the identity anchors (every cut's keyframe
 # and each face) as references, to render sooner.
 FAST_SHORT_EDGE = 512
+# The fast option's reference pictures are sent at most this big on the short edge: the
+# model works at its own size and the clip is FAST_SHORT_EDGE wide, so more pixels are
+# only upload. Full renders send the pictures as they are.
+FAST_REF_SHORT_EDGE = 768
 
 log = logging.getLogger(__name__)
 
@@ -690,7 +694,9 @@ class EpisodeRunner:
             inputs.print,
         )
         repo.save_shot_clip(clip)
-        refs = await asyncio.to_thread(self._reference_bytes, inputs.sent)
+        refs = await asyncio.to_thread(
+            self._reference_bytes, inputs.sent, FAST_REF_SHORT_EDGE if clip.fast else None
+        )
         result = await self.video.generate(
             inputs.prompt, inputs.duration_s, inputs.ratio, refs, inputs.short_edge, clip.seed
         )
@@ -717,14 +723,27 @@ class EpisodeRunner:
         clip.status, clip.error, clip.finished_at = "done", None, utcnow()
         repo.save_shot_clip(clip)
 
-    def _reference_bytes(self, ids: list[str]) -> list[VideoReference]:
+    def _reference_bytes(
+        self, ids: list[str], short_edge: int | None = None
+    ) -> list[VideoReference]:
+        """The pictures to send, shrunk to `short_edge` (JPEG) when given and larger; a
+        picture that can't be shrunk goes as it is."""
         out = []
         for ref_id in ids:
             found = self.frames._ref_file(ref_id)
             if found is None or not found[0].is_file():
                 raise RuntimeError(f"reference picture {ref_id} is not available any more")
             path, mime = found
-            out.append(VideoReference(path.name, path.read_bytes(), mime))
+            data = None
+            if short_edge:
+                try:
+                    data = asm.shrink_picture(path, short_edge)
+                except asm.AssembleError:
+                    log.warning("reference %s could not be shrunk", ref_id, exc_info=True)
+            if data is not None:
+                out.append(VideoReference(path.stem + ".jpg", data, "image/jpeg"))
+            else:
+                out.append(VideoReference(path.name, path.read_bytes(), mime))
         return out
 
     def _write_file(self, rel: str, data: bytes) -> None:

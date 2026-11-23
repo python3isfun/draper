@@ -84,6 +84,21 @@ def assemble(clips: list[Path], out: Path, poster: Path | None = None) -> dict[s
     return {"duration_s": done["duration_s"], "width": w, "height": h, "clips": len(clips)}
 
 
+def shrink_picture(path: Path, short_edge: int, quality: int = 3) -> bytes | None:
+    """The picture as a JPEG whose short edge is at most `short_edge` (its aspect kept),
+    or None when it is already that small, so the caller sends it as it is. `quality` is
+    ffmpeg's JPEG scale (2 best, 31 worst)."""
+    info = probe(path)
+    if min(info["width"], info["height"]) <= short_edge:
+        return None
+    scale = f"scale=w='if(lt(iw,ih),{short_edge},-2)':h='if(lt(iw,ih),-2,{short_edge})'"
+    out = _run([
+        "ffmpeg", "-v", "error", "-i", str(path), "-vf", scale, "-frames:v", "1",
+        "-q:v", str(quality), "-f", "image2", "-c:v", "mjpeg", "pipe:1",
+    ], timeout=120)  # fmt: skip
+    return out.stdout
+
+
 def poster_of(clip: Path, poster: Path) -> None:
     """The first frame of a clip as a JPEG."""
     poster.parent.mkdir(parents=True, exist_ok=True)

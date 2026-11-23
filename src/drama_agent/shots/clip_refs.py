@@ -65,9 +65,9 @@ def clip_references(
     `usable` says whether a design picture can be sent (it is in the export). Each picture
     is {ref_id, kind, entity_id, sub_shots, likeness, about}. `limit` caps how many are
     sent (default VIDEO_MAX_REFERENCES); `anchors_only` sends just the identity anchors:
-    every cut's keyframe and each person's face (the fast option; a cut without a keyframe
-    or a person without a face picture otherwise drifts to another face), falling back to
-    the usual priority order for a shot that has no keyframe yet."""
+    every cut's keyframe and the face of each person on screen (the fast option; a cut
+    without a keyframe or a person without a face picture otherwise drifts to another
+    face), falling back to the usual priority order for a shot that has no keyframe yet."""
     all_frames = bool(frames) and all(frames.values())
     chosen = {sub.index: chosen_pictures(pkg, shot, sub, reading) for sub in plan.sub_shots}
 
@@ -113,7 +113,11 @@ def clip_references(
     else:
         rest = [*faces, *firsts, *sets, *props, *later]
     if anchors_only and refs:
-        rest = list(faces)
+        # The face of each person on screen in some cut (a person who only speaks off
+        # frame needs none); a person without a look has their face among `firsts`.
+        on_screen = {who for sub in plan.sub_shots for who in sub.people}
+        rest = [p for p in [*faces, *firsts]
+                if p["kind"] == "face" and p["entity_id"] in on_screen]  # fmt: skip
     seen = {r["ref_id"] for r in refs}
     for r in rest:
         if r["ref_id"] not in seen:

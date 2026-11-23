@@ -138,11 +138,13 @@ def clip_prompt(vp: ShotVideoPrompt, plan: ShotPlan, sent: list[str]) -> str:
         sub = plan.sub(block.sub_shot)
         kept = []
         for sentence in _SENTENCE.split(block.text.strip()):
-            missing = [p for p in PIC.findall(sentence) if p not in labels]
+            cited = PIC.findall(sentence)
+            missing = [p for p in cited if p not in labels]
             if missing:
-                # Keep a spoken line even when the speaker's picture is not sent (drop the
-                # citation); a purely descriptive sentence about an unsent picture goes.
-                if not _SPEECH.search(sentence):
+                # Keep a sentence that still cites a picture sent, or a spoken line (the
+                # clip keeps its voice), with the unsent citations dropped; a sentence
+                # only about unsent pictures goes.
+                if len(missing) == len(cited) and not _SPEECH.search(sentence):
                     continue
                 sentence = _drop_pics(sentence, missing)
             kept.append(PIC.sub(lambda m: labels[m.group(1)], sentence))

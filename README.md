@@ -713,12 +713,15 @@ and clips out of date. A changed sub-shot loses its approved keyframe, like on t
 
 The **Fast** option (a run setting, and `fast` on a single render) renders sooner and
 rougher: the short edge drops to `512` (from the client's default) and only the identity
-anchors are sent, every cut's keyframe and then each person's face, within the usual cap
-of nine. Resolution and clip length are the real levers on render time, the reference
-count a small one; and a cut without its keyframe, or a person without a face picture,
-drifts to another face (an early three-picture cap gave a close-up its scene partner's
-face). A clip's print records whether it was rendered fast, so switching the option marks
-the existing clips out of date.
+anchors are sent, every cut's keyframe and then the face of each person on screen, within
+the usual cap of nine, each picture shrunk to a `768` short edge (JPEG, by ffmpeg) since
+the model works at its own size and more pixels are only upload. Resolution and clip
+length are the real levers on render time, the reference count a small one; and a cut
+without its keyframe, or a person without a face picture, drifts to another face (an
+early three-picture cap gave a close-up its scene partner's face). A sentence of the
+prompt that cites both a sent and an unsent picture keeps the sent one; only a sentence
+about unsent pictures alone is dropped. A clip's print records whether it was rendered
+fast, so switching the option marks the existing clips out of date.
 
 The video model is chosen like the text and image models, opt-in: `DRAMA_VIDEO_CLIENT`
 is `fixture` (default: plain coloured clips of the right length, made with ffmpeg, so the

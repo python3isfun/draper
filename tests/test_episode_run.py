@@ -3,6 +3,7 @@ with holds, pause and resume."""
 
 import asyncio
 import json
+import subprocess
 import time
 
 import pytest
@@ -302,7 +303,8 @@ def test_a_clip_prompt_numbers_the_pictures_sent_and_drops_the_rest(package):
                          blocks=[
                              PromptBlock(sub_shot=1, text="In the room from {pic:img_set}, the woman "
                                          "from {pic:frame:t1:0} waits. Her coat from {pic:img_look} "
-                                         "is wet. The woman from {pic:img_look} says in English: "
+                                         "is wet. The woman from {pic:frame:t1:0} and {pic:img_look} "
+                                         "frowns. The woman from {pic:img_look} says in English: "
                                          "\"Hi.\"", camera="static shot"),
                              PromptBlock(sub_shot=2, text="Close on her face from {pic:frame:t2:0}.",
                                          camera="push in with small amplitude at slow speed")])  # fmt: skip
@@ -311,6 +313,8 @@ def test_a_clip_prompt_numbers_the_pictures_sent_and_drops_the_rest(package):
         "[Shot 1] In the room from <Picture 3>, the woman from <Picture 1> waits."
     )
     assert "img_look" not in text and "Her coat" not in text  # not sent: its sentence goes
+    # A sentence that also cites a picture sent is kept, minus the unsent citation.
+    assert "The woman from <Picture 1> frowns." in text
     # The spoken line survives even though the speaker's picture is not sent; its citation
     # is stripped, so the clip keeps its voice.
     assert 'The woman says in English: "Hi." The camera holds a static shot.' in text
@@ -323,6 +327,25 @@ def test_a_clip_prompt_numbers_the_pictures_sent_and_drops_the_rest(package):
     fast = clip_prompt(vp, plan, ["frame:t1:0", "frame:t2:0"])
     assert 'The woman says in English: "Hi."' in fast
     assert "{pic:" not in fast and "img_look" not in fast and "img_set" not in fast
+    assert "The woman from <Picture 1> frowns." in fast
+    assert "In the room, the woman from <Picture 1> waits." in fast  # the set citation dropped
+
+
+@needs_ffmpeg
+def test_a_reference_picture_is_shrunk_to_the_short_edge_asked(tmp_path):
+    from drama_agent.shots import assemble as asm
+
+    big = tmp_path / "big.png"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=1536x2720",
+                    "-frames:v", "1", str(big)], check=True)  # fmt: skip
+    data = asm.shrink_picture(big, 768)
+    assert data and data[:3] == b"\xff\xd8\xff" and len(data) < big.stat().st_size
+    small = tmp_path / "small.jpg"
+    small.write_bytes(data)
+    info = asm.probe(small)
+    assert (info["width"], info["height"]) == (768, 1360)
+    # Already small enough: sent as it is.
+    assert asm.shrink_picture(small, 768) is None
 
 
 def test_a_clip_is_current_only_for_the_print_it_was_rendered_from():
