@@ -712,11 +712,13 @@ after a run) needs **Unlock** first, which restores the draft plan and so puts t
 and clips out of date. A changed sub-shot loses its approved keyframe, like on the board.
 
 The **Fast** option (a run setting, and `fast` on a single render) renders sooner and
-rougher: the short edge drops to `512` (from the client's default) and only the cuts'
-keyframes are sent, capped at three, rather than the usual nine pictures. It trades
-likeness and detail stability for speed; resolution and clip length are the real levers,
-the reference count a smaller one. A clip's print records whether it was rendered fast, so
-switching the option marks the existing clips out of date.
+rougher: the short edge drops to `512` (from the client's default) and only the identity
+anchors are sent, every cut's keyframe and then each person's face, within the usual cap
+of nine. Resolution and clip length are the real levers on render time, the reference
+count a small one; and a cut without its keyframe, or a person without a face picture,
+drifts to another face (an early three-picture cap gave a close-up its scene partner's
+face). A clip's print records whether it was rendered fast, so switching the option marks
+the existing clips out of date.
 
 The video model is chosen like the text and image models, opt-in: `DRAMA_VIDEO_CLIENT`
 is `fixture` (default: plain coloured clips of the right length, made with ffmpeg, so the

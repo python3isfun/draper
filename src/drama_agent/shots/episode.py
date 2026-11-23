@@ -41,7 +41,7 @@ from ..videogen import VideoClient, VideoReference
 from . import assemble as asm
 from .approvals import approved_take, is_busy
 from .board import picture_labels
-from .clip_refs import VIDEO_MAX_REFERENCES, clip_references, exportable
+from .clip_refs import clip_references, exportable
 from .clips import (
     ClipRef,
     ShotClip,
@@ -64,9 +64,9 @@ from .plans import current_sub, plan_of
 from .takes import plan_take
 from .video_prompt import approved_frames, fingerprint, prompt_state
 
-# The fast option: a lower short edge and fewer reference pictures, to render sooner.
+# The fast option: a lower short edge, with only the identity anchors (every cut's keyframe
+# and each face) as references, to render sooner.
 FAST_SHORT_EDGE = 512
-FAST_MAX_REFERENCES = 3
 
 log = logging.getLogger(__name__)
 
@@ -603,8 +603,7 @@ class EpisodeRunner:
             reading,
             images,
             exportable(images).__contains__,
-            limit=FAST_MAX_REFERENCES if fast else VIDEO_MAX_REFERENCES,
-            keyframes_only=fast,
+            anchors_only=fast,
         )
         usable = [r for r in sent if (f := self.frames._ref_file(r["ref_id"])) and f[0].is_file()]
         if not usable:

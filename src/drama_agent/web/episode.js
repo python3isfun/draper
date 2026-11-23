@@ -132,8 +132,8 @@ function renderEpisodeControls(pkg) {
         h("input", { type: "checkbox", checked: s.render, onchange: (e) => { s.render = e.target.checked; } }), " Render clips"),
       h("label", { title: "Off: leave the clips as they are; don't cut the episode together" },
         h("input", { type: "checkbox", checked: s.assemble, onchange: (e) => { s.assemble = e.target.checked; } }), " Assemble the episode"),
-      h("label", { title: "Render faster and rougher: a lower resolution (512) and only the cuts' keyframes as reference pictures. Trades likeness and detail stability for speed." },
-        h("input", { type: "checkbox", checked: s.fast, onchange: (e) => { s.fast = e.target.checked; } }), " Fast (low res, keyframes only)")),
+      h("label", { title: "Render faster and rougher: a lower resolution (512), with every cut's keyframe and each face as the only reference pictures. Trades detail for speed." },
+        h("input", { type: "checkbox", checked: s.fast, onchange: (e) => { s.fast = e.target.checked; } }), " Fast (low res, keyframes and faces only)")),
     h("div", { class: "design-row" },
       h("button", { type: "button", class: "btn primary", disabled: running || !chosen || ep.busy, onclick: async (e) => {
         const body = { revision_id: pkg.revision_id, ...s, skip_shots: [...ep.skip] };
@@ -322,7 +322,7 @@ function renderOptions(pkg, run, row, again) {
   return [
     h("label", { class: "ep-opt small", title: "How many takes to render, each with its own seed" },
       "Takes ", h("select", { onchange: (e) => { o.takes = Number(e.target.value); } }, [1, 2, 3, 4].map((n) => h("option", { value: n, selected: o.takes === n }, n)))),
-    h("label", { class: "ep-opt small", title: "Fast: a lower resolution with the keyframes only as references. Full: the run's normal size and every reference picture." },
+    h("label", { class: "ep-opt small", title: "Fast: a lower resolution, with every cut's keyframe and each face as the only references. Full: the run's normal size and every reference picture." },
       h("select", { onchange: (e) => { o.fast = e.target.value === "fast"; } },
         h("option", { value: "fast", selected: o.fast }, "Fast"), h("option", { value: "full", selected: !o.fast }, "Full quality"))),
     h("button", { type: "button", class: "btn small", title: "Render new takes of this shot now; each appears beside the clip while it renders", onclick: (e) => epAction(url, e.currentTarget, { revision_id: pkg.revision_id, fast: o.fast, takes: o.takes }) }, again ? "Render again" : "Render now"),

@@ -72,7 +72,7 @@ class ShotClip(BaseModel):
     model: str | None = None
     task_id: str | None = None
     written_from: str = ""
-    fast: bool = False  # low resolution + keyframes-only references, to render faster
+    fast: bool = False  # low resolution, keyframes + faces only as references, to render faster
     seed: int | None = None  # the render's seed; another seed is another take of the shot
     run_id: str | None = None  # the episode run that rendered it, if one did
     error: str | None = None

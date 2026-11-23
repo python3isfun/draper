@@ -122,20 +122,27 @@ def test_generate_episode_takes_every_shot_to_a_clip_and_cuts_the_episode(tmp_pa
         assert again["output"]["print"] == out["print"] and len(s.video.calls) == n
 
 
-def test_the_fast_option_lowers_the_resolution_and_sends_keyframes_only(tmp_path):
+def test_the_fast_option_lowers_the_resolution_and_sends_the_anchors_only(tmp_path):
     with Studio(tmp_path) as s:
         s.start(fast=True)
         run = s.wait(done, what="the fast run finishing")
         assert run["settings"]["fast"] is True
         n = len(episode_shots(s.pkg, s.episode))
         assert run["counts"]["clips_done"] == n and len(s.video.calls) == n
-        # Every clip went at the fast short edge, with only the cuts' keyframes as refs.
+        # Every clip went at the fast short edge, within the usual picture cap.
         for call in s.video.calls:
             assert call["short_edge"] == 512
-            assert 1 <= len(call["references"]) <= 3
-        # The clips record that they were rendered fast.
+            assert 1 <= len(call["references"]) <= 9
+        # The clips record that they were rendered fast, and sent only the identity
+        # anchors: every cut's keyframe, then each person's face.
         clips = s.repo.list_shot_clips(s.pid, s.pkg.revision_id)
         assert clips and all(c.fast for c in clips)
+        cuts = {r["shot_id"]: r["cuts"] for r in run["shots"]}
+        for c in clips:
+            kinds = [r.kind for r in c.references]
+            assert set(kinds) <= {"keyframe", "face"} and kinds.count("keyframe") == cuts[c.shot_id]
+            assert kinds == sorted(kinds, key=lambda k: k != "keyframe")  # keyframes first
+        assert any("face" in {r.kind for r in c.references} for c in clips)
         # Each clip records its render statistics: times, size and the probed picture.
         for c in clips:
             assert c.started_at and c.finished_at and c.created_at <= c.started_at <= c.finished_at

@@ -58,15 +58,16 @@ def clip_references(
     usable: Callable[[str], bool],
     *,
     limit: int = VIDEO_MAX_REFERENCES,
-    keyframes_only: bool = False,
+    anchors_only: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
     """(the pictures sent, the pictures left out, each person's state note). `frames` maps
     each cut to its approved keyframe (frame:<take>:<n>) where the shot's keyframes count;
     `usable` says whether a design picture can be sent (it is in the export). Each picture
     is {ref_id, kind, entity_id, sub_shots, likeness, about}. `limit` caps how many are
-    sent (default VIDEO_MAX_REFERENCES); `keyframes_only` sends just the cuts' keyframes
-    (the fast option: least data to condition on), falling back to the usual priority order
-    for a shot that has no keyframe yet."""
+    sent (default VIDEO_MAX_REFERENCES); `anchors_only` sends just the identity anchors:
+    every cut's keyframe and each person's face (the fast option; a cut without a keyframe
+    or a person without a face picture otherwise drifts to another face), falling back to
+    the usual priority order for a shot that has no keyframe yet."""
     all_frames = bool(frames) and all(frames.values())
     chosen = {sub.index: chosen_pictures(pkg, shot, sub, reading) for sub in plan.sub_shots}
 
@@ -111,8 +112,8 @@ def clip_references(
         rest = [*faces, *props, *firsts, *later, *sets]
     else:
         rest = [*faces, *firsts, *sets, *props, *later]
-    if keyframes_only and refs:
-        rest = []
+    if anchors_only and refs:
+        rest = list(faces)
     seen = {r["ref_id"] for r in refs}
     for r in rest:
         if r["ref_id"] not in seen:
