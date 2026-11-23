@@ -348,16 +348,19 @@ function renderPromptEditor(pkg, run, row, vpUrl) {
     button.disabled = true;
     try {
       await api(vpUrl, { method: "PUT", body: JSON.stringify({ revision_id: pkg.revision_id, blocks: d.blocks, sound: d.sound }) });
-      delete ep.edit[row.shot_id];
-      if (thenRender) {
-        const o = ep.renderOpts[row.shot_id] || { takes: 1, fast: run.settings.fast };
-        await api(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`, { method: "POST", body: JSON.stringify({ revision_id: pkg.revision_id, fast: o.fast, takes: o.takes }) });
-      }
-      await loadEpisode(ep.pkg, { force: true });
     } catch (e) {
       d.error = e.message;
       button.disabled = false;
       renderMain();
+      return;
+    }
+    // Saved: the editor closes; a render that fails shows as the page's error.
+    delete ep.edit[row.shot_id];
+    if (thenRender) {
+      const o = ep.renderOpts[row.shot_id] || { takes: 1, fast: run.settings.fast };
+      await epAction(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`, null, { revision_id: pkg.revision_id, fast: o.fast, takes: o.takes });
+    } else {
+      await loadEpisode(ep.pkg, { force: true });
     }
   };
   return h("div", { class: "ep-editor" },

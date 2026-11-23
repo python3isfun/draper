@@ -191,6 +191,13 @@ def test_more_takes_render_beside_the_clip_and_an_edited_prompt_outdates_them(tm
             what="the edited clip")  # fmt: skip
         assert "A moth circles the lamp." in s.video.calls[-1]["prompt"]
         assert s.video.calls[-1]["prompt"].endswith("Rain on the window.")
+        # A prompt whose writer failed is fixed by an edit: it is done again and renders.
+        stored = s.repo.get_video_prompt(s.pid, s.pkg.revision_id, sid)
+        stored.status, stored.error = "failed", "the writer timed out"
+        s.repo.save_video_prompt(stored)
+        r = s.http.put(url, json={"blocks": blocks, "sound": "Rain on the window."})
+        assert r.status_code == 200 and r.json()["status"] == "done" and not r.json()["error"]
+        assert s.http.post(f"/v1/drama-packages/{s.pid}/clips/{sid}", json={}).status_code == 202
 
 
 @needs_ffmpeg

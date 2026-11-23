@@ -137,6 +137,8 @@ class MiniMaxVideoClient:
             "duration": max(MIN_CLIP_S, min(MAX_CLIP_S, int(duration_s))),
             "resolution": f"{short_edge}P" if short_edge else self.resolution,
             "ratio": ratio if ratio in H3_RATIOS else "adaptive",
+            # MiniMax's API has no documented seed: takes differ by the model's own
+            # randomness there; `seed` is honored on the MCPHub route.
             "generate_audio": True,
         }
 

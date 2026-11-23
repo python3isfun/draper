@@ -656,7 +656,7 @@ def register(
             raise HTTPException(422, str(exc)) from exc
         stored.blocks, stored.sound, stored.notes = blocks, out.sound, out.notes
         stored.problems, stored.advice = problems, advice
-        stored.source, stored.model, stored.error = "user", None, None
+        stored.status, stored.source, stored.model, stored.error = "done", "user", None, None
         stored.written_from, stored.updated_at = fingerprint(context, ids), utcnow()
         repo.save_video_prompt(stored)
         return stored
