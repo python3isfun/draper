@@ -9,7 +9,8 @@ const ep = { key: null, episodes: null, episode: null, run: null, error: "", tim
 
 // Whether the page should keep polling: the run goes on, or a prompt or a take is in work.
 const epLive = (run) => !!run && (run.status === "running"
-  || run.shots.some((r) => r.prompt.state === "writing" || (r.clips || []).some((c) => c.state === "rendering")));
+  || run.shots.some((r) => r.stage === "planning" || r.keyframes.some((k) => k.busy) || r.prompt.state === "writing"
+    || (r.clips || []).some((c) => c.state === "rendering")));
 
 const epKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
 const epBase = (pkg) => `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/episodes`;
@@ -226,10 +227,39 @@ function renderShotSteps(pkg, run, row) {
 
   // 1. Cut plan.
   const planning = row.stage === "planning" || row.stage === "pictures";
+  // The cut plan is edited in place with the board's editor, on the board's view of the shot.
+  const bshot = frames.key === framesKey(pkg) && frames.view ? frames.view.shots.find((s) => s.shot_id === row.shot_id) : null;
+  const planEditing = !!frames.plans[row.shot_id];
+  const locked = bshot && bshot.plan.source === "keyframes";
+  const afterPlan = () => loadEpisode(ep.pkg, { force: true });
   steps.push(epStep("Cuts",
     row.cuts > 0 ? "done" : planning ? "active" : "idle",
     row.cuts > 0 ? `${row.cuts} cut${row.cuts > 1 ? "s" : ""} planned` : planning ? "planning…" : "not planned yet",
-    [h("button", { type: "button", class: "btn ghost small", title: "Change the cut plan on the Keyframes tab", onclick: () => openOnBoard(row.shot_id) }, "Edit cuts")]));
+    bshot && !planEditing ? [
+      planSettings(pkg, bshot),
+      h("button", { type: "button", class: "btn ghost small", disabled: bshot.busy || locked, title: locked ? "Unlock the shot on the Keyframes tab to plan it again" : "Ask the text model where the cuts go, at this shot's pace and cut count", onclick: async (e) => {
+        const o = planOpts(pkg, bshot);
+        await frameAction(`${framesBase(pkg)}/${encodeURIComponent(row.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id, pace: o.pace || null, cuts: o.cuts ? Number(o.cuts) : null });
+        if (!frames.error) delete frames.planOpts[historyKey(pkg, bshot)];
+        afterPlan();
+      } }, "Plan cuts"),
+      locked && h("button", { type: "button", class: "btn small", disabled: bshot.busy, title: "The plan is locked to the approved keyframes. Unlock restores the draft plan the lock replaced so it can be edited; the keyframes stay approved.", onclick: async (e) => {
+        await frameAction(`${framesBase(pkg)}/${encodeURIComponent(row.shot_id)}/unlock`, e.currentTarget, { revision_id: pkg.revision_id });
+        afterPlan();
+      } }, "Unlock"),
+      h("button", { type: "button", class: "btn small", disabled: bshot.busy || locked, title: locked ? "Unlock the plan first" : "Edit the cuts here", onclick: () => {
+        frames.plans[row.shot_id] = { clip_s: Math.min(15, Math.max(4, Math.ceil(bshot.clip_ms / 1000))), rows: bshot.sub_shots.map((s) => ({ start_s: s.start_ms / 1000, framing: s.framing, camera: s.camera, action: s.action, pos: positionsOf(s) })) };
+        renderMain();
+      } }, "Edit"),
+      h("button", { type: "button", class: "btn ghost small", title: "The plan with its history and lock on the Keyframes tab", onclick: () => openOnBoard(row.shot_id) }, "On the board"),
+    ] : [],
+    h("div", {},
+      bshot && bshot.plan.error && h("div", { class: "small warn-text" }, bshot.plan.error),
+      bshot && bshot.plan.problems.length > 0 && h("div", { class: "small warn-text" }, "Not a clean spec for video yet: ", bshot.plan.problems.join("; ")),
+      frames.error && planEditing && h("div", { class: "small warn-text" }, frames.error),
+      bshot && planEditing ? renderPlanEditor(pkg, bshot, afterPlan)
+        : bshot && bshot.sub_shots.length > 0 && h("ol", { class: "small ep-cuts" }, bshot.sub_shots.map((s) =>
+          h("li", { title: `${s.framing}${s.camera ? ` · ${s.camera}` : ""}` }, h("span", { class: "mono muted" }, `${(s.start_ms / 1000).toFixed(1)}s `), sbShort(s.framing, 140), s.camera && h("span", { class: "muted" }, ` · ${sbShort(s.camera, 60)}`)))))));
 
   // 2. Keyframes, one per cut.
   const cutHeld = row.keyframes.some((k) => held(`cut${k.index}`));
@@ -417,7 +447,8 @@ function renderRunEvents(run) {
 
 function renderEpisode(pkg) {
   if (ep.key !== epKey(pkg)) loadEpisode(pkg);
-  if (frames.key !== framesKey(pkg)) loadFrames(pkg);  // the providers, and the board behind the links
+  // The providers, and the board's view of each shot (the cut plan editor works on it).
+  if (frames.key !== framesKey(pkg)) loadFrames(pkg).then(() => { if (epShown(epKey(pkg))) renderWhenNotSelecting(); });
   const ready = ep.key === epKey(pkg) && ep.episodes !== null;
   if (ready && epLive(ep.run) && !ep.timer && !ep.loading) loadEpisode(pkg);
   if (!ready) return h("div", { class: "loading" }, ep.error || "Loading…");

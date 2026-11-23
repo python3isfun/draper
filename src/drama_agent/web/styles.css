@@ -1010,3 +1010,6 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .ep-field { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; }
 .ep-pics { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .ep-pic { cursor: copy; font-size: 11px; }
+.ep-cuts { margin: 4px 0 0; padding-left: 20px; }
+.ep-cuts li { margin: 2px 0; }
+.ep-step-controls .plan-setting { font-size: 12px; margin-right: 4px; }

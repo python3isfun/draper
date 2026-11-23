@@ -701,7 +701,11 @@ episode is cut from it (`POST /v1/shot-clips/{id}/use`). The Prompt step's **Edi
 the video prompt in place: a field per cut, its camera sentence and the sound, with the
 pictures it may name; saving (`PUT .../keyframes/{shot_id}/video-prompt`) runs the same
 checks as a written prompt, marks it current to the shot, and puts its takes out of date
-until **Save & render** or **Render again**.
+until **Save & render** or **Render again**. The Cuts step lists the shot's sub-shots and
+embeds the board's cut plan editor (**Edit**), with **Plan cuts** and the pace and cut
+count for the text model; a plan locked to its approved keyframes (as every shot's is
+after a run) needs **Unlock** first, which restores the draft plan and so puts the prompt
+and clips out of date. A changed sub-shot loses its approved keyframe, like on the board.
 
 The **Fast** option (a run setting, and `fast` on a single render) renders sooner and
 rougher: the short edge drops to `512` (from the client's default) and only the cuts'

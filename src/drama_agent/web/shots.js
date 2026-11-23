@@ -473,7 +473,9 @@ function positionsOf(sub) {
   return pos;
 }
 
-function renderPlanEditor(pkg, shot) {
+// `onSaved` runs after a saved plan instead of the board's redraw (the Episode tab embeds
+// the editor and reloads its own run).
+function renderPlanEditor(pkg, shot, onSaved = null) {
   const key = shot.shot_id;
   const draft = frames.plans[key];
   const rows = draft.rows;
@@ -522,7 +524,7 @@ function renderPlanEditor(pkg, shot) {
           return { start_ms: i === 0 ? 0 : Math.round(Number(r.start_s) * 1000), framing: r.framing, camera: r.camera, action: r.action, people, placement, off_screen };
         });
         await frameAction(`${framesBase(pkg)}/${encodeURIComponent(shot.shot_id)}/plan`, e.currentTarget, { revision_id: pkg.revision_id, sub_shots, clip_s: Number(draft.clip_s) || null });
-        if (!frames.error) { delete frames.plans[key]; framesRender(); }
+        if (!frames.error) { delete frames.plans[key]; if (onSaved) onSaved(); else framesRender(); }
       } }, "Save plan"),
       h("button", { type: "button", class: "btn ghost small", onclick: () => { delete frames.plans[key]; framesRender(); } }, "Cancel"),
       h("span", { class: "muted small" }, "Each sub-shot ends where the next starts. A clean spec: every line inside one sub-shot, each speaker on screen or placed off frame, every cut a new view, screen sides held across cuts. Changed sub-shots lose their approved keyframes.")));
