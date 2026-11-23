@@ -6,8 +6,11 @@ as start frames (that is a different H3 variant). `MiniMaxVideoClient` speaks Mi
 video API (`POST /v2/video_generation`, then polling `GET /v2/query/video_generation/{id}`):
 a task is created, waited for, and its file downloaded. `FixtureVideoClient` makes a plain
 coloured clip of the right length with ffmpeg, so the episode flow runs offline and in
-tests. Both are chosen by `video_client_from_env`: real renders are opt-in
-(`DRAMA_VIDEO_CLIENT=minimax`), a key in the environment alone never triggers paid calls.
+tests. `MCPHubVideoClient` uses the same model on MCPHub's GPU route
+(`POST /api/v3/gpu-videos/minimax-h3-ref2va/jobs`, then `GET /api/v3/gpu-videos/jobs/{id}`),
+which runs on the company's own H100s and takes the MCPHub key. All are chosen by
+`video_client_from_env`: real renders are opt-in (`DRAMA_VIDEO_CLIENT=mcphub|minimax`), a
+key in the environment alone never triggers GPU calls.
 """
 
 from __future__ import annotations
@@ -195,6 +198,102 @@ class MiniMaxVideoClient:
         return resp.content
 
 
+class MCPHubVideoClient(MiniMaxVideoClient):
+    """MiniMax-H3 Ref2VA on MCPHub's GPU route. One clip renders at a time on the shared
+    server (about 3.5 minutes for 4 s at 768p), so a job may wait behind others; the same
+    request with the same seed gives the identical clip."""
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.mcphub.com",
+        model: str = "minimax-h3-ref2va",
+        short_edge: int = 768,
+        *,
+        seed: int = 1,
+        poll_s: float = 15.0,
+        timeout_s: float = 3600.0,
+        max_retries: int = 2,
+        backoff_s: float = 5.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        super().__init__(api_key, base_url, model, str(short_edge), poll_s=poll_s,
+                         timeout_s=timeout_s, max_retries=max_retries, backoff_s=backoff_s,
+                         transport=transport)  # fmt: skip
+        self.short_edge = short_edge
+        self.seed = seed
+        self._http.headers.pop("Authorization", None)
+        self._http.headers["X-API-Key"] = api_key
+
+    def body(
+        self, prompt: str, duration_s: int, ratio: str, references: list[VideoReference]
+    ) -> dict:
+        conditions = []
+        for r in references:
+            fmt = r.mime.split("/", 1)[-1].lower().replace("jpg", "jpeg")
+            uri = f"data:image/{fmt};base64,{base64.b64encode(r.data).decode()}"
+            conditions.append({"type": "image", "role": "reference", "uri": uri})
+        return {
+            "task": "ref2va",
+            "seed": self.seed,
+            "prompt": prompt,
+            "target": {
+                "short_edge": self.short_edge,
+                "aspect_ratio": ratio if ratio in H3_RATIOS else "auto",
+                "duration_seconds": max(MIN_CLIP_S, min(MAX_CLIP_S, int(duration_s))),
+            },
+            "conditions": conditions,
+        }
+
+    async def _create(self, body: dict) -> str:
+        last = ""
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = await self._http.post(f"/api/v3/gpu-videos/{self.model_id}/jobs", json=body)
+            except httpx.TransportError as exc:
+                last = f"transport error: {exc!r}"
+            else:
+                if resp.status_code in (200, 201, 202):
+                    data = resp.json()
+                    job_id = data.get("id") or data.get("job_id")
+                    if not job_id:
+                        raise VideoGenError(f"no job id in the response: {resp.text[:300]}")
+                    return str(job_id)
+                last = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                if resp.status_code not in RETRYABLE_STATUS:
+                    raise VideoGenError(f"video generation refused: {last}")
+            if attempt < self.max_retries:
+                await asyncio.sleep(self.backoff_s * 2**attempt)
+        raise VideoGenError(f"video generation failed: {last}")
+
+    async def _wait(self, task_id: str) -> str:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout_s
+        while True:
+            try:
+                resp = await self._http.get(f"/api/v3/gpu-videos/jobs/{task_id}")
+            except httpx.TransportError as exc:
+                log.info("video job %s: poll failed (%r), trying again", task_id, exc)
+                resp = None
+            if resp is not None and resp.status_code == 200:
+                data = resp.json()
+                status = str(data.get("status", "")).lower()
+                if status in ("completed", "succeeded"):
+                    url = data.get("video_url") or (data.get("output") or {}).get("video_url")
+                    if not url:
+                        raise VideoGenError("the job completed but gave no video url")
+                    return str(url)
+                if status in ("failed", "cancelled", "canceled", "error"):
+                    err = data.get("error") or data.get("message") or status
+                    raise VideoGenError(f"video job {status}: {str(err)[:300]}")
+            elif resp is not None and resp.status_code not in RETRYABLE_STATUS:
+                raise VideoGenError(f"video job query failed: HTTP {resp.status_code}: "
+                                    f"{resp.text[:300]}")  # fmt: skip
+            if loop.time() > deadline:
+                raise VideoGenError(f"video job {task_id} didn't finish in {self.timeout_s:.0f} s")
+            await asyncio.sleep(self.poll_s)
+
+
 def ffmpeg_available() -> bool:
     from shutil import which
 
@@ -253,12 +352,26 @@ class FixtureVideoClient:
 
 def video_client_from_env() -> VideoClient:
     """DRAMA_VIDEO_CLIENT selects the backend: 'fixture' (default: ffmpeg-made coloured
-    clips) or 'minimax' (MINIMAX_API_KEY; MINIMAX_VIDEO_URL for a gateway, default
+    clips), 'mcphub' (MiniMax-H3 Ref2VA on MCPHub's GPU route: MCPHUB_KEY; MCPHUB_VIDEO_URL, default https://api.mcphub.com;
+    MCPHUB_VIDEO_MODEL, default minimax-h3-ref2va; DRAMA_VIDEO_SHORT_EDGE, default 768;
+    DRAMA_VIDEO_SEED) or 'minimax' (MINIMAX_API_KEY; MINIMAX_VIDEO_URL for a gateway, default
     https://api.minimax.io; MINIMAX_VIDEO_MODEL, default MiniMax-H3; DRAMA_VIDEO_RESOLUTION,
     default 768P). Real renders are opt-in, like the text and image clients."""
     kind = os.environ.get("DRAMA_VIDEO_CLIENT", "fixture").lower()
     if kind == "fixture":
         return FixtureVideoClient(delay_s=float(os.environ.get("DRAMA_FIXTURE_DELAY_S", "0")))
+    if kind == "mcphub":
+        key = os.environ.get("MCPHUB_KEY")
+        if not key:
+            raise RuntimeError("DRAMA_VIDEO_CLIENT=mcphub but MCPHUB_KEY is not set")
+        return MCPHubVideoClient(
+            api_key=key,
+            base_url=os.environ.get("MCPHUB_VIDEO_URL", "https://api.mcphub.com"),
+            model=os.environ.get("MCPHUB_VIDEO_MODEL", "minimax-h3-ref2va"),
+            short_edge=int(os.environ.get("DRAMA_VIDEO_SHORT_EDGE", "768")),
+            seed=int(os.environ.get("DRAMA_VIDEO_SEED", "1")),
+            poll_s=float(os.environ.get("DRAMA_VIDEO_POLL_S", "15")),
+        )
     if kind == "minimax":
         key = os.environ.get("MINIMAX_API_KEY")
         if not key:

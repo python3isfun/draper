@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from drama_agent.videogen import (
+    MCPHubVideoClient,
     MiniMaxVideoClient,
     VideoGenError,
     VideoReference,
@@ -93,3 +94,47 @@ def test_a_failed_task_and_a_refusal_are_errors_without_the_key():
         asyncio.run(client.generate("refuse", 5, "9:16", refs))
     with pytest.raises(VideoGenError, match="reference picture"):
         asyncio.run(client.generate("ok", 5, "9:16", []))
+
+
+def test_mcphub_client_submits_a_job_and_polls_it():
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/gpu-videos/minimax-h3-ref2va/jobs":
+            seen.append(request)
+            return httpx.Response(202, json={"id": "job1", "status": "queued"})
+        if request.url.path == "/api/v3/gpu-videos/jobs/job1":
+            seen.append(request)
+            if len(seen) < 3:
+                return httpx.Response(200, json={"id": "job1", "status": "running"})
+            return httpx.Response(200, json={"id": "job1", "status": "completed",
+                                             "video_url": "https://files.test/c.mp4"})  # fmt: skip
+        if request.url.host == "files.test":
+            return httpx.Response(200, content=b"MP4DATA")
+        return httpx.Response(404)
+
+    client = MCPHubVideoClient("mcp_key", base_url="https://api.test", seed=7, poll_s=0,
+                               transport=httpx.MockTransport(handle))  # fmt: skip
+    real = httpx.AsyncClient
+
+    class Patched(real):  # type: ignore[misc]
+        def __init__(self, **kw):
+            kw["transport"] = httpx.MockTransport(handle)
+            super().__init__(**kw)
+
+    httpx.AsyncClient = Patched  # type: ignore[misc]
+    try:
+        out = asyncio.run(client.generate(
+            "[Shot 1] She waits.", 8, "9:16", [VideoReference("kf.png", b"\x89PNG", "image/png")]))  # fmt: skip
+    finally:
+        httpx.AsyncClient = real  # type: ignore[misc]
+    assert out.data == b"MP4DATA" and out.task_id == "job1" and out.model == "minimax-h3-ref2va"
+    assert seen[0].headers["x-api-key"] == "mcp_key" and "authorization" not in seen[0].headers
+    body = json.loads(seen[0].content)
+    assert (
+        body["task"] == "ref2va" and body["seed"] == 7 and body["prompt"] == "[Shot 1] She waits."
+    )
+    assert body["target"] == {"short_edge": 768, "aspect_ratio": "9:16", "duration_seconds": 8}
+    assert body["conditions"] == [{"type": "image", "role": "reference",
+                                   "uri": "data:image/png;base64," + base64.b64encode(b"\x89PNG").decode()}]  # fmt: skip
+    assert len(seen) == 3

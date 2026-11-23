@@ -692,10 +692,15 @@ shot's clip (`clip`), and **Render again** renders one shot now.
 
 The video model is chosen like the text and image models, opt-in: `DRAMA_VIDEO_CLIENT`
 is `fixture` (default: plain coloured clips of the right length, made with ffmpeg, so the
-flow runs offline and in tests) or `minimax` (MiniMax's video API: `MINIMAX_API_KEY`;
-`MINIMAX_VIDEO_URL` for a gateway, default `https://api.minimax.io`; `MINIMAX_VIDEO_MODEL`,
-default `MiniMax-H3`; `DRAMA_VIDEO_RESOLUTION`, default `768P`; `DRAMA_VIDEO_POLL_S`).
-Renders go one at a time. The prompt sent is the paragraph form dramer renders; how it
+flow runs offline and in tests), `mcphub` (MiniMax-H3 Ref2VA on MCPHub's GPU route, the
+company's own H100s: `MCPHUB_KEY`; `MCPHUB_VIDEO_URL`, default `https://api.mcphub.com`;
+`MCPHUB_VIDEO_MODEL`, default `minimax-h3-ref2va`; `DRAMA_VIDEO_SHORT_EDGE`, default `768`;
+`DRAMA_VIDEO_SEED`, default `1`, the same request and seed give the identical clip) or
+`minimax` (MiniMax's video API: `MINIMAX_API_KEY`; `MINIMAX_VIDEO_URL` for a gateway,
+default `https://api.minimax.io`; `MINIMAX_VIDEO_MODEL`, default `MiniMax-H3`;
+`DRAMA_VIDEO_RESOLUTION`, default `768P`). `DRAMA_VIDEO_POLL_S` sets the polling interval.
+Renders go one at a time; the MCPHub server is shared and renders one clip at a time for
+everyone, about 3.5 minutes for 4 s at 768p, so a job may wait behind others. The prompt sent is the paragraph form dramer renders; how it
 measures against MiniMax's own six-field reference format is not evaluated yet.
 
 API: `GET /v1/drama-packages/{id}/episodes` (each episode with its newest run);
