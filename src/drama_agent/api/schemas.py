@@ -82,6 +82,8 @@ class Meta(BaseModel):
     stage_models: dict[str, str] = {}  # per-step overrides of the default
     image_model: str = ""
     image_client: str = ""
+    video_model: str = ""
+    video_client: str = ""
 
 
 class ImagesView(BaseModel):

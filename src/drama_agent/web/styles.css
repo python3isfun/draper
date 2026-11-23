@@ -945,3 +945,19 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .lock-col label { display: block; margin: 4px 0; }
 .lock-field { width: 100%; box-sizing: border-box; font: inherit; }
 @media (max-width: 800px) { .lock-cols { grid-template-columns: 1fr; } }
+
+/* Episode tab: the run's shots, holds and output */
+.ep-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ep-table th { text-align: left; font-weight: 600; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.ep-table td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.ep-table tr.muted td { opacity: 0.6; }
+.ep-kf { display: flex; flex-wrap: wrap; gap: 4px; }
+.ep-thumb { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; display: block; }
+.ep-slot { width: 48px; height: 48px; border: 1px dashed var(--border); border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
+.ep-slot.busy { border-color: var(--accent); color: var(--accent); animation: ep-pulse 1.2s ease-in-out infinite; }
+@keyframes ep-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.ep-clip { width: 120px; max-height: 214px; border-radius: 4px; display: block; background: #000; margin-top: 4px; }
+.ep-video { width: 100%; max-width: 360px; max-height: 640px; border-radius: 6px; background: #000; display: block; margin-top: 10px; }
+.ep-hold { margin-top: 4px; }
+.ep-actions { white-space: nowrap; }
+.ep-actions .btn { margin: 0 4px 4px 0; }

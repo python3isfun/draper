@@ -12,6 +12,8 @@ from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 from ..shot_frames import PromptVersion, ShotPlan, ShotPlanVersion, ShotTake, approval_changes
 from ..shot_reading import SceneReading
+from ..shots.clips import ShotClip
+from ..shots.episode import EpisodeRun
 from ..shots.lock import KeyframeReading
 from ..shots.models import ShotVideoPrompt
 
@@ -115,6 +117,21 @@ class Repository(Protocol):
         self, package_id: str, revision_id: str
     ) -> list[KeyframeReading]: ...
     def fail_unfinished_keyframe_readings(self, error: str) -> int: ...
+    # Episode runs and the clips they render (shots/episode.py, shots/clips.py)
+    def save_episode_run(self, run: EpisodeRun) -> None: ...
+    def get_episode_run(self, run_id: str) -> EpisodeRun | None: ...
+    def list_episode_runs(
+        self,
+        package_id: str | None = None,
+        revision_id: str | None = None,
+        episode_id: str | None = None,
+        status: str | None = None,
+    ) -> list[EpisodeRun]: ...
+    def save_shot_clip(self, clip: ShotClip) -> None: ...
+    def get_shot_clip(self, clip_id: str) -> ShotClip | None: ...
+    def list_shot_clips(self, package_id: str, revision_id: str) -> list[ShotClip]: ...
+    def delete_shot_clip(self, clip_id: str) -> None: ...
+    def fail_unfinished_shot_clips(self, error: str) -> int: ...
     # The asset library (library/): characters, sets, their looks, states and items
     def list_package_ids(self) -> list[str]: ...
     def save_library_asset(self, asset: LibraryAsset) -> None: ...
@@ -163,6 +180,8 @@ class InMemoryRepository:
         self.scene_readings: dict[tuple[str, str, str], SceneReading] = {}
         self.video_prompts: dict[tuple[str, str, str], ShotVideoPrompt] = {}
         self.keyframe_readings: dict[tuple[str, str, str], KeyframeReading] = {}
+        self.episode_runs: dict[str, EpisodeRun] = {}
+        self.shot_clips: dict[str, ShotClip] = {}
         self.library: dict[str, LibraryAsset] = {}
         self.casting: dict[tuple[str, str], Casting] = {}
         self.asset_images: dict[str, AssetImage] = {}
@@ -250,7 +269,8 @@ class InMemoryRepository:
         what the revision changed is then judged out of date by its fingerprints. Returns
         the number of rows moved."""
         moved = 0
-        stores: list[Any] = [self.images, self.options, self.shot_takes, self.asset_images]
+        stores: list[Any] = [self.images, self.options, self.shot_takes, self.asset_images,
+                             self.episode_runs, self.shot_clips]  # fmt: skip
         for store in stores:
             for key, row in list(store.items()):
                 if row.package_id == package_id and row.revision_id == from_revision:
@@ -557,6 +577,51 @@ class InMemoryRepository:
         for r in self.keyframe_readings.values():
             if r.busy:
                 r.status, r.error, n = "failed", error, n + 1
+        return n
+
+    # Episode runs and clips ------------------------------------------------
+
+    def save_episode_run(self, run: EpisodeRun) -> None:
+        self.episode_runs[run.run_id] = run.model_copy(deep=True)
+
+    def get_episode_run(self, run_id: str) -> EpisodeRun | None:
+        r = self.episode_runs.get(run_id)
+        return r.model_copy(deep=True) if r else None
+
+    def list_episode_runs(
+        self,
+        package_id: str | None = None,
+        revision_id: str | None = None,
+        episode_id: str | None = None,
+        status: str | None = None,
+    ) -> list[EpisodeRun]:
+        out = [r.model_copy(deep=True) for r in self.episode_runs.values()
+               if (package_id is None or r.package_id == package_id)
+               and (revision_id is None or r.revision_id == revision_id)
+               and (episode_id is None or r.episode_id == episode_id)
+               and (status is None or r.status == status)]  # fmt: skip
+        return sorted(out, key=lambda r: r.created_at)
+
+    def save_shot_clip(self, clip: ShotClip) -> None:
+        self.shot_clips[clip.clip_id] = clip.model_copy(deep=True)
+
+    def get_shot_clip(self, clip_id: str) -> ShotClip | None:
+        c = self.shot_clips.get(clip_id)
+        return c.model_copy(deep=True) if c else None
+
+    def list_shot_clips(self, package_id: str, revision_id: str) -> list[ShotClip]:
+        return sorted((c.model_copy(deep=True) for c in self.shot_clips.values()
+                       if (c.package_id, c.revision_id) == (package_id, revision_id)),
+                      key=lambda c: c.created_at)  # fmt: skip
+
+    def delete_shot_clip(self, clip_id: str) -> None:
+        self.shot_clips.pop(clip_id, None)
+
+    def fail_unfinished_shot_clips(self, error: str) -> int:
+        n = 0
+        for c in self.shot_clips.values():
+            if c.busy:
+                c.status, c.error, n = "failed", error, n + 1
         return n
 
     # The asset library ---------------------------------------------------

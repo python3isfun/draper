@@ -428,6 +428,8 @@ def test_meta_reports_stage_models():
         "stage_models": {"review": "gpt-6-luna"},
         "image_model": "fixture-image-v1",
         "image_client": "FixtureImageClient",
+        "video_model": "fixture-video",
+        "video_client": "FixtureVideoClient",
     }
 
 

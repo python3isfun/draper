@@ -14,3 +14,6 @@ data/
 
 # Story source material (scripts, synopses): kept local, not pushed
 stories/
+
+# A reference clone of another repo (agentic-growth), kept local
+/submodule/

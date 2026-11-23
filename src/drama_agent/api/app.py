@@ -48,9 +48,12 @@ from ..models import (
 from ..pipeline.orchestrator import Orchestrator
 from ..pipeline.revise import ReviseRunner
 from ..shot_frames import ShotFrameRunner
+from ..shots.episode import EpisodeRunner
 from ..store import InMemoryRepository, Repository
+from ..videogen import FixtureVideoClient, VideoClient, video_client_from_env
 from ..worker import JobWorker, recover
 from . import designs as designs_routes
+from . import episodes as episodes_routes
 from . import experiments as experiments_routes
 from . import image_ids as image_ids_routes
 from . import jobs as jobs_routes
@@ -79,10 +82,13 @@ def create_app(
     keyframe_providers: dict[str, ImageClient] | None = None,
     keyframe_provider: str = "h3",
     face_providers: dict[str, ImageClient] | None = None,
+    video_client: VideoClient | None = None,
+    run_poll_s: float = 2.0,
 ) -> FastAPI:
     """Build the API. `workers` in-process job workers start with the app (lifespan);
     with workers=0 jobs are only enqueued, for a separate `python -m drama_agent.worker`.
-    Uploads go to `media` (default: a fresh temporary directory)."""
+    Uploads go to `media` (default: a fresh temporary directory). Clips are rendered by
+    `video_client` (default: offline fixture clips)."""
 
     repo = repo or InMemoryRepository()
     queue = queue or InMemoryJobQueue()
@@ -104,6 +110,10 @@ def create_app(
                                 providers=keyframe_providers, default_provider=keyframe_provider)  # fmt: skip
     # Targeted revisions of a published story; the library mirrors the new revision.
     revisions = ReviseRunner(repo, orchestrator, after_publish=lambda: sync_library(repo))
+    # Episode runs: the one-button flow over the keyframe work, plus the clips it renders.
+    video = video_client or FixtureVideoClient()
+    episodes = EpisodeRunner(repo, media, keyframes, video, poll_s=run_poll_s,
+                             image_wakeup=image_wakeup)  # fmt: skip
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -121,6 +131,8 @@ def create_app(
             log.info("marked %d interrupted keyframe takes failed", n)
         if n := revisions.recover():
             log.info("marked %d interrupted revisions failed", n)
+        if n := episodes.recover():
+            log.info("paused %d interrupted episode runs and clips", n)
         n = recover(repo, queue)
         if n:
             log.info("enqueued %d unfinished jobs without a queue entry", n)
@@ -156,9 +168,12 @@ def create_app(
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await episodes.aclose()
             await experiments.aclose()
             await keyframes.aclose()
             if close := getattr(images, "aclose", None):
+                await close()
+            if close := getattr(video, "aclose", None):
                 await close()
 
     app = FastAPI(title="Drama Agent", version="0.1.0", lifespan=lifespan)
@@ -180,6 +195,8 @@ def create_app(
             stage_models=getattr(c, "stage_models", {}),
             image_model=images.model_id,
             image_client=type(images).__name__,
+            video_model=video.model_id,
+            video_client=type(video).__name__,
         )
 
     def _package_or_404(package_id: str, revision_id: str | None) -> ProductionPackage:
@@ -259,6 +276,16 @@ def create_app(
         package_job=_package_job,
         file_response=_file,
         experiments=experiments,
+        episodes=episodes,
+    )
+
+    episodes_routes.register(
+        app,
+        repo=repo,
+        episodes=episodes,
+        package_or_404=_package_or_404,
+        package_job=_package_job,
+        file_response=_file,
     )
 
     # Last: its /v1/drama-packages/{package_id}/{sheet} route matches what the routes
@@ -290,6 +317,7 @@ def create_app_from_env() -> FastAPI:
         # Chats and studies: a local image server, and Nano Banana as for keyframes (its own
         # client: each runner closes what it holds).
         face_providers=face_providers_from_env() | keyframe_providers_from_env(),
+        video_client=video_client_from_env(),
     )
 
 

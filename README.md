@@ -646,6 +646,71 @@ the same cuts adds nothing. The history moves with the story when a
 revision is published. Endpoints: `GET .../keyframes/{shot_id}/plans` and
 `POST .../keyframes/{shot_id}/plans/{version}/restore`.
 
+### Generate episode: clips and the assembled episode
+
+The **Episode** tab has one button, **Generate episode**, that takes an episode from its
+storyboard to its clips and a rough assembly (`shots/episode.py`). The run is a loop over
+the episode's shots that reads the keyframe board as it is and does the next thing each
+shot needs, with the rules a person clicking would use (`shots/flow.py`): the design
+pictures are drawn if any are missing; each shot's cuts are planned; each cut's keyframe
+is drawn and the best draw approved; the video prompt is written once every cut is
+approved; the clip is rendered once the prompt is current and passes its checks; and when
+every shot has its clip, the clips are cut together in order (`shots/assemble.py`, ffmpeg:
+each clip scaled to the first one's size, with its own sound; no music or titles). Nothing
+is cached between steps, so whatever you do meanwhile on the Keyframes tab (a new plan, a
+different approval, a redraw, an edited prompt) is what the next step sees, and a run
+started again keeps every approved keyframe, current prompt and current clip.
+
+The page shows the plan and the progress: per shot its stage (planning, keyframes, prompt,
+rendering, done, waiting), the approved keyframes, the prompt's state, the clip with its
+first frame, the counts, the time so far and an estimate from what this episode's work
+took. **Pause** stops the loop (what is already running finishes); **Stop now** also pauses
+the running takes and drops the clip being rendered; **Resume** goes on from the board as
+it is. **Skip** leaves a shot out of the run and the assembly; **Retry** forgets a shot's
+failed tries.
+
+The run **holds** where a person is needed, and says why on the shot's row: a cut whose
+takes failed twice, a prompt that fails a check, a design pick that is missing. It also
+holds where the settings say: *Approve keyframes myself* (every cut is drawn, then waits
+for your approval on the Keyframes tab; **Approve for me** lets the run approve that shot's
+best draws, **Approve the rest for me** every shot's), *Hold before rendering* (video
+renders are the slow, paid part) and *Hold before assembling*. A hold is released from the
+page and the run goes on. Without holds, the best-scoring draw of each cut is approved,
+including one that failed the check (*Approve a failed check's best draw*, which can be
+turned off).
+
+**Clips.** A shot's clip is rendered from its stored video prompt: the blocks become one
+paragraph (`[Shot 1] ...`, `[Shot 2] At 00:02.000, ...` from the plan's timecodes), each
+picture becomes `<Picture N>` in the order the pictures are sent (`shots/clip_refs.py`:
+keyframes first, then faces), the sentences of a picture that isn't sent are dropped, and
+the sound sentence comes last (`shots/clips.py`). The pictures go with the prompt as
+**reference** pictures (MiniMax H3 reference-to-video), never as start frames. The clip is
+whole seconds, 4 to 15, at the story's aspect ratio. A clip is *current* while the prompt
+it was rendered from is the shot's current prompt and the same pictures would be sent; a
+change to either marks it out of date, like a video prompt. The Keyframes board shows each
+shot's clip (`clip`), and **Render again** renders one shot now.
+
+The video model is chosen like the text and image models, opt-in: `DRAMA_VIDEO_CLIENT`
+is `fixture` (default: plain coloured clips of the right length, made with ffmpeg, so the
+flow runs offline and in tests) or `minimax` (MiniMax's video API: `MINIMAX_API_KEY`;
+`MINIMAX_VIDEO_URL` for a gateway, default `https://api.minimax.io`; `MINIMAX_VIDEO_MODEL`,
+default `MiniMax-H3`; `DRAMA_VIDEO_RESOLUTION`, default `768P`; `DRAMA_VIDEO_POLL_S`).
+Renders go one at a time. The prompt sent is the paragraph form dramer renders; how it
+measures against MiniMax's own six-field reference format is not evaluated yet.
+
+API: `GET /v1/drama-packages/{id}/episodes` (each episode with its newest run);
+`POST .../episodes/{episode_id}/run` (settings: `draws`, `max_rounds`, `provider`, `holds`
+of `approve` / `render` / `assemble`, `hold_shots`, `skip_shots`, `approve_failed`,
+`render`, `assemble`, `parallel`) and `GET .../run` (the newest run with each shot's stage,
+counts and estimate); `GET /v1/episode-runs/{run_id}`, `POST .../pause?now=`, `.../resume`,
+`.../release {key}` (`<shot>:approve`, `approve`, `<shot>:cut<i>`, `<shot>:prompt`,
+`<shot>:clip`, `render`, `assemble`), `.../retry {shot_id}`, `PATCH .../settings`,
+`GET .../output` (mp4) and `.../poster`; `GET /v1/drama-packages/{id}/clips`,
+`POST .../clips/{shot_id}` (render one now), `GET /v1/shot-clips/{id}/content|poster`,
+`DELETE /v1/shot-clips/{id}`. Runs and clips are kept per revision (`episode_runs`,
+`shot_clips`) and move forward with a published revision; a server restart pauses a running
+run (resume it) and fails the clip in flight.
+
 ### Pace
 
 A story's pace (job option `pace`, under Options; changeable on the story's Overview, like the

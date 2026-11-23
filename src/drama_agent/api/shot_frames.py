@@ -40,7 +40,6 @@ from ..shot_frames import (
     approved_take,
     current_sub,
     design_print,
-    frame_ref,
     frame_size,
     intimate_scene,
     is_busy,
@@ -57,12 +56,14 @@ from ..shot_frames import (
     sub_shot_for,
 )
 from ..shot_reading import SceneReading, candidates, scene_shots
+from ..shots import flow
+from ..shots.clips import clip_state, clip_view, latest_clip
 from ..shots.history import replace_plan, restore_plan
 from ..shots.lock import KeyframeReading, SeenCut, lock_shot, unlock_shot
 from ..shots.models import ShotVideoPrompt
 from ..shots.references import sub_shot_references
 from ..shots.staleness import keyframe_judge
-from ..shots.video_prompt import approved_frames, fingerprint, prompt_state
+from ..shots.video_prompt import approved_frames
 from .schemas import UseKeyframeRequest
 
 
@@ -210,6 +211,7 @@ def register(
     package_job: Callable[..., Any],
     file_response: Callable[[str, str], FileResponse],
     experiments: Any = None,
+    episodes: Any = None,  # EpisodeRunner, for each shot's clip on the board
 ) -> None:
     def _board(pkg: ProductionPackage) -> KeyframeBoard:
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
@@ -222,11 +224,29 @@ def register(
         shots = shot_board(pkg, images, takes, plans, versions, readings,
                            story_pace(repo, pkg.package_id), prompts, lock_readings)  # fmt: skip
         history = repo.count_plan_versions(pkg.package_id, pkg.revision_id)
+        clips = repo.list_shot_clips(pkg.package_id, pkg.revision_id)
         for shot in shots:  # a take asked to pause says so until it does
             shot["plan"]["history"] = history.get(shot["shot_id"], 0)  # earlier plans
             for sub in shot["sub_shots"]:
                 for t in sub["takes"]:
                     t["pausing"] = t["take_id"] in runner.pausing
+            # The shot's newest clip, against the shot as it is now (shots/clips.py).
+            clip = latest_clip(clips, shot["shot_id"])
+            print_ = None
+            if episodes is not None and shot["video_prompt"]["state"] == "current" and clip:
+                sh = shot_of(pkg, shot["shot_id"])
+                vp = next((p for p in prompts if p.shot_id == sh.shot_id), None)
+                if vp is not None:
+                    inputs = episodes.clip_inputs(
+                        pkg,
+                        sh,
+                        plan_of(pkg, sh, next((p for p in plans if p.shot_id == sh.shot_id), None)),
+                        vp,
+                        takes,
+                        images,
+                    )
+                    print_ = inputs.print if inputs else None
+            shot["clip"] = clip_view(clip, clip_state(clip, print_))
         return KeyframeBoard(
             package_id=pkg.package_id,
             revision_id=pkg.revision_id,
@@ -242,30 +262,13 @@ def register(
         )
 
     def _start_prompt(pkg: ProductionPackage, shot_id: str) -> ShotVideoPrompt:
-        """Write the shot's video prompt in the background; the prompt it replaces stays
-        shown meanwhile."""
-        stored = repo.get_video_prompt(pkg.package_id, pkg.revision_id, shot_id)
-        vp = (stored.model_copy(update={"status": "writing", "error": None}) if stored
-              else ShotVideoPrompt(package_id=pkg.package_id, revision_id=pkg.revision_id,
-                                   shot_id=shot_id))  # fmt: skip
-        repo.save_video_prompt(vp)
-        runner.start_video_prompt(vp)
-        return vp
+        """Write the shot's video prompt in the background (shots/flow.py)."""
+        return flow.start_prompt(repo, runner, pkg, shot_id)
 
     def _auto_prompt(pkg: ProductionPackage, shot: Shot) -> None:
         """Once every cut of the shot has its approved keyframe, write its video prompt,
-        unless the one it has is current or being written."""
-        stored = repo.get_video_prompt(pkg.package_id, pkg.revision_id, shot.shot_id)
-        if stored is not None and stored.busy:
-            return
-        _, plan = _plan(pkg, shot)
-        frames = approved_frames(pkg, shot, plan,
-                                 repo.list_shot_takes(pkg.package_id, pkg.revision_id))  # fmt: skip
-        if not frames or not all(frames.values()):
-            return
-        context, ids = runner.video_inputs(pkg, shot)
-        if prompt_state(stored, fingerprint(context, ids)) != "current":
-            _start_prompt(pkg, shot.shot_id)
+        unless the one it has is current or being written (shots/flow.py)."""
+        flow.auto_prompt(repo, runner, pkg, shot)
 
     def _unlocked(stored: ShotPlan | None, shot_id: str) -> None:
         if stored is not None and stored.source == "keyframes":
@@ -300,12 +303,10 @@ def register(
         return runner.fresh_reading(pkg, shot.scene_id)
 
     def _start(take: ShotTake) -> ShotTake:
-        stored = repo.get_shot_plan(take.package_id, take.revision_id, take.shot_id)
-        if stored is not None and stored.busy:  # an insert moves its takes when written
-            raise HTTPException(409, f"{take.shot_id} is being planned; draw once it is done")
-        repo.save_shot_take(take)
-        runner.start(take.take_id)
-        return take
+        try:
+            return flow.start_take(repo, runner, take)
+        except ValueError as exc:  # an insert moves its takes when written
+            raise HTTPException(409, str(exc)) from None
 
     @app.get("/v1/drama-packages/{package_id}/keyframes", response_model=KeyframeBoard)
     async def keyframe_board(package_id: str, revision_id: str | None = None) -> KeyframeBoard:
@@ -819,21 +820,6 @@ def register(
             runner.start(take_id)
         return {"started": started, "planning": planning, "skipped": skipped}
 
-    def _drawn_from(
-        pkg: ProductionPackage, shot: Shot, plan: ShotPlan, index: int, frame: str
-    ) -> bool:
-        """Whether sub-shot `index` has a take (for the plan as it is) drawn from `frame`,
-        or one still being made."""
-        takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
-        if is_busy(takes, shot.shot_id, index):
-            return True
-        return any(
-            t.shot_id == shot.shot_id and t.sub_shot == index
-            and current_sub(pkg, shot, plan, t) is not None
-            and t.references and t.references[0].ref_id == frame
-            for t in takes
-        )  # fmt: skip
-
     def _redraw_outdated(
         pkg: ProductionPackage,
         takes: list[ShotTake],
@@ -900,46 +886,11 @@ def register(
         keyframe starts, drawn from this one."""
         take = _take_or_404(take_id)
         pkg = _writable(take.package_id, take.revision_id)
-        d = next((d for d in take.results if d.n == req.n), None)
-        if take.busy or d is None or d.status != "done":
-            raise HTTPException(409, "only a finished draw of a finished take can be approved")
-        shot = _shot(pkg, take.shot_id)
-        stored, plan = _plan(pkg, shot)
-        if stored is not None and stored.busy:
-            raise HTTPException(409, f"{shot.shot_id} is being planned; approve once it is done")
-        if current_sub(pkg, shot, plan, take) is None:
-            raise HTTPException(409, "the sub-shot plan changed since this take was drawn")
-        out = repo.approve_shot_draw(take_id, req.n)
-        following = plan.sub(take.sub_shot + 1)
-
-        def takes_now() -> list[ShotTake]:
-            return repo.list_shot_takes(pkg.package_id, pkg.revision_id)
-
-        if (
-            req.next
-            and following is not None
-            # Unless the next cut keeps an approved keyframe (one kept across an inserted cut
-            # is redrawn when the user chooses: it is marked out of date).
-            and approved_take(takes_now(), take.shot_id, following.index) is None
-            # Unless the next cut already has a take drawn from this keyframe.
-            and not _drawn_from(pkg, shot, plan, following.index, frame_ref(out))
-        ):
-            with contextlib.suppress(NotReady, ValueError):
-                _start(
-                    plan_take(
-                        pkg,
-                        repo.list_images(pkg.package_id, pkg.revision_id),
-                        repo.list_shot_takes(pkg.package_id, pkg.revision_id),
-                        plan,
-                        sub_shot=following.index,
-                        draws=take.draws,
-                        max_rounds=take.max_rounds,
-                        reading=_reading(pkg, shot),
-                        **runner.take_options(take.provider),  # the same provider
-                    )
-                )
-        _auto_prompt(pkg, shot)
-        return out
+        _shot(pkg, take.shot_id)
+        try:
+            return flow.approve_draw(repo, runner, pkg, take, req.n, next_cut=req.next)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     @app.post("/v1/experiments/{session_id}/use-keyframe", status_code=201, response_model=ShotTake)
     async def use_as_keyframe(session_id: str, req: UseKeyframeRequest) -> ShotTake:

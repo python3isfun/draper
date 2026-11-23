@@ -865,6 +865,7 @@ const TABS = [
   ["storyboard", "Storyboard"],
   ["casting", "Casting"],
   ["keyframes", "Keyframes"],
+  ["episode", "Episode"],
   ["qa", "QA"],
   ["revise", "Revise"],
   ["activity", "Activity"],
@@ -887,6 +888,7 @@ function renderPackage(pkg) {
     storyboard: pkg.shot_list.length,
     casting: pkg.story_bible.characters.length + pkg.story_bible.locations.length,
     keyframes: pkg.shot_list.length,
+    episode: pkg.episodes.length,
     qa: pkg.qa_report.hard_issues.length + pkg.qa_report.creative_issues.length,
   };
   const tabs = h("div", { class: "tabs", role: "tablist" },
@@ -901,7 +903,7 @@ function renderPackage(pkg) {
     overview: renderOverview, script: renderScript, storyboard: renderStoryboard,
     // Cast, Sets, Props and Assets became Casting (OLD_TABS sends their old links there).
     casting: renderCasting,
-    keyframes: renderKeyframes, qa: renderQA, revise: renderRevise,
+    keyframes: renderKeyframes, episode: renderEpisode, qa: renderQA, revise: renderRevise,
     activity: () => activityPanel(state.job.job_id),
   }[state.tab] || renderOverview;
   return h("div", {}, tabs, h("div", { role: "tabpanel" }, body(pkg, L)));

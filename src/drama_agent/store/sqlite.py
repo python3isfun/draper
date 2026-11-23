@@ -20,6 +20,8 @@ from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
 from ..shot_frames import PromptVersion, ShotPlan, ShotPlanVersion, ShotTake, approval_changes
 from ..shot_reading import SceneReading
+from ..shots.clips import ShotClip
+from ..shots.episode import EpisodeRun
 from ..shots.lock import KeyframeReading
 from ..shots.models import ShotVideoPrompt
 
@@ -28,9 +30,9 @@ from ..shots.models import ShotVideoPrompt
 # v7: exp_sessions.next_label. v8: shot_takes. v9: shot_plans. v10: shot_prompts.
 # v11: scene_readings. v12: the asset library (library_assets, story_casting, asset_images).
 # v13: shot_plan_versions (story_settings came in at v12, without a bump).
-# v14: shot_video_prompts. v15: keyframe_readings.
+# v14: shot_video_prompts. v15: keyframe_readings. v16: episode_runs, shot_clips.
 # Each step is additive, so older files upgrade in place (see _migrate).
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -219,6 +221,26 @@ CREATE TABLE IF NOT EXISTS shot_plans (
     data        TEXT NOT NULL,
     PRIMARY KEY (package_id, revision_id, shot_id)
 );
+CREATE TABLE IF NOT EXISTS episode_runs (
+    run_id      TEXT PRIMARY KEY,
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    episode_id  TEXT NOT NULL,
+    status      TEXT NOT NULL,              -- running | paused | done | failed
+    created_at  TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS episode_runs_pkg ON episode_runs (package_id, revision_id, episode_id);
+CREATE TABLE IF NOT EXISTS shot_clips (
+    clip_id     TEXT PRIMARY KEY,
+    package_id  TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    shot_id     TEXT NOT NULL,
+    status      TEXT NOT NULL,              -- pending | rendering | done | failed
+    created_at  TEXT NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS shot_clips_pkg ON shot_clips (package_id, revision_id, shot_id);
 """
 
 
@@ -230,6 +252,7 @@ _NOT_ARCHIVED = "coalesce(json_extract(data, '$.archived'), 0) = 0"
 _REVISION_TABLES = (
     "generated_images", "design_options", "shot_takes", "shot_prompts", "shot_plans",
     "shot_plan_versions", "scene_readings", "shot_video_prompts", "keyframe_readings",
+    "episode_runs", "shot_clips",
 )  # fmt: skip
 
 
@@ -1197,6 +1220,78 @@ class SqliteRepository:
             r = KeyframeReading.model_validate_json(raw)
             r.status, r.error = "failed", error
             self.save_keyframe_reading(r)
+        return len(rows)
+
+    # Episode runs and clips ------------------------------------------------
+
+    def save_episode_run(self, run: EpisodeRun) -> None:
+        self._exec(
+            "INSERT INTO episode_runs (run_id, package_id, revision_id, episode_id, status, "
+            "created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (run_id) DO UPDATE SET "
+            "revision_id = excluded.revision_id, status = excluded.status, data = excluded.data",
+            (run.run_id, run.package_id, run.revision_id, run.episode_id, run.status,
+             run.created_at.isoformat(), run.model_dump_json()),
+        )  # fmt: skip
+
+    def get_episode_run(self, run_id: str) -> EpisodeRun | None:
+        raw = self._one("SELECT data FROM episode_runs WHERE run_id = ?", (run_id,))
+        return EpisodeRun.model_validate_json(raw) if raw else None
+
+    def list_episode_runs(
+        self,
+        package_id: str | None = None,
+        revision_id: str | None = None,
+        episode_id: str | None = None,
+        status: str | None = None,
+    ) -> list[EpisodeRun]:
+        where, params = [], []
+        for col, val in (("package_id", package_id), ("revision_id", revision_id),
+                         ("episode_id", episode_id), ("status", status)):  # fmt: skip
+            if val is not None:
+                where.append(f"{col} = ?")
+                params.append(val)
+        sql = "SELECT data FROM episode_runs"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at"
+        with self._lock:
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [EpisodeRun.model_validate_json(r[0]) for r in rows]
+
+    def save_shot_clip(self, clip: ShotClip) -> None:
+        self._exec(
+            "INSERT INTO shot_clips (clip_id, package_id, revision_id, shot_id, status, "
+            "created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (clip_id) DO UPDATE SET "
+            "revision_id = excluded.revision_id, status = excluded.status, data = excluded.data",
+            (clip.clip_id, clip.package_id, clip.revision_id, clip.shot_id, clip.status,
+             clip.created_at.isoformat(), clip.model_dump_json()),
+        )  # fmt: skip
+
+    def get_shot_clip(self, clip_id: str) -> ShotClip | None:
+        raw = self._one("SELECT data FROM shot_clips WHERE clip_id = ?", (clip_id,))
+        return ShotClip.model_validate_json(raw) if raw else None
+
+    def list_shot_clips(self, package_id: str, revision_id: str) -> list[ShotClip]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM shot_clips WHERE package_id = ? AND revision_id = ? "
+                "ORDER BY created_at",
+                (package_id, revision_id),
+            ).fetchall()
+        return [ShotClip.model_validate_json(r[0]) for r in rows]
+
+    def delete_shot_clip(self, clip_id: str) -> None:
+        self._exec("DELETE FROM shot_clips WHERE clip_id = ?", (clip_id,))
+
+    def fail_unfinished_shot_clips(self, error: str) -> int:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT data FROM shot_clips WHERE status IN ('pending', 'rendering')"
+            ).fetchall()
+        for (raw,) in rows:
+            c = ShotClip.model_validate_json(raw)
+            c.status, c.error = "failed", error
+            self.save_shot_clip(c)
         return len(rows)
 
     def fail_unfinished_shot_takes(self, error: str) -> int:

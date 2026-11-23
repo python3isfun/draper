@@ -99,6 +99,8 @@ def test_web_ui_and_listing_endpoints():
             "stage_models": {},
             "image_model": "fixture-image-v1",
             "image_client": "FixtureImageClient",
+            "video_model": "fixture-video",
+            "video_client": "FixtureVideoClient",
         }
         assert client.get("/v1/drama-jobs").json() == []
 
