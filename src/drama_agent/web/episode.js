@@ -178,9 +178,11 @@ function renderRunHead(pkg, run) {
   );
 }
 
-function holdButtons(run, row) {
+// The release buttons for a shot's holds whose kind passes `test`, so each hold shows on
+// the step it belongs to (a cut hold on Keyframes, a prompt hold on Prompt, and so on).
+function stepHolds(run, row, test) {
   const base = `/v1/episode-runs/${encodeURIComponent(run.run_id)}`;
-  return Object.entries(row.holds).map(([key, why]) => {
+  return Object.entries(row.holds || {}).filter(([key]) => test(key.split(":")[1] || "")).map(([key, why]) => {
     const kind = key.split(":")[1] || "";
     let action = null;
     if (/^cut\d+$/.test(kind) && /approval/.test(why)) {
@@ -194,43 +196,105 @@ function holdButtons(run, row) {
   });
 }
 
-function renderRunShots(pkg, run) {
+// Deep-link to the Keyframes tab, scrolled to this shot, where every step can be edited by
+// hand (cut plan, each cut's draws, the video prompt).
+function openOnBoard(shotId) {
+  go(state.job.job_id, "keyframes");
+  setTimeout(() => framesOpenShot(shotId), 50);
+}
+
+// One step of a shot's pipeline: a status dot, a name, a one-line state, its own controls,
+// and an optional body (thumbnails, a clip player). `state` is one of done|active|wait|hold|fail|idle.
+function epStep(name, state, label, controls, body) {
+  return h("div", { class: `ep-step ep-step-${state}` },
+    h("div", { class: "ep-step-dot", "aria-hidden": "true" }),
+    h("div", { class: "ep-step-main" },
+      h("div", { class: "ep-step-head" },
+        h("span", { class: "ep-step-name" }, name),
+        h("span", { class: "ep-step-state small muted" }, label),
+        controls && controls.length ? h("span", { class: "ep-step-controls" }, controls) : null),
+      body || null));
+}
+
+function renderShotSteps(pkg, run, row) {
+  const held = (kind) => Object.keys(row.holds || {}).some((k) => (k.split(":")[1] || "") === kind);
+  const steps = [];
+
+  // 1. Cut plan.
+  const planning = row.stage === "planning" || row.stage === "pictures";
+  steps.push(epStep("Cuts",
+    row.cuts > 0 ? "done" : planning ? "active" : "idle",
+    row.cuts > 0 ? `${row.cuts} cut${row.cuts > 1 ? "s" : ""} planned` : planning ? "planning…" : "not planned yet",
+    [h("button", { type: "button", class: "btn ghost small", title: "Change the cut plan on the Keyframes tab", onclick: () => openOnBoard(row.shot_id) }, "Edit cuts")]));
+
+  // 2. Keyframes, one per cut.
+  const cutHeld = row.keyframes.some((k) => held(`cut${k.index}`));
+  const kfState = row.cuts > 0 && row.approved === row.cuts ? "done" : cutHeld ? "hold" : row.keyframes.some((k) => k.busy) || row.approved > 0 ? "active" : "idle";
+  steps.push(epStep("Keyframes", kfState, `${row.approved}/${row.cuts} approved`,
+    [h("button", { type: "button", class: "btn ghost small", title: "Draw, approve or replace a cut's keyframe on the Keyframes tab", onclick: () => openOnBoard(row.shot_id) }, "Edit keyframes")],
+    h("div", {},
+      h("div", { class: "ep-kf" }, row.keyframes.map((k) =>
+        k.take_id != null && k.n != null
+          ? h("img", { src: drawUrl({ take_id: k.take_id }, k.n), alt: `cut ${k.index}`, title: `cut ${k.index}: approved`, class: "ep-thumb" })
+          : h("span", { class: `ep-slot ${k.busy ? "busy" : ""}`, title: k.busy ? `cut ${k.index}: drawing` : `cut ${k.index}: no keyframe yet` }, k.index))),
+      stepHolds(run, row, (kind) => /^cut\d+$/.test(kind)))));
+
+  // 3. Video prompt.
+  const vp = row.prompt;
+  const vpState = vp.state === "writing" ? "active" : vp.state === "failed" ? "fail" : held("prompt") ? "hold" : vp.state === "current" ? "done" : vp.state === "outdated" ? "active" : "idle";
+  steps.push(epStep("Prompt", vpState,
+    vp.problems.length ? `${vp.state} · ${vp.problems.join("; ")}` : vp.state,
+    [
+      vp.state !== "writing" && h("button", { type: "button", class: "btn small", title: "Write this shot's video prompt again from its keyframes", onclick: (e) => epAction(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/keyframes/${encodeURIComponent(row.shot_id)}/video-prompt`, e.currentTarget, { revision_id: pkg.revision_id }) }, "Rewrite"),
+      h("button", { type: "button", class: "btn ghost small", title: "Read or edit the prompt on the Keyframes tab", onclick: () => openOnBoard(row.shot_id) }, "View / edit"),
+    ],
+    h("div", {}, vp.error && h("div", { class: "small warn-text" }, vp.error), stepHolds(run, row, (kind) => kind === "prompt"))));
+
+  // 4. Clip render.
+  if (run.settings.render) {
+    const clip = row.clip || {};
+    const clipState = { current: "done", rendering: "active", failed: "fail", outdated: "active" }[clip.state] || (held("clip") ? "hold" : "idle");
+    const canRender = vp.state === "current" && !vp.problems.length && clip.state !== "rendering";
+    steps.push(epStep("Clip", clipState,
+      clip.state && clip.state !== "none" ? `${clip.state}${clip.duration_s ? ` · ${clip.duration_s} s` : ""}${clip.model ? ` · ${clip.model}` : ""}` : "no clip yet",
+      [
+        canRender && h("button", { type: "button", class: "btn small", title: "Render this shot's clip again now", onclick: (e) => epAction(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`, e.currentTarget, { revision_id: pkg.revision_id, fast: run.settings.fast }) }, clip.state === "current" ? "Render again" : "Render now"),
+        clip.clip_id && clip.state !== "rendering" && h("button", { type: "button", class: "btn ghost small", title: "Delete this clip so the run renders it afresh", onclick: (e) => epAction(clipUrl(clip.clip_id).replace(/\/content$/, ""), e.currentTarget, undefined, "DELETE") }, "Delete"),
+      ],
+      h("div", {},
+        clip.has_file && h("div", {},
+          h("video", { controls: true, preload: "none", src: clipUrl(clip.clip_id), poster: clip.has_poster ? clipUrl(clip.clip_id, "poster") : null, class: "ep-clip" }),
+          h("div", { class: "small" }, h("a", { href: clipUrl(clip.clip_id), download: `${row.shot_id}.mp4` }, "Download"))),
+        clip.error && h("div", { class: "small warn-text" }, clip.error),
+        stepHolds(run, row, (kind) => kind === "clip"))));
+  }
+
+  return steps;
+}
+
+function renderShotCard(pkg, run, row) {
   const base = `/v1/episode-runs/${encodeURIComponent(run.run_id)}`;
   const skip = new Set(run.settings.skip_shots);
+  const skipped = skip.has(row.shot_id);
+  return h("div", { class: `ep-shot ${skipped ? "muted" : ""}` },
+    h("div", { class: "ep-shot-head" },
+      h("div", {},
+        h("a", { href: "#", onclick: (e) => { e.preventDefault(); openOnBoard(row.shot_id); } }, row.shot_id),
+        " ", stageChip(row),
+        h("div", { class: "small muted" }, `${row.place} · ${secs(row.clip_ms)}`, row.people.length > 0 && ` · ${row.people.join(", ")}`)),
+      h("div", { class: "ep-actions" },
+        run.status !== "done" && (skipped
+          ? h("button", { type: "button", class: "btn small", onclick: (e) => epAction(`${base}/retry`, e.currentTarget, { shot_id: row.shot_id }) }, "Include")
+          : h("button", { type: "button", class: "btn ghost small", title: "Leave this shot out of the run and the assembly", onclick: (e) => epAction(`${base}/settings`, e.currentTarget, { skip_shots: [...skip, row.shot_id] }, "PATCH") }, "Skip")),
+        (row.stage === "waiting" || (row.clip || {}).state === "failed" || Object.keys(row.holds || {}).length > 0) && run.status !== "done" &&
+          h("button", { type: "button", class: "btn small", title: "Forget this shot's failed tries and holds and run it again", onclick: (e) => epAction(`${base}/retry`, e.currentTarget, { shot_id: row.shot_id }) }, "Restart shot"))),
+    skipped ? h("div", { class: "small muted" }, "Skipped: left out of the run and the assembly.") : h("div", { class: "ep-steps" }, renderShotSteps(pkg, run, row)));
+}
+
+function renderRunShots(pkg, run) {
   return h("section", { class: "card" },
-    h("h3", {}, "Shots"),
-    h("table", { class: "ep-table" },
-      h("thead", {}, h("tr", {}, h("th", {}, "Shot"), h("th", {}, "Stage"), h("th", {}, "Keyframes"), h("th", {}, "Prompt"), run.settings.render && h("th", {}, "Clip"), h("th", {}, ""))),
-      h("tbody", {}, run.shots.map((row) => {
-        const vp = row.prompt;
-        const vpTone = vp.state === "current" && !vp.problems.length ? "ok" : vp.state === "writing" ? "accent" : vp.problems.length || vp.state === "failed" ? "warn" : "";
-        const clip = row.clip || {};
-        const clipTone = { current: "ok", rendering: "accent", failed: "bad", outdated: "warn" }[clip.state] || "";
-        return h("tr", { class: row.stage === "skipped" ? "muted" : "" },
-          h("td", {},
-            h("a", { href: "#", onclick: (e) => { e.preventDefault(); go(state.job.job_id, "keyframes"); setTimeout(() => framesOpenShot(row.shot_id), 50); } }, row.shot_id),
-            h("div", { class: "small muted" }, `${row.place} · ${secs(row.clip_ms)}`),
-            row.people.length > 0 && h("div", { class: "small muted" }, row.people.join(", "))),
-          h("td", {}, stageChip(row), holdButtons(run, row)),
-          h("td", {}, h("div", { class: "ep-kf" }, row.keyframes.map((k) =>
-            k.take_id != null && k.n != null
-              ? h("img", { src: drawUrl({ take_id: k.take_id }, k.n), alt: `cut ${k.index}`, title: `cut ${k.index}: approved`, class: "ep-thumb" })
-              : h("span", { class: `ep-slot ${k.busy ? "busy" : ""}`, title: k.busy ? `cut ${k.index}: drawing` : `cut ${k.index}: no keyframe yet` }, k.index))),
-            h("div", { class: "small muted" }, `${row.approved}/${row.cuts} approved`)),
-          h("td", {}, h("span", { class: `chip ${vpTone}` }, vp.state), vp.problems.length > 0 && h("div", { class: "small warn-text" }, vp.problems.join("; ")), vp.error && h("div", { class: "small warn-text" }, vp.error)),
-          run.settings.render && h("td", {},
-            clip.state && clip.state !== "none" && h("span", { class: `chip ${clipTone}` }, clip.state),
-            clip.has_file && h("div", {},
-              h("video", { controls: true, preload: "none", src: clipUrl(clip.clip_id), poster: clip.has_poster ? clipUrl(clip.clip_id, "poster") : null, class: "ep-clip" }),
-              h("div", { class: "small muted" }, `${clip.duration_s} s · ${clip.model || ""}`)),
-            clip.error && h("div", { class: "small warn-text" }, clip.error)),
-          h("td", { class: "ep-actions" },
-            run.status !== "done" && (skip.has(row.shot_id)
-              ? h("button", { type: "button", class: "btn small", onclick: (e) => epAction(`${base}/retry`, e.currentTarget, { shot_id: row.shot_id }) }, "Include")
-              : h("button", { type: "button", class: "btn ghost small", title: "Leave this shot out of the run and the assembly", onclick: (e) => epAction(`${base}/settings`, e.currentTarget, { skip_shots: [...skip, row.shot_id] }, "PATCH") }, "Skip")),
-            (row.stage === "waiting" || clip.state === "failed") && h("button", { type: "button", class: "btn small", title: "Forget this shot's failed tries and holds", onclick: (e) => epAction(`${base}/retry`, e.currentTarget, { shot_id: row.shot_id }) }, "Retry"),
-            run.settings.render && vp.state === "current" && !vp.problems.length && clip.state !== "rendering" && h("button", { type: "button", class: "btn small", title: "Render this shot's clip again now", onclick: (e) => epAction(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`, e.currentTarget, { revision_id: pkg.revision_id, fast: run.settings.fast }) }, "Render again")));
-      }))));
+    h("div", { class: "section-head" }, h("h3", {}, "Shots & steps"), h("span", { class: "small muted" }, `${run.shots.length} shots, each from cuts to clip`)),
+    h("div", { class: "ep-shotlist" }, run.shots.map((row) => renderShotCard(pkg, run, row))));
 }
 
 const EP_TONE = { ok: "ok", warn: "warn", bad: "bad", info: "" };

@@ -961,3 +961,24 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .ep-hold { margin-top: 4px; }
 .ep-actions { white-space: nowrap; }
 .ep-actions .btn { margin: 0 4px 4px 0; }
+
+/* Detailed per-shot progress: each shot is a card, its pipeline a vertical stepper. */
+.ep-shotlist { display: flex; flex-direction: column; gap: 10px; }
+.ep-shot { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.ep-shot.muted { opacity: 0.6; }
+.ep-shot-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.ep-shot-head a { font-weight: 600; }
+.ep-steps { display: flex; flex-direction: column; gap: 0; border-left: 2px solid var(--border); margin-left: 6px; padding-left: 0; }
+.ep-step { position: relative; display: flex; gap: 10px; padding: 8px 0 8px 14px; }
+.ep-step:not(:last-child) { border-bottom: 1px dashed var(--border); }
+.ep-step-dot { position: absolute; left: -7px; top: 12px; width: 12px; height: 12px; border-radius: 50%; background: var(--border); border: 2px solid var(--bg, #fff); box-sizing: border-box; }
+.ep-step-main { flex: 1; min-width: 0; }
+.ep-step-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ep-step-name { font-weight: 600; min-width: 72px; }
+.ep-step-controls { margin-left: auto; white-space: nowrap; }
+.ep-step-controls .btn { margin: 0 0 0 6px; }
+.ep-step-done > .ep-step-dot { background: var(--ok, #2e7d32); }
+.ep-step-active > .ep-step-dot { background: var(--accent); animation: ep-pulse 1.2s ease-in-out infinite; }
+.ep-step-hold > .ep-step-dot { background: var(--warn, #b26b00); }
+.ep-step-fail > .ep-step-dot { background: var(--bad, #c62828); }
+.ep-step-idle { opacity: 0.7; }
