@@ -129,6 +129,8 @@ def test_mcphub_client_submits_a_job_and_polls_it():
     finally:
         httpx.AsyncClient = real  # type: ignore[misc]
     assert out.data == b"MP4DATA" and out.task_id == "job1" and out.model == "minimax-h3-ref2va"
+    # A per-call seed (another take of the same shot) replaces the client's.
+    assert client.body("p", 4, "9:16", [], seed=12)["seed"] == 12
     assert seen[0].headers["x-api-key"] == "mcp_key" and "authorization" not in seen[0].headers
     body = json.loads(seen[0].content)
     assert (

@@ -165,6 +165,18 @@ def shot_board(
     return out
 
 
+def picture_labels(context: dict[str, Any], ids: dict[str, str]) -> dict[str, str]:
+    """A short label for each picture a video prompt may name, by ref id: "keyframe of cut
+    2", "Mei · look", "set", ..."""
+    labels = {}
+    for p in context["pictures"]:
+        ref = ids[p["pic"][5:-1]]
+        kind = {"chosen": "look", "keyframe": "keyframe"}.get(p["kind"], p["kind"])
+        labels[ref] = (f"keyframe of cut {p['cuts'][0]}" if p["kind"] == "keyframe" and p["cuts"]
+                       else f"{p['of']} \u00b7 {kind}" if p["of"] else kind)  # fmt: skip
+    return labels
+
+
 def video_prompt_view(
     pkg: ProductionPackage,
     shot: Any,
@@ -181,16 +193,10 @@ def video_prompt_view(
     (by ref id), the shot's dialogue-pace warning, and whether every cut has its approved
     keyframe (when it is written on its own)."""
     context, ids = prompt_inputs(pkg, shot, plan, takes, images, reading, usable, carried)
-    labels = {}
-    for p in context["pictures"]:
-        ref = ids[p["pic"][5:-1]]
-        kind = {"chosen": "look", "keyframe": "keyframe"}.get(p["kind"], p["kind"])
-        labels[ref] = (f"keyframe of cut {p['cuts'][0]}" if p["kind"] == "keyframe" and p["cuts"]
-                       else f"{p['of']} \u00b7 {kind}" if p["of"] else kind)  # fmt: skip
     frames = approved_frames(pkg, shot, plan, takes)
     view: dict[str, Any] = {
         "state": prompt_state(stored, fingerprint(context, ids)),
-        "pictures": labels,
+        "pictures": picture_labels(context, ids),
         "pace": dialogue_pace(pkg, shot, plan.sub_shots[-1].end_ms, carried),
         "keyframes_done": bool(frames) and all(frames.values()),
     }

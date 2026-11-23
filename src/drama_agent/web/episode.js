@@ -5,7 +5,11 @@
 
 const ep = { key: null, episodes: null, episode: null, run: null, error: "", timer: null, loading: false,
   settings: { draws: 2, max_rounds: 3, provider: null, holds: [], render: true, assemble: true, parallel: 2, approve_failed: true, fast: false },
-  skip: new Set(), busy: false, events: false, prompts: {} };
+  skip: new Set(), busy: false, events: false, prompts: {}, edit: {}, renderOpts: {} };
+
+// Whether the page should keep polling: the run goes on, or a prompt or a take is in work.
+const epLive = (run) => !!run && (run.status === "running"
+  || run.shots.some((r) => r.prompt.state === "writing" || (r.clips || []).some((c) => c.state === "rendering")));
 
 const epKey = (pkg) => `${pkg.package_id}|${pkg.revision_id}`;
 const epBase = (pkg) => `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/episodes`;
@@ -55,7 +59,7 @@ async function loadEpisode(pkg, { force = false } = {}) {
   } finally {
     ep.loading = false;
   }
-  if (ep.run && ep.run.status === "running" && epShown(key)) {
+  if (epLive(ep.run) && epShown(key)) {
     ep.timer = setTimeout(() => loadEpisode(ep.pkg), 2000);
   }
 }
@@ -241,35 +245,136 @@ function renderShotSteps(pkg, run, row) {
 
   // 3. Video prompt.
   const vp = row.prompt;
+  const vpUrl = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/keyframes/${encodeURIComponent(row.shot_id)}/video-prompt`;
   const vpState = vp.state === "writing" ? "active" : vp.state === "failed" ? "fail" : held("prompt") ? "hold" : vp.state === "current" ? "done" : vp.state === "outdated" ? "active" : "idle";
+  const editing = ep.edit[row.shot_id];
+  const canEdit = (vp.blocks || []).length > 0 && vp.state !== "writing";
   steps.push(epStep("Prompt", vpState,
-    vp.problems.length ? `${vp.state} · ${vp.problems.join("; ")}` : vp.state,
+    `${vp.problems.length ? `${vp.state} · ${vp.problems.join("; ")}` : vp.state}${vp.source === "user" ? " · edited by hand" : ""}`,
     [
-      vp.state !== "writing" && h("button", { type: "button", class: "btn small", title: "Write this shot's video prompt again from its keyframes", onclick: (e) => epAction(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/keyframes/${encodeURIComponent(row.shot_id)}/video-prompt`, e.currentTarget, { revision_id: pkg.revision_id }) }, "Rewrite"),
-      h("button", { type: "button", class: "btn ghost small", title: "Read or edit the prompt on the Keyframes tab", onclick: () => openOnBoard(row.shot_id) }, "View / edit"),
+      vp.state !== "writing" && h("button", { type: "button", class: "btn small", title: "Write this shot's video prompt again from its keyframes", onclick: (e) => epAction(vpUrl, e.currentTarget, { revision_id: pkg.revision_id }) }, "Rewrite"),
+      canEdit && !editing && h("button", { type: "button", class: "btn small", title: "Edit the prompt's text here", onclick: () => { ep.edit[row.shot_id] = { blocks: vp.blocks.map((b) => ({ ...b })), sound: vp.sound || "", error: "" }; renderMain(); } }, "Edit"),
+      h("button", { type: "button", class: "btn ghost small", title: "See the prompt with its pictures on the Keyframes tab", onclick: () => openOnBoard(row.shot_id) }, "On the board"),
     ],
-    h("div", {}, vp.error && h("div", { class: "small warn-text" }, vp.error), stepHolds(run, row, (kind) => kind === "prompt"))));
+    h("div", {},
+      vp.error && h("div", { class: "small warn-text" }, vp.error),
+      editing ? renderPromptEditor(pkg, run, row, vpUrl) : (vp.blocks || []).length > 0 && h("details", { class: "small ep-prompt" },
+        h("summary", { class: "muted" }, "Prompt text"),
+        vp.blocks.map((b) => h("p", { class: "vp-text" }, h("strong", {}, vp.blocks.length > 1 ? `[Shot ${b.sub_shot}] ` : ""), vpText(b.text, vp.pictures || {}), h("span", { class: "muted" }, ` · camera: ${b.camera}`))),
+        vp.sound && h("p", { class: "vp-text" }, h("strong", {}, "Sound: "), vp.sound)),
+      stepHolds(run, row, (kind) => kind === "prompt"))));
 
-  // 4. Clip render.
+  // 4. Clip render: every take beside the others, the newest finished one in the episode.
   if (run.settings.render) {
     const clip = row.clip || {};
+    const takes = row.clips || [];
+    const busy = takes.filter((c) => c.state === "rendering").length;
     const clipState = { current: "done", rendering: "active", failed: "fail", outdated: "active" }[clip.state] || (held("clip") ? "hold" : "idle");
-    const canRender = vp.state === "current" && !vp.problems.length && clip.state !== "rendering";
-    steps.push(epStep("Clip", clipState,
-      clip.state && clip.state !== "none" ? `${clip.state}${clip.duration_s ? ` · ${clip.duration_s} s` : ""}${clip.model ? ` · ${clip.model}` : ""}` : "no clip yet",
-      [
-        canRender && h("button", { type: "button", class: "btn small", title: "Render this shot's clip again now", onclick: (e) => epAction(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`, e.currentTarget, { revision_id: pkg.revision_id, fast: run.settings.fast }) }, clip.state === "current" ? "Render again" : "Render now"),
-        clip.clip_id && clip.state !== "rendering" && h("button", { type: "button", class: "btn ghost small", title: "Delete this clip so the run renders it afresh", onclick: (e) => epAction(clipUrl(clip.clip_id).replace(/\/content$/, ""), e.currentTarget, undefined, "DELETE") }, "Delete"),
-      ],
+    const canRender = vp.state === "current" && !vp.problems.length && busy < MAX_TAKES_IN_FLIGHT;
+    const label = busy ? `rendering ${busy} take${busy > 1 ? "s" : ""}${takes.length > busy ? ` · ${takes.length - busy} done` : ""}`
+      : clip.state && clip.state !== "none" ? `${clip.state}${clip.duration_s ? ` · ${clip.duration_s} s` : ""}${takes.length > 1 ? ` · ${takes.length} takes` : ""}` : "no clip yet";
+    steps.push(epStep("Clip", clipState, label,
+      canRender ? renderOptions(pkg, run, row, takes.length > 0) : [],
       h("div", {},
-        clip.has_file && h("div", {},
-          h("video", { controls: true, preload: "none", src: clipUrl(clip.clip_id), poster: clip.has_poster ? clipUrl(clip.clip_id, "poster") : null, class: "ep-clip" }),
-          h("div", { class: "small" }, h("a", { href: clipUrl(clip.clip_id), download: `${row.shot_id}.mp4` }, "Download"))),
-        clip.error && h("div", { class: "small warn-text" }, clip.error),
+        takes.length > 0 && h("div", { class: "ep-takes" }, takes.map((c) => renderTake(pkg, run, row, c, (takes.find((t) => t.has_file) || {}).clip_id))),
         stepHolds(run, row, (kind) => kind === "clip"))));
   }
 
   return steps;
+}
+
+const MAX_TAKES_IN_FLIGHT = 4;
+
+// The render options, inline: how many takes, fast or full quality, then Render.
+function renderOptions(pkg, run, row, again) {
+  const o = ep.renderOpts[row.shot_id] || (ep.renderOpts[row.shot_id] = { takes: 1, fast: run.settings.fast });
+  const url = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`;
+  return [
+    h("label", { class: "ep-opt small", title: "How many takes to render, each with its own seed" },
+      "Takes ", h("select", { onchange: (e) => { o.takes = Number(e.target.value); } }, [1, 2, 3, 4].map((n) => h("option", { value: n, selected: o.takes === n }, n)))),
+    h("label", { class: "ep-opt small", title: "Fast: a lower resolution with the keyframes only as references. Full: the run's normal size and every reference picture." },
+      h("select", { onchange: (e) => { o.fast = e.target.value === "fast"; } },
+        h("option", { value: "fast", selected: o.fast }, "Fast"), h("option", { value: "full", selected: !o.fast }, "Full quality"))),
+    h("button", { type: "button", class: "btn small", title: "Render new takes of this shot now; each appears beside the clip while it renders", onclick: (e) => epAction(url, e.currentTarget, { revision_id: pkg.revision_id, fast: o.fast, takes: o.takes }) }, again ? "Render again" : "Render now"),
+  ];
+}
+
+// One take of a shot's clip: a gray box while it renders, the video once it is done.
+function renderTake(pkg, run, row, c, usedId) {
+  const url = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`;
+  const who = `seed ${c.seed ?? "?"} · ${c.fast ? "fast" : "full"}`;
+  const del = h("button", { type: "button", class: "btn ghost small", title: "Delete this take", onclick: (e) => epAction(clipUrl(c.clip_id).replace(/\/content$/, ""), e.currentTarget, undefined, "DELETE") }, "Delete");
+  if (c.state === "rendering") {
+    const queued = c.status === "pending" && c.ahead > 0;
+    return h("div", { class: "ep-take busy", title: who },
+      h("div", { class: "ep-take-box" },
+        h("div", { class: "ep-spinner", "aria-hidden": "true" }),
+        h("div", { class: "small" }, queued ? `queued · ${c.ahead} ahead` : "rendering…"),
+        h("div", { class: "small mono ep-elapsed", "data-since": c.created_at }, elapsed(c.created_at))),
+      h("div", { class: "small muted" }, who));
+  }
+  if (c.state === "failed") {
+    return h("div", { class: "ep-take failed" },
+      h("div", { class: "ep-take-box", title: c.error || "" }, h("div", { class: "small warn-text" }, "failed"), h("div", { class: "small warn-text ep-err" }, c.error || "")),
+      h("div", { class: "small muted" }, who),
+      h("div", { class: "ep-take-actions" },
+        h("button", { type: "button", class: "btn small", title: "Render this take again with the same seed", onclick: (e) => epAction(url, e.currentTarget, { revision_id: pkg.revision_id, fast: c.fast, takes: 1, seed: c.seed }) }, "Retry"), del));
+  }
+  const used = c.clip_id === usedId;
+  return h("div", { class: `ep-take ${used ? "used" : ""} ${c.state === "outdated" ? "outdated" : ""}` },
+    c.has_file && h("video", { controls: true, preload: "none", src: clipUrl(c.clip_id), poster: c.has_poster ? clipUrl(c.clip_id, "poster") : null, class: "ep-clip" }),
+    h("div", { class: "small muted" }, who, c.state === "outdated" && h("span", { class: "chip warn", title: "The prompt or the pictures changed since this take was rendered" }, "out of date")),
+    used ? h("div", { class: "small ok-text" }, "In the episode") : null,
+    h("div", { class: "ep-take-actions" },
+      !used && c.has_file && h("button", { type: "button", class: "btn small", title: "Cut the episode from this take", onclick: (e) => epAction(clipUrl(c.clip_id, "use"), e.currentTarget, {}) }, "Use"),
+      c.has_file && h("a", { class: "btn ghost small", href: clipUrl(c.clip_id), download: `${row.shot_id}-s${c.seed ?? 0}.mp4` }, "Download"),
+      del));
+}
+
+function elapsed(since) {
+  const s = Math.max(0, Math.round((Date.now() - new Date(since).getTime()) / 1000));
+  return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s`;
+}
+// The rendering boxes' clocks tick without redrawing the page.
+setInterval(() => document.querySelectorAll(".ep-elapsed[data-since]").forEach((el) => { el.textContent = elapsed(el.dataset.since); }), 1000);
+
+// The inline prompt editor: one field per cut, the camera sentence, the sound sentence, and
+// the pictures the prompt may name. Saving makes it the shot's prompt; its clips go out of date.
+function renderPromptEditor(pkg, run, row, vpUrl) {
+  const d = ep.edit[row.shot_id];
+  const pics = row.prompt.pictures || {};
+  const close = () => { delete ep.edit[row.shot_id]; renderMain(); };
+  const save = async (button, thenRender) => {
+    button.disabled = true;
+    try {
+      await api(vpUrl, { method: "PUT", body: JSON.stringify({ revision_id: pkg.revision_id, blocks: d.blocks, sound: d.sound }) });
+      delete ep.edit[row.shot_id];
+      if (thenRender) {
+        const o = ep.renderOpts[row.shot_id] || { takes: 1, fast: run.settings.fast };
+        await api(`/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`, { method: "POST", body: JSON.stringify({ revision_id: pkg.revision_id, fast: o.fast, takes: o.takes }) });
+      }
+      await loadEpisode(ep.pkg, { force: true });
+    } catch (e) {
+      d.error = e.message;
+      button.disabled = false;
+      renderMain();
+    }
+  };
+  return h("div", { class: "ep-editor" },
+    d.blocks.map((b, i) => h("div", { class: "ep-editor-block" },
+      h("label", { class: "small muted" }, d.blocks.length > 1 ? `Cut ${b.sub_shot}` : "Text"),
+      h("textarea", { class: "ep-field", rows: 4, oninput: (e) => { d.blocks[i].text = e.target.value; } }, b.text),
+      h("label", { class: "small muted" }, "Camera"),
+      h("input", { class: "ep-field", value: b.camera, oninput: (e) => { d.blocks[i].camera = e.target.value; } }))),
+    h("label", { class: "small muted" }, "Sound"),
+    h("textarea", { class: "ep-field", rows: 2, oninput: (e) => { d.sound = e.target.value; } }, d.sound),
+    Object.keys(pics).length > 0 && h("div", { class: "small muted ep-pics" }, "Pictures you can name: ",
+      Object.entries(pics).map(([ref, label]) => h("code", { class: "ep-pic", title: label, onclick: () => navigator.clipboard && navigator.clipboard.writeText(`{pic:${ref}}`) }, `{pic:${ref}}`, " ", h("span", { class: "muted" }, label)))),
+    d.error && h("div", { class: "small warn-text" }, d.error),
+    h("div", { class: "ep-take-actions" },
+      h("button", { type: "button", class: "btn small", onclick: (e) => save(e.currentTarget, false) }, "Save"),
+      h("button", { type: "button", class: "btn small", title: "Save the prompt and render a new take from it", onclick: (e) => save(e.currentTarget, true) }, "Save & render"),
+      h("button", { type: "button", class: "btn ghost small", onclick: close }, "Cancel")));
 }
 
 function renderShotCard(pkg, run, row) {
@@ -311,7 +416,7 @@ function renderEpisode(pkg) {
   if (ep.key !== epKey(pkg)) loadEpisode(pkg);
   if (frames.key !== framesKey(pkg)) loadFrames(pkg);  // the providers, and the board behind the links
   const ready = ep.key === epKey(pkg) && ep.episodes !== null;
-  if (ready && ep.run && ep.run.status === "running" && !ep.timer && !ep.loading) loadEpisode(pkg);
+  if (ready && epLive(ep.run) && !ep.timer && !ep.loading) loadEpisode(pkg);
   if (!ready) return h("div", { class: "loading" }, ep.error || "Loading…");
   const run = ep.run;
   return h("div", {},

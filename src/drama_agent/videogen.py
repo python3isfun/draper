@@ -70,6 +70,7 @@ class VideoClient(Protocol):
         ratio: str,
         references: list[VideoReference],
         short_edge: int | None = None,
+        seed: int | None = None,
     ) -> VideoResult: ...
 
 
@@ -122,6 +123,7 @@ class MiniMaxVideoClient:
         ratio: str,
         references: list[VideoReference],
         short_edge: int | None = None,
+        seed: int | None = None,
     ) -> dict:
         content: list[dict] = [{"type": "text", "text": prompt}]
         for r in references:
@@ -145,6 +147,7 @@ class MiniMaxVideoClient:
         ratio: str,
         references: list[VideoReference],
         short_edge: int | None = None,
+        seed: int | None = None,
     ) -> VideoResult:
         if len(references) > MAX_VIDEO_REFERENCES:
             raise VideoGenError(f"at most {MAX_VIDEO_REFERENCES} reference pictures")
@@ -152,7 +155,8 @@ class MiniMaxVideoClient:
             raise VideoGenError(f"the prompt is over {MAX_PROMPT_CHARS} characters")
         if not references:
             raise VideoGenError("a clip needs at least one reference picture")
-        task_id = await self._create(self.body(prompt, duration_s, ratio, references, short_edge))
+        body = self.body(prompt, duration_s, ratio, references, short_edge, seed)
+        task_id = await self._create(body)
         url = await self._wait(task_id)
         return VideoResult(await self._download(url), model=self.model_id, task_id=task_id)
 
@@ -247,6 +251,7 @@ class MCPHubVideoClient(MiniMaxVideoClient):
         ratio: str,
         references: list[VideoReference],
         short_edge: int | None = None,
+        seed: int | None = None,
     ) -> dict:
         conditions = []
         for r in references:
@@ -255,7 +260,7 @@ class MCPHubVideoClient(MiniMaxVideoClient):
             conditions.append({"type": "image", "role": "reference", "uri": uri})
         return {
             "task": "ref2va",
-            "seed": self.seed,
+            "seed": self.seed if seed is None else seed,
             "prompt": prompt,
             "target": {
                 "short_edge": short_edge or self.short_edge,
@@ -360,17 +365,18 @@ class FixtureVideoClient:
         ratio: str,
         references: list[VideoReference],
         short_edge: int | None = None,
+        seed: int | None = None,
     ) -> VideoResult:
         self.calls.append({"prompt": prompt, "duration_s": duration_s, "ratio": ratio,
                            "references": [r.name for r in references],
-                           "short_edge": short_edge})  # fmt: skip
+                           "short_edge": short_edge, "seed": seed})  # fmt: skip
         if not references:
             raise VideoGenError("a clip needs at least one reference picture")
         if not ffmpeg_available():
             raise VideoGenError("ffmpeg is needed to make fixture clips")
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
-        color = "#" + hashlib.sha1(prompt.encode()).hexdigest()[:6]
+        color = "#" + hashlib.sha1(f"{prompt}|{seed}".encode()).hexdigest()[:6]
         secs = max(MIN_CLIP_S, min(MAX_CLIP_S, int(duration_s)))
         data = await asyncio.to_thread(synthetic_clip, secs, ratio, color)
         return VideoResult(data, model=self.model_id)

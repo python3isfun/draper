@@ -172,7 +172,7 @@ class ShotVideoPrompt(BaseModel):
     revision_id: str
     shot_id: str
     status: Literal["writing", "done", "failed"] = "writing"
-    source: Literal["model", "template"] = "model"
+    source: Literal["model", "template", "user"] = "model"
     blocks: list[PromptBlock] = Field(default_factory=list)
     sound: str = ""
     notes: str = ""

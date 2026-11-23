@@ -690,6 +690,19 @@ it was rendered from is the shot's current prompt and the same pictures would be
 change to either marks it out of date, like a video prompt. The Keyframes board shows each
 shot's clip (`clip`), and **Render again** renders one shot now.
 
+**Takes.** A shot can have several clips: each render is a *take* with its own seed
+(`POST /v1/drama-packages/{id}/clips/{shot_id}` with `takes` 1 to 4, `fast`, and an
+optional `seed`; without one, seeds the shot hasn't used, so rendering again gives a new
+clip rather than the identical one). Clips render one at a time; at most four of a shot
+queue at once. The Episode tab's Clip step shows every take side by side: a gray box with
+its clock while one renders (and how many are ahead of it), then the video, with the newest
+finished take marked *In the episode*. **Use** makes an older take the newest, so the
+episode is cut from it (`POST /v1/shot-clips/{id}/use`). The Prompt step's **Edit** opens
+the video prompt in place: a field per cut, its camera sentence and the sound, with the
+pictures it may name; saving (`PUT .../keyframes/{shot_id}/video-prompt`) runs the same
+checks as a written prompt, marks it current to the shot, and puts its takes out of date
+until **Save & render** or **Render again**.
+
 The **Fast** option (a run setting, and `fast` on a single render) renders sooner and
 rougher: the short edge drops to `512` (from the client's default) and only the cuts'
 keyframes are sent, capped at three, rather than the usual nine pictures. It trades

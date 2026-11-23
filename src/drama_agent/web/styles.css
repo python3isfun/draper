@@ -982,3 +982,31 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .ep-step-hold > .ep-step-dot { background: var(--warn, #b26b00); }
 .ep-step-fail > .ep-step-dot { background: var(--bad, #c62828); }
 .ep-step-idle { opacity: 0.7; }
+
+/* Takes of a shot's clip, side by side: a gray box while one renders, the video once done. */
+.ep-takes { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; align-items: flex-start; }
+.ep-take { width: 120px; font-size: 12px; }
+.ep-take .ep-clip { margin-top: 0; }
+.ep-take.outdated .ep-clip { opacity: 0.7; }
+.ep-take.used .ep-clip { outline: 2px solid var(--ok, #2e9e5b); outline-offset: 1px; }
+.ep-take-box { width: 120px; height: 160px; border-radius: 4px; background: var(--border, #e5e5e5); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; text-align: center; padding: 6px; box-sizing: border-box; }
+.ep-take.busy .ep-take-box { animation: ep-pulse 1.6s ease-in-out infinite; }
+.ep-take.failed .ep-take-box { background: transparent; border: 1px dashed var(--warn, #c0392b); height: auto; min-height: 80px; }
+.ep-err { max-height: 72px; overflow: hidden; }
+.ep-spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--muted, #888); border-top-color: transparent; animation: ep-spin 0.9s linear infinite; }
+@keyframes ep-spin { to { transform: rotate(360deg); } }
+.ep-take-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.ep-take-actions .btn { margin: 0; }
+.ep-opt { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
+.ep-opt select { font: inherit; font-size: 12px; }
+.ok-text { color: var(--ok, #2e9e5b); }
+
+/* The inline prompt editor and the prompt text. */
+.ep-prompt { margin-top: 4px; }
+.ep-prompt .vp-text { margin: 4px 0; }
+.ep-editor { margin-top: 6px; max-width: 720px; }
+.ep-editor-block { margin-bottom: 6px; }
+.ep-editor label { display: block; margin: 4px 0 2px; }
+.ep-field { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; }
+.ep-pics { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ep-pic { cursor: copy; font-size: 11px; }

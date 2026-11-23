@@ -60,10 +60,19 @@ from ..shots import flow
 from ..shots.clips import clip_state, clip_view, latest_clip
 from ..shots.history import replace_plan, restore_plan
 from ..shots.lock import KeyframeReading, SeenCut, lock_shot, unlock_shot
-from ..shots.models import ShotVideoPrompt
+from ..shots.models import PromptBlock, ShotVideoPrompt
 from ..shots.references import sub_shot_references
 from ..shots.staleness import keyframe_judge
-from ..shots.video_prompt import approved_frames
+from ..shots.video_prompt import (
+    PIC,
+    VideoPromptOutput,
+    approved_frames,
+    fingerprint,
+    others_of,
+)
+from ..shots.video_prompt import (
+    prompt_findings as video_findings,
+)
 from .schemas import UseKeyframeRequest
 
 
@@ -180,6 +189,16 @@ class LockRequest(BaseModel):
     revision_id: str | None = None
     # The keyframes' reading as the editor confirmed it, one per cut, in order.
     cuts: list[SeenCut]
+
+
+class VideoPromptEdit(BaseModel):
+    """A person's edit of a shot's video prompt: one block per cut (pictures as
+    `{pic:<ref id>}`, as stored) and the sound sentence."""
+
+    revision_id: str | None = None
+    blocks: list[PromptBlock] = Field(min_length=1)
+    sound: str = Field("", max_length=2000)
+    notes: str = Field("", max_length=1000)
 
 
 class VideoPromptsRequest(BaseModel):
@@ -599,6 +618,48 @@ def register(
                 409, f"{shot_id} is being planned; write its prompt once it is done"
             )
         return _start_prompt(pkg, shot_id)
+
+    @app.put(
+        "/v1/drama-packages/{package_id}/keyframes/{shot_id}/video-prompt",
+        response_model=ShotVideoPrompt,
+    )
+    async def edit_video_prompt(
+        package_id: str, shot_id: str, req: VideoPromptEdit
+    ) -> ShotVideoPrompt:
+        """Save a person's edit of the shot's video prompt as its prompt now: checked by the
+        same rules as a written one (a picture it can't name is refused; other findings are
+        kept as problems or advice) and screened by the content guard. It is current to the
+        shot as it is now, so its clips are out of date until rendered again."""
+        pkg = _writable(package_id, req.revision_id)
+        shot = _shot(pkg, shot_id)
+        stored = repo.get_video_prompt(pkg.package_id, pkg.revision_id, shot_id)
+        if stored is None or stored.busy:
+            raise HTTPException(409, f"{shot_id}'s video prompt is not written yet")
+        context, ids = runner.video_inputs(pkg, shot)
+        labels = {ref: label for label, ref in ids.items()}
+        if unknown := sorted({r for b in req.blocks for r in PIC.findall(b.text)} - set(labels)):
+            raise HTTPException(422, "The prompt names pictures the shot doesn't have: "
+                                + ", ".join(unknown))  # fmt: skip
+        blocks = [b.model_copy(update={"text": b.text.strip(), "camera": b.camera.strip()})
+                  for b in req.blocks]  # fmt: skip
+        if not all(b.text for b in blocks):
+            raise HTTPException(422, "Every cut needs its text.")
+        # The checks read the writer's short picture ids.
+        short = [b.model_copy(update={"text": PIC.sub(lambda m: f"{{pic:{labels[m.group(1)]}}}",
+                                                      b.text)}) for b in blocks]  # fmt: skip
+        out = VideoPromptOutput(blocks=short, sound=req.sound.strip(), notes=req.notes.strip())
+        problems, advice = video_findings(out, context, others_of(pkg, shot))
+        try:
+            await screen(text_client, " ".join([*(b.text for b in blocks), out.sound]),
+                         pictures=[], restrictive=False, rating=story_rating(repo, pkg.package_id))  # fmt: skip
+        except GuardRefused as exc:
+            raise HTTPException(422, str(exc)) from exc
+        stored.blocks, stored.sound, stored.notes = blocks, out.sound, out.notes
+        stored.problems, stored.advice = problems, advice
+        stored.source, stored.model, stored.error = "user", None, None
+        stored.written_from, stored.updated_at = fingerprint(context, ids), utcnow()
+        repo.save_video_prompt(stored)
+        return stored
 
     @app.post("/v1/drama-packages/{package_id}/keyframes/video-prompts", status_code=202)
     async def write_video_prompts(package_id: str, req: VideoPromptsRequest) -> dict[str, Any]:

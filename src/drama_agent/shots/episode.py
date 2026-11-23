@@ -40,6 +40,7 @@ from ..models.storyboard import Shot
 from ..videogen import VideoClient, VideoReference
 from . import assemble as asm
 from .approvals import approved_take, is_busy
+from .board import picture_labels
 from .clip_refs import VIDEO_MAX_REFERENCES, clip_references, exportable
 from .clips import (
     ClipRef,
@@ -51,6 +52,9 @@ from .clips import (
     clip_state,
     clip_view,
     latest_clip,
+    next_seeds,
+    queue_ahead,
+    shot_clips,
 )
 from .common import NotReady, _names, shot_of
 from .flow import approve_draw, start_prompt, start_take
@@ -622,12 +626,22 @@ class EpisodeRunner:
         )
 
     def start_render(
-        self, pkg: ProductionPackage, shot: Shot, run_id: str | None = None, fast: bool = False
+        self,
+        pkg: ProductionPackage,
+        shot: Shot,
+        run_id: str | None = None,
+        fast: bool = False,
+        seed: int | None = None,
     ) -> ShotClip:
         """A new clip of the shot, rendered in the background (one at a time). `fast`
-        renders it at a lower resolution with keyframes-only references."""
+        renders it at a lower resolution with keyframes-only references; `seed` is the
+        take's seed (a seed the shot hasn't used when not given, so it is a new take)."""
+        if seed is None:
+            mine = shot_clips(self.repo.list_shot_clips(pkg.package_id, pkg.revision_id),
+                              shot.shot_id)  # fmt: skip
+            seed = next_seeds(mine, 1)[0]
         clip = ShotClip(package_id=pkg.package_id, revision_id=pkg.revision_id,
-                        shot_id=shot.shot_id, run_id=run_id, fast=fast)  # fmt: skip
+                        shot_id=shot.shot_id, run_id=run_id, fast=fast, seed=seed)  # fmt: skip
         self.repo.save_shot_clip(clip)
         task = asyncio.create_task(self._render(clip.clip_id))
         self._renders[clip.clip_id] = task
@@ -679,7 +693,7 @@ class EpisodeRunner:
         repo.save_shot_clip(clip)
         refs = await asyncio.to_thread(self._reference_bytes, inputs.sent)
         result = await self.video.generate(
-            inputs.prompt, inputs.duration_s, inputs.ratio, refs, inputs.short_edge
+            inputs.prompt, inputs.duration_s, inputs.ratio, refs, inputs.short_edge, clip.seed
         )
         rel = f"clips/{pkg.package_id}/{clip.clip_id}.mp4"
         poster = f"clips/{pkg.package_id}/{clip.clip_id}.jpg"
@@ -737,24 +751,24 @@ class EpisodeRunner:
             holds = {key: why for key, why in run.holds.items() if key.startswith(f"{sid}:")}
             vp = prompts.get(sid)
             vstate = "none"
+            labels: dict[str, str] = {}
             if k == n and n:
                 context, ids = self.frames.video_inputs(pkg, shot)
                 vstate = prompt_state(vp, fingerprint(context, ids))
-            clip = latest_clip(clips, sid)
-            cstate = "none"
+                labels = picture_labels(context, ids)
+            mine = shot_clips(clips, sid)
+            clip = mine[0] if mine else None
             # A prompt that fails a check still renders once its hold is released.
             usable = vp is not None and (not vp.problems or run.freed(f"{sid}:prompt"))
+            print_ = None  # what a clip would be rendered from now; None: not renderable
             if vstate == "current" and usable:
                 inputs = self.clip_inputs(pkg, shot, plan, vp, takes, images, run.settings.fast)
-                cstate = clip_state(clip, inputs.print if inputs else None)
-            elif clip is not None:
-                cstate = (
-                    "rendering"
-                    if clip.busy
-                    else "failed"
-                    if clip.status == "failed"
-                    else "outdated"
-                )
+                print_ = inputs.print if inputs else None
+            cstate = clip_state(clip, print_)
+            views = [clip_view(c, clip_state(c, print_)) for c in mine]
+            for c, view in zip(mine, views, strict=True):
+                if c.busy:
+                    view["ahead"] = queue_ahead(clips, c)
             if sid in s.skip_shots:
                 stage = "skipped"
             elif holds:
@@ -793,8 +807,11 @@ class EpisodeRunner:
                     for sub, ok in zip(plan.sub_shots, approved, strict=True)
                 ],
                 "prompt": {"state": vstate, "problems": vp.problems if vp else [],
-                           "error": vp.error if vp else None},
+                           "error": vp.error if vp else None, "pictures": labels,
+                           "blocks": [b.model_dump() for b in vp.blocks] if vp else [],
+                           "sound": vp.sound if vp else "", "source": vp.source if vp else None},
                 "clip": clip_view(clip, cstate),
+                "clips": views,
                 "holds": holds,
             })  # fmt: skip
         return {

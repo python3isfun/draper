@@ -73,6 +73,7 @@ class ShotClip(BaseModel):
     task_id: str | None = None
     written_from: str = ""
     fast: bool = False  # low resolution + keyframes-only references, to render faster
+    seed: int | None = None  # the render's seed; another seed is another take of the shot
     run_id: str | None = None  # the episode run that rendered it, if one did
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -169,8 +170,36 @@ def clip_state(clip: ShotClip | None, now: str | None) -> str:
 
 
 def latest_clip(clips: list[ShotClip], shot_id: str) -> ShotClip | None:
+    """The shot's newest clip: the one the episode is cut from (`use_clip` makes an older
+    take the newest)."""
     mine = [c for c in clips if c.shot_id == shot_id]
     return max(mine, key=lambda c: c.created_at, default=None)
+
+
+def shot_clips(clips: list[ShotClip], shot_id: str) -> list[ShotClip]:
+    """The shot's clips, newest first."""
+    mine = [c for c in clips if c.shot_id == shot_id]
+    return sorted(mine, key=lambda c: c.created_at, reverse=True)
+
+
+def next_seeds(clips: list[ShotClip], n: int, start: int | None = None) -> list[int]:
+    """`n` seeds for new takes of a shot: from `start` on when given, else the smallest
+    positive seeds none of the shot's clips used, so a render again is a new take."""
+    if start is not None:
+        return [start + i for i in range(n)]
+    used = {c.seed for c in clips if c.seed is not None}
+    out: list[int] = []
+    seed = 1
+    while len(out) < n:
+        if seed not in used:
+            out.append(seed)
+        seed += 1
+    return out
+
+
+def queue_ahead(clips: list[ShotClip], clip: ShotClip) -> int:
+    """How many clips render before this one (they go one at a time, oldest first)."""
+    return sum(1 for c in clips if c.busy and c.created_at < clip.created_at)
 
 
 def clip_view(clip: ShotClip | None, state: str) -> dict[str, Any]:
@@ -179,7 +208,7 @@ def clip_view(clip: ShotClip | None, state: str) -> dict[str, Any]:
     if clip is not None:
         out |= clip.model_dump(mode="json", include={
             "clip_id", "status", "duration_s", "ratio", "model", "error", "created_at",
-            "finished_at", "run_id"})  # fmt: skip
+            "finished_at", "run_id", "fast", "seed"})  # fmt: skip
         out["has_file"] = bool(clip.file)
         out["has_poster"] = bool(clip.poster)
         out["pictures"] = [r.model_dump() for r in clip.references]

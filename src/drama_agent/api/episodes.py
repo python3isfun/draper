@@ -10,7 +10,15 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from ..models import ProductionPackage
-from ..shots.clips import ShotClip, clip_state, clip_view, latest_clip
+from ..models.package import utcnow
+from ..shots.clips import (
+    ShotClip,
+    clip_state,
+    clip_view,
+    latest_clip,
+    next_seeds,
+    shot_clips,
+)
 from ..shots.common import shot_of
 from ..shots.episode import EpisodeRun, EpisodeRunner, RunSettings, episode_shots
 from ..shots.plans import plan_of
@@ -43,9 +51,14 @@ class ShotRequest(BaseModel):
     shot_id: str
 
 
-class RevisionBody(BaseModel):
+MAX_TAKES_IN_FLIGHT = 4
+
+
+class RenderRequest(BaseModel):
     revision_id: str | None = None
     fast: bool = False
+    takes: int = Field(1, ge=1, le=MAX_TAKES_IN_FLIGHT)  # how many takes to render
+    seed: int | None = Field(None, ge=0)  # the first take's seed; else unused seeds
 
 
 class EpisodeItem(BaseModel):
@@ -242,11 +255,15 @@ def register(
                 "rendering": sum(1 for c in clips if c.busy), "shots": out}  # fmt: skip
 
     @app.post(
-        "/v1/drama-packages/{package_id}/clips/{shot_id}", status_code=202, response_model=ShotClip
+        "/v1/drama-packages/{package_id}/clips/{shot_id}",
+        status_code=202,
+        response_model=list[ShotClip],
     )
-    async def render_clip(package_id: str, shot_id: str, req: RevisionBody) -> ShotClip:
-        """Render the shot's clip now from its current video prompt (one clip renders at a
-        time; this one queues behind any other)."""
+    async def render_clip(package_id: str, shot_id: str, req: RenderRequest) -> list[ShotClip]:
+        """Render `takes` new clips of the shot now from its current video prompt, each with
+        its own seed (`seed` and up, else seeds the shot hasn't used). Clips render one at a
+        time; these queue behind any other. The newest finished take is the one the episode
+        is cut from (see `use`)."""
         pkg = _writable(package_id, req.revision_id)
         try:
             shot = shot_of(pkg, shot_id)
@@ -255,10 +272,27 @@ def register(
         vp = repo.get_video_prompt(pkg.package_id, pkg.revision_id, shot_id)
         if vp is None or vp.status != "done":
             raise HTTPException(409, f"{shot_id} has no finished video prompt")
-        if any(c.busy for c in repo.list_shot_clips(pkg.package_id, pkg.revision_id)
-               if c.shot_id == shot_id):  # fmt: skip
-            raise HTTPException(409, f"{shot_id}'s clip is being rendered")
-        return episodes.start_render(pkg, shot, fast=req.fast)
+        mine = shot_clips(repo.list_shot_clips(pkg.package_id, pkg.revision_id), shot_id)
+        busy = sum(1 for c in mine if c.busy)
+        if busy + req.takes > MAX_TAKES_IN_FLIGHT:
+            raise HTTPException(
+                409, f"{shot_id} already has {busy} take{'s' if busy != 1 else ''} rendering; "
+                f"at most {MAX_TAKES_IN_FLIGHT} at a time"
+            )  # fmt: skip
+        return [episodes.start_render(pkg, shot, fast=req.fast, seed=seed)
+                for seed in next_seeds(mine, req.takes, req.seed)]  # fmt: skip
+
+    @app.post("/v1/shot-clips/{clip_id}/use", response_model=ShotClip)
+    async def use_clip(clip_id: str) -> ShotClip:
+        """Make this finished take the shot's newest clip, so the episode is cut from it."""
+        clip = repo.get_shot_clip(clip_id)
+        if clip is None:
+            raise HTTPException(404, "clip not found")
+        if not clip.file:
+            raise HTTPException(409, "the clip has no video to use")
+        clip.created_at = utcnow()
+        repo.save_shot_clip(clip)
+        return clip
 
     @app.get("/v1/shot-clips/{clip_id}", response_model=ShotClip)
     async def get_clip(clip_id: str) -> ShotClip:

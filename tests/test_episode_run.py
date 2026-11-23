@@ -139,6 +139,61 @@ def test_the_fast_option_lowers_the_resolution_and_sends_keyframes_only(tmp_path
 
 
 @needs_ffmpeg
+def test_more_takes_render_beside_the_clip_and_an_edited_prompt_outdates_them(tmp_path):
+    with Studio(tmp_path) as s:
+        s.start()
+        s.wait(done, what="the run finishing")
+        row = s.run()["shots"][0]
+        sid, first = row["shot_id"], row["clip"]["clip_id"]
+        assert [c["clip_id"] for c in row["clips"]] == [first] and row["clip"]["seed"] == 1
+        # Two more takes queue with seeds the shot hasn't used; each shows beside the clip.
+        r = s.http.post(f"/v1/drama-packages/{s.pid}/clips/{sid}", json={"takes": 2})
+        assert r.status_code == 202, r.text
+        assert [c["seed"] for c in r.json()] == [2, 3]
+        row = next(x for x in s.run()["shots"] if x["shot_id"] == sid)
+        assert len(row["clips"]) == 3 and row["clips"][-1]["clip_id"] == first
+        assert all(c["state"] in ("rendering", "current") for c in row["clips"])
+        assert "ahead" in row["clips"][0]
+        # A fifth take at once is refused while four are in flight; the seed can be chosen.
+        r = s.http.post(f"/v1/drama-packages/{s.pid}/clips/{sid}", json={"takes": 1, "seed": 40})
+        assert r.status_code == 202 and r.json()[0]["seed"] == 40
+        r = s.http.post(f"/v1/drama-packages/{s.pid}/clips/{sid}", json={"takes": 2})
+        assert r.status_code == 409
+        s.wait(lambda r: all(c["state"] == "current" for x in r["shots"] if x["shot_id"] == sid
+                             for c in x["clips"]), what="the takes finishing")  # fmt: skip
+        assert {c["seed"] for c in s.video.calls[-3:]} == {2, 3, 40}
+        # The newest take is the shot's clip; using an older one makes it the newest.
+        row = next(x for x in s.run()["shots"] if x["shot_id"] == sid)
+        assert row["clip"]["seed"] == 40
+        r = s.http.post(f"/v1/shot-clips/{first}/use")
+        assert r.status_code == 200
+        row = next(x for x in s.run()["shots"] if x["shot_id"] == sid)
+        assert row["clip"]["clip_id"] == first and row["clips"][0]["clip_id"] == first
+        # Editing the prompt by hand keeps it current and marks every take out of date.
+        vp = row["prompt"]
+        assert vp["state"] == "current" and vp["blocks"] and vp["pictures"]
+        blocks = [{**b, "text": b["text"] + " A moth circles the lamp."} for b in vp["blocks"]]
+        url = f"/v1/drama-packages/{s.pid}/keyframes/{sid}/video-prompt"
+        bad = [{**blocks[0], "text": "{pic:nope} stands still."}, *blocks[1:]]
+        assert s.http.put(url, json={"blocks": bad, "sound": vp["sound"]}).status_code == 422
+        r = s.http.put(url, json={"blocks": blocks, "sound": "Rain on the window."})
+        assert r.status_code == 200, r.text
+        assert r.json()["source"] == "user" and r.json()["sound"] == "Rain on the window."
+        row = next(x for x in s.run()["shots"] if x["shot_id"] == sid)
+        assert row["prompt"]["state"] == "current" and row["prompt"]["source"] == "user"
+        assert row["prompt"]["blocks"][0]["text"].endswith("A moth circles the lamp.")
+        assert all(c["state"] == "outdated" for c in row["clips"])
+        # Rendered again, the clip carries the edit.
+        calls = len(s.video.calls)
+        assert s.http.post(f"/v1/drama-packages/{s.pid}/clips/{sid}", json={}).status_code == 202
+        s.wait(lambda r: len(s.video.calls) > calls and next(
+            x for x in r["shots"] if x["shot_id"] == sid)["clip"]["state"] == "current",
+            what="the edited clip")  # fmt: skip
+        assert "A moth circles the lamp." in s.video.calls[-1]["prompt"]
+        assert s.video.calls[-1]["prompt"].endswith("Rain on the window.")
+
+
+@needs_ffmpeg
 def test_holding_every_approval_waits_for_a_person_and_a_release_goes_on(tmp_path):
     with Studio(tmp_path) as s:
         s.start(holds=["approve", "render"], render=True)
