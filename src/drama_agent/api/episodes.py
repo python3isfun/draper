@@ -20,7 +20,7 @@ from ..shots.clips import (
     shot_clips,
 )
 from ..shots.common import shot_of
-from ..shots.episode import EpisodeRun, EpisodeRunner, RunSettings, episode_shots
+from ..shots.episode import MAX_TAKES, EpisodeRun, EpisodeRunner, RunSettings, episode_shots
 from ..shots.plans import plan_of
 from ..shots.video_prompt import fingerprint, prompt_state
 
@@ -41,6 +41,7 @@ class SettingsPatch(BaseModel):
     assemble: bool | None = None
     parallel: int | None = Field(None, ge=1, le=6)
     fast: bool | None = None
+    takes: int | None = Field(None, ge=1, le=MAX_TAKES)
 
 
 class ReleaseRequest(BaseModel):

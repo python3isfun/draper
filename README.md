@@ -690,7 +690,9 @@ it was rendered from is the shot's current prompt and the same pictures would be
 change to either marks it out of date, like a video prompt. The Keyframes board shows each
 shot's clip (`clip`), and **Render again** renders one shot now.
 
-**Takes.** A shot can have several clips: each render is a *take* with its own seed
+**Takes.** A run renders `takes` takes of every shot's clip (a run setting, 1 to 4, one
+after another, each with its own seed) before it assembles; the counts show takes done
+against takes asked. A shot can have several clips: each render is a *take* with its own seed
 (`POST /v1/drama-packages/{id}/clips/{shot_id}` with `takes` 1 to 4, `fast`, and an
 optional `seed`; without one, seeds the shot hasn't used, so rendering again gives a new
 clip rather than the identical one). Clips render one at a time; at most four of a shot

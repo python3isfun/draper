@@ -4,7 +4,7 @@
 // providerName(), stickyDetails() from shots.js.
 
 const ep = { key: null, episodes: null, episode: null, run: null, error: "", timer: null, loading: false,
-  settings: { draws: 2, max_rounds: 3, provider: null, holds: [], render: true, assemble: true, parallel: 2, approve_failed: true, fast: false },
+  settings: { draws: 2, max_rounds: 3, provider: null, holds: [], render: true, assemble: true, parallel: 2, approve_failed: true, fast: false, takes: 1 },
   skip: new Set(), busy: false, events: false, prompts: {}, edit: {}, renderOpts: {} };
 
 // Whether the page should keep polling: the run goes on, or a prompt or a take is in work.
@@ -115,6 +115,7 @@ function renderEpisodeControls(pkg) {
       h("label", {}, " Draws ", numberSelect(s.draws, 4, (n) => { s.draws = n; }, "Draws per round")),
       h("label", {}, " Rounds ", numberSelect(s.max_rounds, 3, (n) => { s.max_rounds = n; }, "Automatic rounds")),
       h("label", {}, " At once ", numberSelect(s.parallel, 6, (n) => { s.parallel = n; }, "Shots whose keyframes are made at the same time")),
+      h("label", { title: "Takes of each shot's clip to render, each with its own seed; the newest finished take goes into the episode" }, " Takes ", numberSelect(s.takes || 1, 4, (n) => { s.takes = n; }, "Takes per shot")),
       Object.keys(providers).length > 1 && h("label", {}, " Drawn with ",
         h("select", { "aria-label": "Image provider", onchange: (e) => { s.provider = e.target.value || null; } },
           Object.entries(providers).map(([name, model]) =>
@@ -159,6 +160,7 @@ function renderRunHead(pkg, run) {
         h("span", { class: `chip ${c.cuts_approved === c.cuts ? "ok" : ""}` }, `${c.cuts_approved}/${c.cuts} keyframes`),
         h("span", { class: `chip ${c.prompts_current === c.shots ? "ok" : ""}` }, `${c.prompts_current}/${c.shots} prompts`),
         run.settings.render && h("span", { class: `chip ${c.clips_done === c.shots ? "ok" : ""}` }, `${c.clips_done}/${c.shots} clips`),
+        run.settings.render && c.takes > 1 && h("span", { class: `chip ${c.takes_done === c.takes_total ? "ok" : ""}`, title: `${c.takes} takes per shot` }, `${c.takes_done}/${c.takes_total} takes`),
         holds.length > 0 && h("span", { class: "chip warn" }, `${holds.length} hold${holds.length > 1 ? "s" : ""}`))),
     h("p", { class: "small muted" },
       `Elapsed ${epDuration(est.elapsed_s)}`,
@@ -317,7 +319,7 @@ const MAX_TAKES_IN_FLIGHT = 4;
 
 // The render options, inline: how many takes, fast or full quality, then Render.
 function renderOptions(pkg, run, row, again) {
-  const o = ep.renderOpts[row.shot_id] || (ep.renderOpts[row.shot_id] = { takes: 1, fast: run.settings.fast });
+  const o = ep.renderOpts[row.shot_id] || (ep.renderOpts[row.shot_id] = { takes: run.settings.takes || 1, fast: run.settings.fast });
   const url = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`;
   return [
     h("label", { class: "ep-opt small", title: "How many takes to render, each with its own seed" },

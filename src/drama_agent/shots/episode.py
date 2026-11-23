@@ -67,6 +67,8 @@ from .video_prompt import approved_frames, fingerprint, prompt_state
 # The fast option: a lower short edge, with only the identity anchors (every cut's keyframe
 # and each face) as references, to render sooner.
 FAST_SHORT_EDGE = 512
+# The most takes of a shot a run renders.
+MAX_TAKES = 4
 # The fast option's reference pictures are sent at most this big on the short edge: the
 # model works at its own size and the clip is FAST_SHORT_EDGE wide, so more pixels are
 # only upload. Full renders send the pictures as they are.
@@ -104,6 +106,9 @@ class RunSettings(BaseModel):
     # Render faster, rougher: a lower resolution and the cuts' keyframes as the only
     # reference pictures. Trades likeness and detail stability for speed.
     fast: bool = False
+    # Takes of each shot's clip to render (each with its own seed); the newest finished
+    # take is the one the episode is cut from.
+    takes: int = Field(1, ge=1, le=MAX_TAKES)
 
 
 class RunEvent(BaseModel):
@@ -520,15 +525,18 @@ class EpisodeRunner:
             if not s.render:
                 continue
 
-            # The clip.
+            # The clip: `takes` current takes of it, rendered one after another.
             ckey = f"{sid}:clip"
-            clip = latest_clip(clips, sid)
+            mine = shot_clips(clips, sid)
+            clip = mine[0] if mine else None
             inputs = self.clip_inputs(pkg, shot, plan, vp, takes, images, run.settings.fast)
-            cs = clip_state(clip, inputs.print if inputs else None)
-            if cs == "current":
+            print_ = inputs.print if inputs else None
+            cs = clip_state(clip, print_)
+            current_n = sum(1 for c in mine if clip_state(c, print_) == "current")
+            if current_n >= s.takes:
                 continue
             complete = False
-            if cs == "rendering":
+            if any(c.busy for c in mine):
                 continue
             if "render" in s.holds and not run.freed("render"):
                 holds["render"] = "before the first clip is rendered"
@@ -546,6 +554,8 @@ class EpisodeRunner:
             if cs == "failed":
                 run.retries[ckey] = run.retries.get(ckey, 0) + 1
                 run.event("The clip failed; rendering it again.", "warn", shot_id=sid)
+            elif current_n:
+                run.event(f"Rendering take {current_n + 1} of {s.takes}.", shot_id=sid)
             else:
                 run.event("Rendering the clip." if cs == "none"
                           else "The clip is out of date; rendering it again.", shot_id=sid)  # fmt: skip
@@ -766,7 +776,7 @@ class EpisodeRunner:
         names = _names(pkg)
         rows = []
         cuts = cuts_done = 0
-        prompts_current = clips_done = 0
+        prompts_current = clips_done = takes_done = 0
         for shot in shots:
             sid = shot.shot_id
             stored = plans.get(sid)
@@ -791,6 +801,8 @@ class EpisodeRunner:
                 print_ = inputs.print if inputs else None
             cstate = clip_state(clip, print_)
             views = [clip_view(c, clip_state(c, print_)) for c in mine]
+            current_n = min(s.takes, sum(1 for v in views if v["state"] == "current"))
+            busy_n = sum(1 for c in mine if c.busy)
             for c, view in zip(mine, views, strict=True):
                 if c.busy:
                     view["ahead"] = queue_ahead(clips, c)
@@ -806,15 +818,16 @@ class EpisodeRunner:
                 stage = "prompt"
             elif not s.render:
                 stage = "ready"
-            elif cstate == "current":
+            elif current_n >= s.takes:
                 stage = "done"
             else:
-                stage = "rendering" if cstate == "rendering" else "render"
+                stage = "rendering" if busy_n else "render"
             if sid not in s.skip_shots:
                 cuts += n
                 cuts_done += k
                 prompts_current += vstate == "current"
-                clips_done += cstate == "current"
+                clips_done += current_n >= s.takes
+                takes_done += current_n
             rows.append({
                 "shot_id": sid,
                 "scene_id": shot.scene_id,
@@ -842,11 +855,13 @@ class EpisodeRunner:
         return {
             **run.model_dump(mode="json"),
             "shots": rows,
-            "counts": {"shots": len([r for r in rows if r["stage"] != "skipped"]), "cuts": cuts,
-                       "cuts_approved": cuts_done, "prompts_current": prompts_current,
-                       "clips_done": clips_done, "holds": len(run.holds)},
+            "counts": {"shots": (n_shots := len([r for r in rows if r["stage"] != "skipped"])),
+                       "cuts": cuts, "cuts_approved": cuts_done,
+                       "prompts_current": prompts_current, "clips_done": clips_done,
+                       "takes": s.takes, "takes_done": takes_done,
+                       "takes_total": n_shots * s.takes, "holds": len(run.holds)},
             "estimate": estimate(run, shots, takes, clips, cuts - cuts_done,
-                                 len(rows) - clips_done if s.render else 0),
+                                 n_shots * s.takes - takes_done if s.render else 0),
         }  # fmt: skip
 
 

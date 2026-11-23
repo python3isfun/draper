@@ -220,6 +220,32 @@ def test_more_takes_render_beside_the_clip_and_an_edited_prompt_outdates_them(tm
 
 
 @needs_ffmpeg
+def test_a_run_renders_as_many_takes_of_each_shot_as_asked(tmp_path):
+    with Studio(tmp_path) as s:
+        s.start(takes=2)
+        run = s.wait(done, what="the two-take run finishing")
+        n = len(episode_shots(s.pkg, s.episode))
+        c = run["counts"]
+        assert c["takes"] == 2 and c["takes_total"] == 2 * n and c["takes_done"] == 2 * n
+        assert c["clips_done"] == n and len(s.video.calls) == 2 * n
+        assert all(r["stage"] == "done" for r in run["shots"])
+        # Every shot has two current takes with their own seeds, the newest in the cut.
+        for row in run["shots"]:
+            seeds = [t["seed"] for t in row["clips"]]
+            assert len(seeds) == 2 and len(set(seeds)) == 2
+            assert all(t["state"] == "current" for t in row["clips"])
+            assert row["clip"]["clip_id"] == row["clips"][0]["clip_id"]
+        assert any("take 2 of 2" in e["text"] for e in run["events"])
+        assert run["output"]["clips"] == n
+        # Asking for a third take on the way resumes the run at the clips.
+        r = s.http.patch(f"/v1/episode-runs/{run['run_id']}/settings", json={"takes": 3})
+        assert r.status_code == 200
+        again = s.start(takes=3)
+        again = s.wait(done, what="the three-take run")
+        assert again["counts"]["takes_done"] == 3 * n and len(s.video.calls) == 3 * n
+
+
+@needs_ffmpeg
 def test_holding_every_approval_waits_for_a_person_and_a_release_goes_on(tmp_path):
     with Studio(tmp_path) as s:
         s.start(holds=["approve", "render"], render=True)
