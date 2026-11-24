@@ -147,3 +147,14 @@ def test_mcphub_client_submits_a_job_and_polls_it():
     assert body["conditions"] == [{"type": "image", "role": "reference",
                                    "uri": "data:image/png;base64," + base64.b64encode(b"\x89PNG").decode()}]  # fmt: skip
     assert len(seen) == 3
+
+
+def test_the_steps_default_comes_from_the_environment(monkeypatch):
+    from drama_agent.videogen import DEFAULT_STEPS, _steps_from_env
+
+    monkeypatch.delenv("DRAMA_VIDEO_STEPS", raising=False)
+    assert _steps_from_env() == DEFAULT_STEPS == 14
+    monkeypatch.setenv("DRAMA_VIDEO_STEPS", "default")
+    assert _steps_from_env() is None
+    monkeypatch.setenv("DRAMA_VIDEO_STEPS", "25")
+    assert _steps_from_env() == 25

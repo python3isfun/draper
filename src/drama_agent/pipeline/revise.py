@@ -296,6 +296,18 @@ def busy_work(repo: Any, package_id: str, revision_id: str) -> str | None:
 # The run
 
 
+def coverage_in_scope(
+    issues: list[Issue], pkg: ProductionPackage, rewritten: set[str]
+) -> list[Issue]:
+    """The issues a revision is held to: every check but coverage, and coverage only on
+    the shots this revision wrote (`rewritten`: its changed ids) and the scenes those
+    shots are in. A story from before the rule keeps its old shots, and a revision that
+    didn't touch the storyboard isn't held to it."""
+    scenes = {s.scene_id for s in pkg.shot_list if s.shot_id in rewritten}
+    return [i for i in issues if i.check != "coverage"
+            or i.object_id in rewritten or i.object_id in scenes]  # fmt: skip
+
+
 class ReviseRunner:
     """Runs revisions in this process, one task each (like the keyframe runner)."""
 
@@ -412,6 +424,8 @@ class ReviseRunner:
         )]  # fmt: skip
         locked_base = base.model_copy(update={"locked_ids": sorted(scope.locked)})
         final = hc.run_hard_checks(new, state.request.options) + hc.check_locks(locked_base, new)
+        final = coverage_in_scope(final, new, set(rev.changed_ids) if "storyboard" in rev.steps
+                                  else set())  # fmt: skip
         if final:
             return self._needs_revision(rev, base, state, final, step=None, trace=trace, pkg=new)
 

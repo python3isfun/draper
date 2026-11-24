@@ -15,6 +15,7 @@ from drama_agent.imagegen import FixtureImageClient
 from drama_agent.llm import FixtureModelClient
 from drama_agent.media import MediaStore
 from drama_agent.models.package import utcnow
+from drama_agent.musicgen import FixtureMusicClient
 from drama_agent.shot_frames import ShotFrameRunner
 from drama_agent.shots.clips import ShotClip, clip_prompt, clip_state
 from drama_agent.shots.episode import EpisodeRun, EpisodeRunner, RunSettings, episode_shots
@@ -36,11 +37,12 @@ class Studio:
         self.text = FixtureModelClient()
         self.images = FixtureImageClient()
         self.video = FixtureVideoClient()
+        self.music = FixtureMusicClient()
         self.media = MediaStore(tmp_path)
         self.repo = InMemoryRepository()
         self.app = create_app(repo=self.repo, client=self.text, image_client=self.images,
                               media=self.media, poll_s=0.01, video_client=self.video,
-                              run_poll_s=0.05)  # fmt: skip
+                              music_client=self.music, run_poll_s=0.05)  # fmt: skip
 
     def __enter__(self):
         self.http = TestClient(self.app).__enter__()
@@ -458,6 +460,33 @@ def test_a_reference_picture_is_shrunk_to_the_short_edge_asked(tmp_path):
     assert (info["width"], info["height"]) == (768, 1360)
     # Already small enough: sent as it is.
     assert asm.shrink_picture(small, 768) is None
+
+
+@needs_ffmpeg
+def test_the_episode_is_trimmed_and_gets_a_music_bed_per_scene(tmp_path):
+    with Studio(tmp_path) as s:
+        s.start(render=True, assemble=True, music="slow warm piano, hopeful", music_db=-12)
+        run = s.wait(done, what="the run finishing")
+        scenes = {x["scene_id"] for x in run["shots"]}
+        # One bed per scene, the scene's length plus two seconds, a seed per scene.
+        assert len(s.music.calls) == len(scenes)
+        assert all(c.caption == "slow warm piano, hopeful" for c in s.music.calls)
+        assert sorted(c.seeds for c in s.music.calls) == [[k] for k in range(1, len(scenes) + 1)]
+        assert {m["scene_id"] for m in run["music"]} == scenes
+        assert all(s.media.path(m["file"]).is_file() for m in run["music"])
+        assert run["output"]["music"] == len(scenes)
+        assert run["output"]["clips"] == run["counts"]["shots"]
+        # Fixture clips are silent throughout, so trimming keeps them whole.
+        assert run["output"]["trimmed_s"] == 0
+        assert any("Composing music for scene 1" in e["text"] for e in run["events"])
+        # The settings take the caption, the level and the trim switch.
+        r = s.http.patch(f"/v1/episode-runs/{run['run_id']}/settings",
+                         json={"trim": False, "music": "", "music_db": -8})  # fmt: skip
+        assert r.status_code == 200, r.text
+        got = r.json()["settings"]
+        assert got["trim"] is False and got["music"] == "" and got["music_db"] == -8
+        r = s.http.patch(f"/v1/episode-runs/{run['run_id']}/settings", json={"music_db": 5})
+        assert r.status_code == 422
 
 
 @needs_ffmpeg

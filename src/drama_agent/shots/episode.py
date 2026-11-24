@@ -27,6 +27,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -38,6 +39,7 @@ from ..models import ProductionPackage
 from ..models.images import GeneratedImage
 from ..models.package import utcnow
 from ..models.storyboard import Shot
+from ..musicgen import FixtureMusicClient, MusicClient, MusicRequest, clamp_music_seconds
 from ..videogen import VideoClient, VideoReference
 from . import assemble as asm
 from .approvals import approved_take, is_busy
@@ -136,6 +138,13 @@ class RunSettings(BaseModel):
     # Sampling steps asked of the video model (None: the route's default, see
     # DRAMA_VIDEO_STEPS); fewer render faster and rougher.
     steps: int | None = Field(None, ge=MIN_STEPS, le=MAX_STEPS)
+    # Cut each clip to its sound when the episode is assembled (a rendered clip warms up
+    # from a posed first frame and holds its end state; the dead air goes).
+    trim: bool = True
+    # A music bed under every scene, composed from this caption (empty: no music), mixed
+    # at `music_db` under the dialogue.
+    music: str = Field("", max_length=400)
+    music_db: float = Field(asm.MUSIC_DB, ge=-40, le=0)
 
 
 class RunEvent(BaseModel):
@@ -143,6 +152,18 @@ class RunEvent(BaseModel):
     kind: Literal["info", "ok", "warn", "bad"] = "info"
     shot_id: str | None = None
     text: str
+
+
+class MusicCue(BaseModel):
+    """A scene's music bed as composed: the caption and length asked, the seed, the file."""
+
+    scene_id: str
+    caption: str
+    duration_s: int
+    seed: int
+    file: str
+    model: str | None = None
+    job_id: str | None = None
 
 
 class EpisodeRun(BaseModel):
@@ -162,6 +183,7 @@ class EpisodeRun(BaseModel):
     retries: dict[str, int] = Field(default_factory=dict)
     images_queued: bool = False
     output: dict[str, Any] | None = None  # the assembled episode: file, poster, duration_s
+    music: list[MusicCue] = Field(default_factory=list)  # one bed per scene, once composed
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -211,6 +233,7 @@ class EpisodeRunner:
         frames: Any,  # ShotFrameRunner
         video: VideoClient,
         *,
+        music: MusicClient | None = None,
         poll_s: float = 2.0,
         image_wakeup: asyncio.Event | None = None,
     ) -> None:
@@ -218,6 +241,7 @@ class EpisodeRunner:
         self.media = media
         self.frames = frames
         self.video = video
+        self.music = music or FixtureMusicClient()
         self.poll_s = poll_s
         self.image_wakeup = image_wakeup
         self._loops: dict[str, asyncio.Task[None]] = {}
@@ -627,17 +651,80 @@ class EpisodeRunner:
                     return False
                 run.event(f"Cutting the episode together from {len(chosen)} clips.")
                 self._save(run)
+                paths = [self.media.path(c.file) for c in chosen]  # chosen: clips with a file
+                trims = await asyncio.to_thread(self._trims, paths, s.trim)
+                beds = await self._music_beds(pkg, run, shots, chosen, trims)
                 out_rel = f"episodes/{pkg.package_id}/{run.run_id}.mp4"
                 poster_rel = f"episodes/{pkg.package_id}/{run.run_id}.jpg"
                 info = await asyncio.to_thread(
-                    asm.assemble, [self.media.path(c.file) for c in chosen if c.file],
-                    self.media.path(out_rel), self.media.path(poster_rel),
+                    asm.assemble, paths, self.media.path(out_rel), self.media.path(poster_rel),
+                    trims, beds,
                 )  # fmt: skip
                 run.output = {"file": out_rel, "poster": poster_rel, "print": print_, **info}
         run.status, run.finished_at = "done", utcnow()
         run.event("Episode complete.", "ok")
         self._save(run)
         return True
+
+    @staticmethod
+    def _trims(paths: list[Path], trim: bool) -> list[tuple[float, float]]:
+        """Where each clip is cut in and out (its whole length when `trim` is off)."""
+        if not trim:
+            return [(0.0, asm.probe(p)["duration_s"]) for p in paths]
+        return [asm.trim_points(p) for p in paths]
+
+    async def _music_beds(
+        self,
+        pkg: ProductionPackage,
+        run: EpisodeRun,
+        shots: list[Shot],
+        chosen: list[ShotClip],
+        trims: list[tuple[float, float]],
+    ) -> list[asm.MusicBed]:
+        """A music bed per scene from the run's caption (none when it is empty): composed
+        once per scene and length, kept on the run, laid from the scene's first clip."""
+        caption = run.settings.music.strip()
+        if not caption:
+            return []
+        lengths = {c.shot_id: t1 - t0 for c, (t0, t1) in zip(chosen, trims, strict=True)}
+        scenes: list[tuple[str, float, float]] = []  # scene, start, length
+        at = 0.0
+        for shot in shots:
+            length = lengths.get(shot.shot_id)
+            if length is None:
+                continue
+            if scenes and scenes[-1][0] == shot.scene_id:
+                scenes[-1] = (shot.scene_id, scenes[-1][1], scenes[-1][2] + length)
+            else:
+                scenes.append((shot.scene_id, at, length))
+            at += length
+        beds = []
+        for k, (scene_id, start, length) in enumerate(scenes, 1):
+            wanted = clamp_music_seconds(length + 2)
+            cue = next((m for m in run.music if m.scene_id == scene_id and m.caption == caption
+                        and m.duration_s >= wanted and self.media.path(m.file).is_file()), None)  # fmt: skip
+            if cue is None:
+                run.event(f"Composing music for scene {k} ({wanted} s).")
+                self._save(run)
+                request = MusicRequest(caption=caption, duration_s=wanted, seeds=[k])
+                try:
+                    [take] = await self.music.generate(request)
+                except Exception as exc:
+                    log.warning("music failed for %s", scene_id, exc_info=True)
+                    run.event(f"Music for scene {k} couldn't be composed: {str(exc)[:160]}; "
+                              "the scene has none.", "warn")  # fmt: skip
+                    continue
+                ext = "mp3" if "mpeg" in take.content_type else "wav"
+                rel = f"episodes/{pkg.package_id}/{run.run_id}_music_{scene_id}.{ext}"
+                await asyncio.to_thread(self._write_file, rel, take.data)
+                cue = MusicCue(scene_id=scene_id, caption=caption, duration_s=wanted,
+                               seed=take.seed, file=rel, model=self.music.model_id,
+                               job_id=take.job_id)  # fmt: skip
+                run.music = [m for m in run.music if m.scene_id != scene_id] + [cue]
+                self._save(run)
+            beds.append(asm.MusicBed(self.media.path(cue.file), start, length,
+                                     run.settings.music_db))  # fmt: skip
+        return beds
 
     # -- clips --------------------------------------------------------------
 

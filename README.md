@@ -715,8 +715,31 @@ length and size.
 **Steps.** The sampling steps asked of the video model are a run setting (`steps`, 1 to
 100, empty for the model's own default) and a field of a render by hand; each take records
 the count it was rendered with (`ShotClip.steps`, shown in its caption). Fewer steps render
-faster and rougher: see the measurement in `docs/render-speed.md`. `DRAMA_VIDEO_STEPS` sets
-the client's default for renders that don't say.
+faster: the measurement in `docs/render-speed.md` found 14 steps indistinguishable from the
+route's default of about 50 at 3.5x the speed, so `DRAMA_VIDEO_STEPS` defaults to 14 for
+renders that don't say (`default` leaves it to the route).
+
+**Trimming and music.** When the episode is cut together, each clip is trimmed to its
+sound (`trim`, a run setting on by default): a rendered clip warms up from a posed first
+frame and holds its end state after the last word, and that dead air made every cut breathe
+out; the cut now runs from 0.25 s before the clip's first sound to 0.6 s after its last,
+never below half the clip (a silent action clip keeps its length). `assemble.trim_points`
+reads the sound with ffmpeg's silence detection. The run's output says how much was
+trimmed. With a `music` caption (a run setting, e.g. "slow warm piano and strings,
+hopeful"), a music bed is composed per scene with ACE-Step through MCPHub's gpu-music
+route (`musicgen.py`; `DRAMA_MUSIC_CLIENT=mcphub`, else an offline fixture tone), the
+scene's length plus two seconds, one seed per scene so the scenes differ, and laid under
+the scene from its first clip, faded in and out, mixed at `music_db` (default -16 dB)
+under the dialogue. Composed beds are kept on the run (`EpisodeRun.music`) and reused while
+the caption and the scene's length hold.
+
+**Coverage.** The storyboard is told how a scene is covered for a vertical frame
+(`pace.COVERAGE_RULES`): shots of 3 to 6 s with one or two beats, a wider shot to place the
+people and then singles, over-the-shoulder shots and a close-up that alternate with the
+lines, medium close-up as the default size, each `framing` beginning with its size and
+subject. A hard check (`check_coverage`) refuses two consecutive shots of a scene with the
+same size and the same people, and a scene with more than half its shots as two-shots or
+group shots; the review reports shots over 8 s without a camera move that carries them.
 
 **Speech check.** H3 lip-syncs a quoted line to the face it sees, so a take can put a
 line on the wrong person, or have someone talk in a cut meant to be silent. After each

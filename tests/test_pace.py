@@ -49,6 +49,15 @@ def test_the_storyboard_is_told_continuity_across_neighbouring_shots():
     assert "(the pace asks for at least half of them)" in rules
 
 
+def test_the_storyboard_is_told_how_to_cover_a_scene():
+    rules = storyboard_rules("brisk")
+    assert "Shots are 3 to 6 s" in rules and "medium close-up is the default size" in rules
+    assert "Begin each `framing` with its size and subject" in rules
+    assert "at most one shot in two is a two-shot or group shot" in rules
+    review = ReviewStep().rules(JobRequest(sources=BODY["sources"], options={"pace": "brisk"}))
+    assert "shots over 8 s" in review
+
+
 def test_the_camera_rule_says_the_share_of_shots():
     assert "Move the camera in at least one in three of the sub-shots" in planner_rules("slow_burn")
     assert "Move the camera in at least three in four of the shots" in storyboard_rules("brisk")

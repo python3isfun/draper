@@ -56,12 +56,35 @@ def rule(pace: object) -> PaceRule:
     return RULES[as_pace(pace)]
 
 
+# How a scene is covered, for a vertical frame. Shot sizes the coverage check reads from
+# `framing` (hard_checks.check_coverage): the first words of the framing name the size.
+COVERAGE_RULES = (
+    "- **Shots are 3 to 6 s, one or two beats each, at most two lines.** A shot over 8 s "
+    "needs a camera move that carries it (a track with the walk, a slow push through the "
+    "turn) and says so. Give a scene more shots rather than longer ones.\n"
+    "- **Cover a scene with a pattern, not a list of two-shots**: one wider shot to place "
+    "the people, then singles and over-the-shoulder shots that alternate with the lines, a "
+    "close-up for the turn of the scene, an insert for the prop or the hands that matter. "
+    "The frame is vertical: medium close-up is the default size, and a medium-wide two-shot "
+    "leaves both faces small, so use it to establish or to show a move across the room, "
+    "not to carry an exchange.\n"
+    '- **Begin each `framing` with its size and subject**, e.g. "Medium close-up single of '
+    'Lila", "Over-the-shoulder on Derek, Lila\'s shoulder frame left", "Wide two-shot", '
+    '"Insert of the card in her hand". Two consecutive shots never share the same size '
+    "and the same people: change the size, the angle or who the shot is about. In a scene, "
+    "at most one shot in two is a two-shot or group shot.\n"
+    "- **Cut on movement or on a line**: a shot ends on the action or the word that the next "
+    "shot picks up, not on a held look."
+)
+
+
 def storyboard_rules(pace: object) -> str:
     """The storyboard step's pacing rules at this pace."""
     r = rule(pace)
     lo, hi = r.words
     return (
         f"Pace: {r.label.lower()}. {r.feel}\n"
+        f"{COVERAGE_RULES}\n"
         "- Each shot's visual_action is physical business, not a reaction: what hands do, "
         f"what is picked up, used, put down, where people move. Write {lo} to {hi} words of "
         'it per shot. "Tries not to smile" or "dismisses the objection" alone is not '

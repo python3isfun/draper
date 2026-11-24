@@ -45,6 +45,7 @@ from ..models import (
     Job,
     ProductionPackage,
 )
+from ..musicgen import MusicClient, music_client_from_env
 from ..pipeline.orchestrator import Orchestrator
 from ..pipeline.revise import ReviseRunner
 from ..shot_frames import ShotFrameRunner
@@ -83,6 +84,7 @@ def create_app(
     keyframe_provider: str = "h3",
     face_providers: dict[str, ImageClient] | None = None,
     video_client: VideoClient | None = None,
+    music_client: MusicClient | None = None,
     run_poll_s: float = 2.0,
 ) -> FastAPI:
     """Build the API. `workers` in-process job workers start with the app (lifespan);
@@ -112,8 +114,8 @@ def create_app(
     revisions = ReviseRunner(repo, orchestrator, after_publish=lambda: sync_library(repo))
     # Episode runs: the one-button flow over the keyframe work, plus the clips it renders.
     video = video_client or FixtureVideoClient()
-    episodes = EpisodeRunner(repo, media, keyframes, video, poll_s=run_poll_s,
-                             image_wakeup=image_wakeup)  # fmt: skip
+    episodes = EpisodeRunner(repo, media, keyframes, video, music=music_client,
+                             poll_s=run_poll_s, image_wakeup=image_wakeup)  # fmt: skip
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -318,6 +320,7 @@ def create_app_from_env() -> FastAPI:
         # client: each runner closes what it holds).
         face_providers=face_providers_from_env() | keyframe_providers_from_env(),
         video_client=video_client_from_env(),
+        music_client=music_client_from_env(),
     )
 
 

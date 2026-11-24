@@ -4,7 +4,7 @@
 // providerName(), stickyDetails() from shots.js.
 
 const ep = { key: null, episodes: null, episode: null, run: null, error: "", timer: null, loading: false,
-  settings: { draws: 2, max_rounds: 3, provider: null, holds: [], render: true, assemble: true, parallel: 2, approve_failed: true, fast: false, takes: 1, check_speech: true, steps: null },
+  settings: { draws: 2, max_rounds: 3, provider: null, holds: [], render: true, assemble: true, parallel: 2, approve_failed: true, fast: false, takes: 1, check_speech: true, steps: null, trim: true, music: "", music_db: -16 },
   skip: new Set(), busy: false, events: false, prompts: {}, edit: {}, renderOpts: {} };
 
 // Whether the page should keep polling: the run goes on, or a prompt or a take is in work.
@@ -160,7 +160,14 @@ function renderEpisodeControls(pkg) {
       h("label", { title: "Render faster and rougher: a lower resolution (512), with every cut's keyframe and each face as the only reference pictures. Trades detail for speed." },
         h("input", { type: "checkbox", checked: s.fast, onchange: (e) => { s.fast = e.target.checked; } }), " Fast (low res, keyframes and faces only)"),
       h("label", { title: "After each render, the vision model looks at frames of every line and says who is seen talking. A take that puts a line on the wrong face, or has someone talking in a silent cut, is rejected and another take rendered." },
-        h("input", { type: "checkbox", checked: s.check_speech, onchange: (e) => { s.check_speech = e.target.checked; } }), " Check who is seen talking")),
+        h("input", { type: "checkbox", checked: s.check_speech, onchange: (e) => { s.check_speech = e.target.checked; } }), " Check who is seen talking"),
+      h("label", { title: "When the episode is cut together, trim each clip to its sound: the posed warm-up before the first word and the held end state after the last go." },
+        h("input", { type: "checkbox", checked: s.trim, onchange: (e) => { s.trim = e.target.checked; } }), " Trim dead air")),
+    h("div", { class: "design-row" },
+      h("label", { class: "ep-music", title: "A music bed under every scene, composed from this description (ACE-Step); empty: no music. Each scene gets its own take of the same caption." }, "Music ",
+        h("input", { type: "text", class: "ep-music-input", placeholder: "e.g. slow warm piano and strings, hopeful (empty: none)", value: s.music || "", onchange: (e) => { s.music = e.target.value.trim(); } })),
+      h("label", { title: "The music's level under the dialogue, in dB (-16 is quiet; -8 is present)" }, " Level ",
+        h("input", { type: "number", min: -40, max: 0, step: 1, class: "ep-steps-input", value: s.music_db ?? -16, onchange: (e) => { const n = parseFloat(e.target.value); s.music_db = Number.isFinite(n) ? Math.min(0, Math.max(-40, n)) : -16; e.target.value = s.music_db; } }), " dB")),
     h("div", { class: "design-row" },
       h("button", { type: "button", class: "btn primary", disabled: running || !chosen || ep.busy, onclick: async (e) => {
         const body = { revision_id: pkg.revision_id, ...s, skip_shots: [...ep.skip] };
@@ -207,7 +214,9 @@ function renderRunHead(pkg, run) {
       epVideo(`${base}/output?v=${encodeURIComponent(run.finished_at || "")}`, `${base}/poster?v=${encodeURIComponent(run.finished_at || "")}`, "ep-video"),
       h("p", { class: "small" },
         h("a", { href: `${base}/output`, download: `${pkg.package_id}-${run.episode_id}.mp4` }, "Download the episode"),
-        ` · ${epDuration(run.output.duration_s)} · ${run.output.width}x${run.output.height} · ${run.output.clips} clips`)),
+        ` · ${epDuration(run.output.duration_s)} · ${run.output.width}x${run.output.height} · ${run.output.clips} clips`,
+        run.output.trimmed_s ? ` · ${epDuration(run.output.trimmed_s)} of dead air trimmed` : "",
+        run.output.music ? ` · music under ${run.output.music} scene${run.output.music === 1 ? "" : "s"}` : "")),
   );
 }
 

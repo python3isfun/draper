@@ -393,12 +393,22 @@ class FixtureVideoClient:
         return VideoResult(data, model=self.model_id)
 
 
+DEFAULT_STEPS = 14  # measured: the same clip as the route's ~50, 3.5x faster (docs/render-speed.md)
+
+
+def _steps_from_env() -> int | None:
+    """DRAMA_VIDEO_STEPS: the sampling steps asked of the route (default DEFAULT_STEPS;
+    "default" or "" leaves it to the route)."""
+    raw = os.environ.get("DRAMA_VIDEO_STEPS", str(DEFAULT_STEPS)).strip().lower()
+    return None if raw in ("", "default", "route") else int(raw)
+
+
 def video_client_from_env() -> VideoClient:
     """DRAMA_VIDEO_CLIENT selects the backend: 'fixture' (default: ffmpeg-made coloured
     clips), 'mcphub' (MiniMax-H3 Ref2VA on MCPHub's GPU route: MCPHUB_KEY; MCPHUB_VIDEO_URL, default https://api.mcphub.com;
     MCPHUB_VIDEO_MODEL, default minimax-h3-ref2va; DRAMA_VIDEO_SHORT_EDGE, default 768;
-    DRAMA_VIDEO_SEED; DRAMA_VIDEO_STEPS, the sampling steps, default the route's own) or
-    'minimax' (MINIMAX_API_KEY; MINIMAX_VIDEO_URL for a gateway, default
+    DRAMA_VIDEO_SEED; DRAMA_VIDEO_STEPS, the sampling steps, default 14, "default" for
+    the route's own) or 'minimax' (MINIMAX_API_KEY; MINIMAX_VIDEO_URL for a gateway, default
     https://api.minimax.io; MINIMAX_VIDEO_MODEL, default MiniMax-H3; DRAMA_VIDEO_RESOLUTION,
     default 768P). Real renders are opt-in, like the text and image clients."""
     kind = os.environ.get("DRAMA_VIDEO_CLIENT", "fixture").lower()
@@ -414,9 +424,7 @@ def video_client_from_env() -> VideoClient:
             model=os.environ.get("MCPHUB_VIDEO_MODEL", "minimax-h3-ref2va"),
             short_edge=int(os.environ.get("DRAMA_VIDEO_SHORT_EDGE", "768")),
             seed=int(os.environ.get("DRAMA_VIDEO_SEED", "1")),
-            steps=int(os.environ["DRAMA_VIDEO_STEPS"])
-            if os.environ.get("DRAMA_VIDEO_STEPS")
-            else None,
+            steps=_steps_from_env(),
             poll_s=float(os.environ.get("DRAMA_VIDEO_POLL_S", "15")),
         )
     if kind == "minimax":

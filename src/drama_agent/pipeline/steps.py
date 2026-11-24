@@ -682,8 +682,10 @@ class ReviewStep(Step):
         return (
             f'Report pacing (check "pacing", minor) against the story\'s {r.label.lower()} '
             "pace, with the shots it concerns: shots whose action is reactions rather than "
-            f"physical business, fewer than {r.words[0]} words of action, and the camera "
-            f"moving in too few shots (the pace asks for {r.moving} of them)."
+            f"physical business, fewer than {r.words[0]} words of action, the camera "
+            f"moving in too few shots (the pace asks for {r.moving} of them), shots over 8 s "
+            "without a camera move that carries them, and a scene carried by medium two-shots "
+            "where singles, over-the-shoulder shots and a close-up would cut faster."
         )
 
     def apply(self, state: PipelineState, output: CreativeReviewOutput) -> None:

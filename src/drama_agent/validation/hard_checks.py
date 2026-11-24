@@ -6,6 +6,7 @@ replace these checks.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections import defaultdict
 from collections.abc import Callable
@@ -49,6 +50,84 @@ def _look_ref_problem(sh: Shot) -> str:
 
 def _issue(check: str, object_id: str, evidence: str, fix_scope: str = "") -> Issue:
     return Issue(check=check, object_id=object_id, evidence=evidence, fix_scope=fix_scope)
+
+
+# ---------------------------------------------------------------------------
+# Coverage: shot sizes and subjects across a scene (pace.COVERAGE_RULES)
+
+_SIZES = (
+    ("insert", r"\binsert\b|\bdetail\b|\btabletop\b|extreme close"),
+    ("close-up", r"\bclose[- ]?up\b|\bclose\b|\btight\b"),
+    ("medium close-up", r"\bmedium[- ]close"),
+    ("medium-wide", r"\bmedium[- ]wide\b|\bcowboy\b"),
+    ("medium", r"\bmedium\b|\bmid[- ]shot\b"),
+    ("wide", r"\bwide\b|\bestablishing\b|\bfull shot\b|\blong shot\b"),
+)
+_GROUP = re.compile(r"\b(two|three|four|group)[- ]shot\b|\bgroup\b|\bboth of them\b", re.IGNORECASE)
+_SINGLE = re.compile(r"\bsingle\b|\bover[- ]the[- ]shoulder\b|\bOTS\b|\bclean\b", re.IGNORECASE)
+
+
+def shot_size(framing: str) -> str | None:
+    """The shot size a framing names (its first size word wins), or None."""
+    head = framing.lower()
+    found = []
+    for name, pattern in _SIZES:
+        m = re.search(pattern, head)
+        if m:
+            found.append((m.start(), name))
+    if not found:
+        return None
+    found.sort()
+    first = found[0][1]
+    # "medium close-up" and "medium-wide" start with "medium": the longer name wins there.
+    if first == "medium":
+        at = found[0][0]
+        for pos, name in found:
+            if pos == at and name in ("medium close-up", "medium-wide"):
+                return name
+    return first
+
+
+def is_group_shot(framing: str, people: int) -> bool:
+    """A framing that holds two or more people together (a two-shot, a group), unless it
+    says it is a single or an over-the-shoulder."""
+    if _SINGLE.search(framing):
+        return False
+    return bool(_GROUP.search(framing)) or (
+        people >= 2 and shot_size(framing) in ("wide", "medium-wide")
+    )
+
+
+def check_coverage(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
+    """Within a scene: two consecutive shots never share a size and the same people on
+    screen, and at most one shot in two is a two-shot or group shot (once a scene has
+    three or more shots). The storyboard is told the same rules (pace.COVERAGE_RULES)."""
+    issues: list[Issue] = []
+    by_scene: dict[str, list[Shot]] = defaultdict(list)
+    for sh in sorted(pkg.shot_list, key=lambda s: s.start_ms):
+        by_scene[sh.scene_id].append(sh)
+    for scene_id, shots in by_scene.items():
+        for a, b in itertools.pairwise(shots):
+            size_a, size_b = shot_size(a.framing), shot_size(b.framing)
+            if size_a and size_a == size_b and set(a.character_ids) == set(b.character_ids):
+                issues.append(_issue(
+                    "coverage", b.shot_id,
+                    f"same setup as {a.shot_id}: both are a {size_a} of the same people "
+                    f"({a.framing[:50]!r} then {b.framing[:50]!r}); change the size, the angle "
+                    "or who the shot is about (a single, an over-the-shoulder, a close-up, an "
+                    "insert)",
+                ))  # fmt: skip
+        if len(shots) >= 3:
+            groups = [s for s in shots if is_group_shot(s.framing, len(s.character_ids))]
+            if len(groups) * 2 > len(shots):
+                issues.append(_issue(
+                    "coverage", scene_id,
+                    f"{len(groups)} of the scene's {len(shots)} shots are two-shots or group "
+                    "shots; cover the exchange with singles and over-the-shoulder shots that "
+                    "alternate with the lines, keeping the two-shot to establish the people or "
+                    "a move across the room",
+                ))  # fmt: skip
+    return issues
 
 
 # ---------------------------------------------------------------------------
@@ -746,6 +825,7 @@ ALL_CHECKS: tuple[Check, ...] = (
     check_unique_ids,
     check_episode_structure,
     check_timeline,
+    check_coverage,
     check_dialogue_schedule,
     check_references,
     check_asset_requirements,

@@ -132,3 +132,46 @@ def test_storyboard_and_review_instructions():
     assert "end the shot on the change" in StoryboardStep.directive
     assert "empty source_refs are correct" in ReviewStep.directive
     assert "don't copy them there" in ADAPTATION_RULES
+
+
+def test_coverage_refuses_the_same_setup_twice_and_a_scene_of_two_shots(package, options):
+    from drama_agent.validation.hard_checks import is_group_shot, shot_size
+
+    assert shot_size("Medium close-up single of Lila") == "medium close-up"
+    assert shot_size("Vertical medium-wide two-shot by the bed") == "medium-wide"
+    assert shot_size("Tabletop close-up of her hands") == "insert"
+    assert shot_size("Over-the-shoulder on Derek") is None
+    assert is_group_shot("Medium two-shot favoring Lila", 2)
+    assert not is_group_shot("Medium close-up single of Lila", 2)
+    assert not is_group_shot("Over-the-shoulder on Derek, Lila's shoulder frame left", 2)
+    # The sample alternates its sizes: clean. Two mediums of the same people in a row: not.
+    a, b = shot(package, "sh_01_01_01"), shot(package, "sh_01_01_02")
+    a.framing, b.framing = "Medium two-shot of both", "Medium two-shot, closer"
+    b.character_ids = list(a.character_ids)
+    issues = [i for i in run_hard_checks(package, options) if i.check == "coverage"]
+    assert any(
+        i.object_id == b.shot_id and "same setup as sh_01_01_01" in i.evidence for i in issues
+    )
+    # Every shot of a scene a two-shot: the scene is flagged.
+    scene = a.scene_id
+    for s in package.shot_list:
+        if s.scene_id == scene:
+            s.framing = (
+                "Medium two-shot" if s is a else "Wide two-shot" if s is b else "Close two-shot"
+            )
+    issues = [i for i in run_hard_checks(package, options) if i.check == "coverage"]
+    assert any(i.object_id == scene and "two-shots or group shots" in i.evidence for i in issues)
+
+
+def test_a_revision_is_held_to_coverage_only_where_it_rewrote_shots(package):
+    from drama_agent.models import Issue
+    from drama_agent.pipeline.revise import coverage_in_scope
+
+    a = package.shot_list[0]
+    issues = [Issue(check="coverage", object_id=a.shot_id, evidence="same setup"),
+              Issue(check="coverage", object_id=a.scene_id, evidence="two-shots"),
+              Issue(check="coverage", object_id="sh_other", evidence="same setup"),
+              Issue(check="timeline", object_id="ep_01", evidence="gap")]  # fmt: skip
+    kept = coverage_in_scope(issues, package, {a.shot_id})
+    assert [i.object_id for i in kept] == [a.shot_id, a.scene_id, "ep_01"]
+    assert [i.object_id for i in coverage_in_scope(issues, package, set())] == ["ep_01"]

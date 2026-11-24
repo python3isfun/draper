@@ -1001,6 +1001,8 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .ep-findings { margin: 2px 0 0; padding-left: 16px; max-width: 220px; }
 .ep-findings li { margin: 0; }
 .ep-steps-input { width: 64px; }
+.ep-music { flex: 1 1 320px; display: flex; gap: 6px; align-items: center; }
+.ep-music-input { flex: 1; min-width: 200px; }
 .ep-err { max-height: 72px; overflow: hidden; }
 .ep-spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--muted, #888); border-top-color: transparent; animation: ep-spin 0.9s linear infinite; }
 @keyframes ep-spin { to { transform: rotate(360deg); } }

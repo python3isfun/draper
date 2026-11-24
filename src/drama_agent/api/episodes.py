@@ -52,6 +52,9 @@ class SettingsPatch(BaseModel):
     takes: int | None = Field(None, ge=1, le=MAX_TAKES)
     check_speech: bool | None = None
     steps: int | None = Field(None, ge=MIN_STEPS, le=MAX_STEPS)
+    trim: bool | None = None
+    music: str | None = Field(None, max_length=400)
+    music_db: float | None = Field(None, ge=-40, le=0)
 
 
 class ReleaseRequest(BaseModel):
