@@ -621,6 +621,9 @@ matches, not a start frame). A clean spec:
   storyboard shot longer than 15 s is flagged: split it in the storyboard);
 - no cut falls in the middle of a line;
 - each line's speaker is on screen, or placed off frame, or a voice from outside the shot;
+- a line spoken by one of the shot's people is spoken with them in frame, or with nobody in
+  frame (an insert): H3 lip-syncs a quoted line to the face it sees, so a listener never holds
+  the frame through someone else's line; a reaction goes between lines;
 - every on-screen person has a side of the frame, and only they do;
 - every cut changes the view (no two sub-shots in a row share a framing);
 - screen sides hold across cuts (the 180-degree rule): nobody jumps from frame left to
@@ -629,10 +632,10 @@ matches, not a start frame). A clean spec:
 The planner covers dialogue speaker by speaker (a cut to the speaker shortly before their
 line) unless the storyboard asks to hold a two-shot. It plans at the story's **pace** (below):
 the long setup goes to whoever acts or speaks, a listener has something to do, most sub-shots
-move the camera, and a reaction is held no longer than the pace allows. A plan that holds a
-listener longer while someone off screen speaks goes back to the planner once with that
-problem (the better of the two plans is kept); it is flagged on the board and in the export,
-and never refused on a save.
+move the camera, and a reaction is held no longer than the pace allows. A plan that isn't a
+clean spec (a listener held through someone else's line, a cut in the middle of a line) goes
+back to the planner once with the problems (the better of the two plans is kept); what is
+still wrong is flagged on the board, and an episode run holds the shot there for a person.
 
 **Plan history.** A shot's cut plan is never lost when it is replaced: a re-plan, an edit
 with different cuts or a restore keeps the plan it replaces in the shot's history, with the
@@ -707,7 +710,28 @@ until **Save & render** or **Render again**. Each take records its render statis
 (`ShotClip.started_at`, `finished_at`, `bytes`, `width`, `height`, `media_s`, with
 `render_s` and `queue_s` in the view): shown under the take as when it was queued, began
 and ended, how long the render took and the wait before it, the picture size, the file's
-length and size. The Cuts step lists the shot's sub-shots and
+length and size.
+
+**Steps.** The sampling steps asked of the video model are a run setting (`steps`, 1 to
+100, empty for the model's own default) and a field of a render by hand; each take records
+the count it was rendered with (`ShotClip.steps`, shown in its caption). Fewer steps render
+faster and rougher: see the measurement in `docs/render-speed.md`. `DRAMA_VIDEO_STEPS` sets
+the client's default for renders that don't say.
+
+**Speech check.** H3 lip-syncs a quoted line to the face it sees, so a take can put a
+line on the wrong person, or have someone talk in a cut meant to be silent. After each
+render (`check_speech`, a run setting on by default, and `check` on a render by hand) the
+runner samples frames over every line (three per line, two per silent cut, twelve at most,
+`shots/speech_check.py`) and shows them to the vision model with the faces sent with the
+clip; it says whose mouth moves in each cut. The findings are rules on that answer: an
+on-screen line's speaker is seen speaking (minor when not: a sampled frame can fall between
+words) and nobody else is (major); a cut with no line spoken in frame has nobody talking
+(major). A take that fails is *rejected* (`ShotClip.check`, state `rejected`): it isn't
+counted as a take, the episode isn't cut from it while the shot has another, and the run
+renders another take with a new seed, then holds for a person as it does for a failed
+render. The Episode tab marks the take *wrong speaker* with the findings; **Use anyway**
+accepts it (`ShotClip.accepted`). A check that couldn't run leaves the take standing,
+marked *unchecked* with the reason. The Cuts step lists the shot's sub-shots and
 embeds the board's cut plan editor (**Edit**), with **Plan cuts** and the pace and cut
 count for the text model; a plan locked to its approved keyframes (as every shot's is
 after a run) needs **Unlock** first, which restores the draft plan and so puts the prompt
@@ -776,7 +800,7 @@ changed.
 **Cuts**: exactly 1 to 5 sub-shots, or auto (the planner decides, at most 3). The planner is told
 both; a plan with another number of cuts goes back to it once, and the closer plan is kept.
 They are saved with the shot's plan, so a later re-plan uses them again until changed, and
-the shot's own pace judges its listener holds. `POST .../keyframes/{shot_id}/plan` takes
+the shot's own pace is what the planner is told. `POST .../keyframes/{shot_id}/plan` takes
 `pace` and `cuts` (null: the story's pace, the planner's count; left out: as the plan has
 them); `shot_specs.json` gives each shot's `pace`.
 

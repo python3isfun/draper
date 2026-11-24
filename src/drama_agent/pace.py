@@ -99,29 +99,6 @@ def planner_rules(pace: object) -> str:
     )
 
 
-def reaction_holds(
-    subs: list[Any], lines: list[dict[str, Any]], shot_people: list[str], pace: object
-) -> list[tuple[int, int, list[str]]]:
-    """The sub-shots that hold a listener too long at this pace: (index, ms, off-screen
-    speakers), for a sub-shot longer than the pace allows in which only people off screen
-    of the shot speak (the camera stays on someone listening). A silent sub-shot is not
-    judged (it may be someone acting alone, which only the words can tell), nor a voice
-    from outside the shot (a phone, a narrator). `lines` are the shot's lines
-    (speaker_id, start_ms), timed in the clip."""
-    limit = round(rule(pace).reaction_s * 1000)
-    out = []
-    for sub in subs:
-        length = sub.end_ms - sub.start_ms
-        said = [x for x in lines if sub.start_ms <= x["start_ms"] < sub.end_ms
-                and x["speaker_id"] in shot_people]  # fmt: skip
-        if length <= limit or not sub.people or not said:
-            continue
-        if all(x["speaker_id"] not in sub.people for x in said):
-            away = list(dict.fromkeys(x["speaker_id"] for x in said))
-            out.append((sub.index, length, away))
-    return out
-
-
 def story_pace(repo: Any, package_id: str | None) -> Pace:
     """A story's pace: the one set on its Overview, else its newest job's."""
     return story_setting(repo, package_id, "pace", lambda o: as_pace(o.pace), as_pace,

@@ -171,11 +171,18 @@ def test_sub_shots_are_checked(package):
             make_sub_shots(package, shot, rows)
     with pytest.raises(ValueError, match="whole seconds"):
         make_sub_shots(package, shot, [{**wide, "start_ms": 0}], clip=16000)
-    # The off-screen speaker of a line is fine; so is a voice from outside the shot.
-    off = {**close, "start_ms": 0, "off_screen": {i: "right" for i in ids[1:]}}
+    # A line's speaker off screen while someone else is in frame is refused (H3 would put
+    # the line on the face it sees); the same single with the speaker in it is fine.
     speaker = shot_lines(package, shot)[0]["speaker_id"]
-    if speaker != ids[0]:
-        assert make_sub_shots(package, shot, [off, {**wide, "start_ms": 7000}])
+    other = next(i for i in ids if i != speaker)
+    side = lambda i: "left" if sides[i] == "left" else "right"  # centre: off to the right
+    off = {**close, "start_ms": 0, "people": [other], "placement": {other: sides[other]},
+           "off_screen": {i: side(i) for i in ids if i != other}}  # fmt: skip
+    with pytest.raises(ValueError, match="an off-screen line"):
+        make_sub_shots(package, shot, [off, {**wide, "start_ms": 7000}])
+    on = {**off, "people": [speaker], "placement": {speaker: sides[speaker]},
+          "off_screen": {i: side(i) for i in ids if i != speaker}}  # fmt: skip
+    assert make_sub_shots(package, shot, [on, {**wide, "start_ms": 7000}])
 
 
 def test_the_clip_is_whole_seconds_and_holds_every_line(package):
@@ -188,8 +195,9 @@ def test_the_clip_is_whole_seconds_and_holds_every_line(package):
 def test_the_planner_names_become_character_ids(package):
     shot = busiest(package)
     names = {c.character_id: c.name for c in package.story_bible.characters}
-    first = names[shot.character_ids[0]]
-    others = {names[c]: "right" for c in shot.character_ids[1:]}
+    speaker = shot_lines(package, shot)[0]["speaker_id"]  # in frame for the line (0-6.2 s)
+    first = names[speaker]
+    others = {names[c]: "right" for c in shot.character_ids if c != speaker}
     out = PlanOutput(sub_shots=[
         PlannedSubShot(start_s=0, framing="wide", action="a", people=[first.upper()],
                        placement={first: "left"}, off_screen=others),
@@ -197,8 +205,8 @@ def test_the_planner_names_become_character_ids(package):
                        placement={first.lower(): "Left"}, off_screen=others),
     ])  # fmt: skip
     subs = planned_sub_shots(package, shot, out)
-    assert [s.people for s in subs] == [[shot.character_ids[0]]] * 2
-    assert subs[1].start_ms == 7000 and subs[1].placement == {shot.character_ids[0]: "left"}
+    assert [s.people for s in subs] == [[speaker]] * 2
+    assert subs[1].start_ms == 7000 and subs[1].placement == {speaker: "left"}
     out.sub_shots[1].people = ["Nobody Here"]
     with pytest.raises(ValueError, match="isn't one of the shot's people"):
         planned_sub_shots(package, shot, out)
@@ -207,7 +215,7 @@ def test_the_planner_names_become_character_ids(package):
     out.sub_shots[0].start_s = 0.2
     out.sub_shots[1].people = [f"Ms. {first_name} Somebody"]
     subs = planned_sub_shots(package, shot, out)
-    assert subs[0].start_ms == 0 and subs[1].people == [shot.character_ids[0]]
+    assert subs[0].start_ms == 0 and subs[1].people == [speaker]
 
 
 def test_a_later_sub_shot_is_drawn_from_the_approved_keyframe_before_it(package):

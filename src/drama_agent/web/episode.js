@@ -4,7 +4,7 @@
 // providerName(), stickyDetails() from shots.js.
 
 const ep = { key: null, episodes: null, episode: null, run: null, error: "", timer: null, loading: false,
-  settings: { draws: 2, max_rounds: 3, provider: null, holds: [], render: true, assemble: true, parallel: 2, approve_failed: true, fast: false, takes: 1 },
+  settings: { draws: 2, max_rounds: 3, provider: null, holds: [], render: true, assemble: true, parallel: 2, approve_failed: true, fast: false, takes: 1, check_speech: true, steps: null },
   skip: new Set(), busy: false, events: false, prompts: {}, edit: {}, renderOpts: {} };
 
 // Whether the page should keep polling: the run goes on, or a prompt or a take is in work.
@@ -25,9 +25,31 @@ function epDuration(s) {
   return m < 90 ? `${m} min ${String(s % 60).padStart(2, "0")} s` : `${(m / 60).toFixed(1)} h`;
 }
 
+// A clip shows as its poster (one small JPEG) with a play badge; the mp4 is fetched only
+// when the poster is clicked, and the player then stays open across repaints. Elements are
+// kept per source: the run payload changes every poll while a run is live, and a fresh
+// element per repaint would refetch and spin.
+const epVideos = new Map();
+function epVideo(src, poster, cls) {
+  const have = epVideos.get(src);
+  if (have && have.dataset.poster === (poster || "")) return have;
+  const play = () => {
+    const video = h("video", { controls: true, autoplay: true, preload: "auto", src, poster, class: cls });
+    el.replaceWith(video);
+    epVideos.set(src, video);
+    video.dataset.poster = poster || "";
+  };
+  const el = h("button", { type: "button", class: `ep-play ${cls}`, title: "Play (loads the video)", onclick: play },
+    poster ? h("img", { src: poster, alt: "", loading: "lazy" }) : null,
+    h("span", { class: "ep-play-badge" }, "\u25B6"));
+  el.dataset.poster = poster || "";
+  epVideos.set(src, el);
+  return el;
+}
+
 async function loadEpisode(pkg, { force = false } = {}) {
   const key = epKey(pkg);
-  if (ep.key !== key) Object.assign(ep, { key, episodes: null, episode: null, run: null, error: "" });
+  if (ep.key !== key) { epVideos.clear(); Object.assign(ep, { key, episodes: null, episode: null, run: null, error: "" }); }
   ep.pkg = { package_id: pkg.package_id, revision_id: pkg.revision_id };
   clearTimeout(ep.timer);
   ep.timer = null;
@@ -116,6 +138,8 @@ function renderEpisodeControls(pkg) {
       h("label", {}, " Rounds ", numberSelect(s.max_rounds, 3, (n) => { s.max_rounds = n; }, "Automatic rounds")),
       h("label", {}, " At once ", numberSelect(s.parallel, 6, (n) => { s.parallel = n; }, "Shots whose keyframes are made at the same time")),
       h("label", { title: "Takes of each shot's clip to render, each with its own seed; the newest finished take goes into the episode" }, " Takes ", numberSelect(s.takes || 1, 4, (n) => { s.takes = n; }, "Takes per shot")),
+      h("label", { title: "Sampling steps asked of the video model, 1 to 100; empty: the model's default. Fewer render faster and rougher." }, " Steps ",
+        h("input", { type: "number", min: 1, max: 100, class: "ep-steps-input", value: s.steps ?? "", placeholder: "default", "aria-label": "Steps", onchange: (e) => { const n = parseInt(e.target.value, 10); s.steps = Number.isFinite(n) ? Math.min(100, Math.max(1, n)) : null; e.target.value = s.steps ?? ""; } })),
       Object.keys(providers).length > 1 && h("label", {}, " Drawn with ",
         h("select", { "aria-label": "Image provider", onchange: (e) => { s.provider = e.target.value || null; } },
           Object.entries(providers).map(([name, model]) =>
@@ -134,7 +158,9 @@ function renderEpisodeControls(pkg) {
       h("label", { title: "Off: leave the clips as they are; don't cut the episode together" },
         h("input", { type: "checkbox", checked: s.assemble, onchange: (e) => { s.assemble = e.target.checked; } }), " Assemble the episode"),
       h("label", { title: "Render faster and rougher: a lower resolution (512), with every cut's keyframe and each face as the only reference pictures. Trades detail for speed." },
-        h("input", { type: "checkbox", checked: s.fast, onchange: (e) => { s.fast = e.target.checked; } }), " Fast (low res, keyframes and faces only)")),
+        h("input", { type: "checkbox", checked: s.fast, onchange: (e) => { s.fast = e.target.checked; } }), " Fast (low res, keyframes and faces only)"),
+      h("label", { title: "After each render, the vision model looks at frames of every line and says who is seen talking. A take that puts a line on the wrong face, or has someone talking in a silent cut, is rejected and another take rendered." },
+        h("input", { type: "checkbox", checked: s.check_speech, onchange: (e) => { s.check_speech = e.target.checked; } }), " Check who is seen talking")),
     h("div", { class: "design-row" },
       h("button", { type: "button", class: "btn primary", disabled: running || !chosen || ep.busy, onclick: async (e) => {
         const body = { revision_id: pkg.revision_id, ...s, skip_shots: [...ep.skip] };
@@ -178,7 +204,7 @@ function renderRunHead(pkg, run) {
       run.settings.holds.includes("approve") && h("button", { type: "button", class: "btn", title: "Let the run approve the best draw of every cut from here on", onclick: (e) => epAction(`${base}/release`, e.currentTarget, { key: "approve" }) }, "Approve the rest for me"),
       run.status !== "running" && !run.settings.render && h("span", { class: "small muted" }, "Clips were not rendered (setting). ")),
     run.output && run.output.file && h("div", { class: "ep-output" },
-      h("video", { controls: true, preload: "metadata", src: `${base}/output`, poster: `${base}/poster`, class: "ep-video" }),
+      epVideo(`${base}/output?v=${encodeURIComponent(run.finished_at || "")}`, `${base}/poster?v=${encodeURIComponent(run.finished_at || "")}`, "ep-video"),
       h("p", { class: "small" },
         h("a", { href: `${base}/output`, download: `${pkg.package_id}-${run.episode_id}.mp4` }, "Download the episode"),
         ` · ${epDuration(run.output.duration_s)} · ${run.output.width}x${run.output.height} · ${run.output.clips} clips`)),
@@ -319,7 +345,7 @@ const MAX_TAKES_IN_FLIGHT = 4;
 
 // The render options, inline: how many takes, fast or full quality, then Render.
 function renderOptions(pkg, run, row, again) {
-  const o = ep.renderOpts[row.shot_id] || (ep.renderOpts[row.shot_id] = { takes: run.settings.takes || 1, fast: run.settings.fast });
+  const o = ep.renderOpts[row.shot_id] || (ep.renderOpts[row.shot_id] = { takes: run.settings.takes || 1, fast: run.settings.fast, steps: run.settings.steps ?? null });
   const url = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`;
   return [
     h("label", { class: "ep-opt small", title: "How many takes to render, each with its own seed" },
@@ -327,14 +353,27 @@ function renderOptions(pkg, run, row, again) {
     h("label", { class: "ep-opt small", title: "Fast: a lower resolution, with every cut's keyframe and each face as the only references. Full: the run's normal size and every reference picture." },
       h("select", { onchange: (e) => { o.fast = e.target.value === "fast"; } },
         h("option", { value: "fast", selected: o.fast }, "Fast"), h("option", { value: "full", selected: !o.fast }, "Full quality"))),
-    h("button", { type: "button", class: "btn small", title: "Render new takes of this shot now; each appears beside the clip while it renders", onclick: (e) => epAction(url, e.currentTarget, { revision_id: pkg.revision_id, fast: o.fast, takes: o.takes }) }, again ? "Render again" : "Render now"),
+    h("label", { class: "ep-opt small", title: "Sampling steps, 1 to 100; empty: the model's default" },
+      "Steps ", h("input", { type: "number", min: 1, max: 100, class: "ep-steps-input", value: o.steps ?? "", placeholder: "default", onchange: (e) => { const n = parseInt(e.target.value, 10); o.steps = Number.isFinite(n) ? Math.min(100, Math.max(1, n)) : null; e.target.value = o.steps ?? ""; } })),
+    h("button", { type: "button", class: "btn small", title: "Render new takes of this shot now; each appears beside the clip while it renders", onclick: (e) => epAction(url, e.currentTarget, { revision_id: pkg.revision_id, fast: o.fast, takes: o.takes, steps: o.steps }) }, again ? "Render again" : "Render now"),
   ];
 }
 
 // One take of a shot's clip: a gray box while it renders, the video once it is done.
+// What the speech check found in a finished take, as a chip.
+function speechChip(c) {
+  if (c.check_error) return h("span", { class: "chip", title: c.check_error }, "unchecked");
+  if (!c.check) return null;
+  const failed = c.check.items.filter((i) => !i.passed);
+  const title = [c.check.summary, ...failed.map((i) => i.finding)].filter(Boolean).join("\n") || "Everyone speaks their own line";
+  if (c.check.passed) return h("span", { class: "chip ok", title }, "speech ok");
+  if (c.accepted) return h("span", { class: "chip warn", title }, "accepted anyway");
+  return h("span", { class: "chip bad", title }, "wrong speaker");
+}
+
 function renderTake(pkg, run, row, c, usedId) {
   const url = `/v1/drama-packages/${encodeURIComponent(pkg.package_id)}/clips/${encodeURIComponent(row.shot_id)}`;
-  const who = `seed ${c.seed ?? "?"} · ${c.fast ? "fast" : "full"}`;
+  const who = `seed ${c.seed ?? "?"} · ${c.fast ? "fast" : "full"}${c.steps ? ` · ${c.steps} steps` : ""}`;
   const del = h("button", { type: "button", class: "btn ghost small", title: "Delete this take", onclick: (e) => epAction(clipUrl(c.clip_id).replace(/\/content$/, ""), e.currentTarget, undefined, "DELETE") }, "Delete");
   if (c.state === "rendering") {
     const queued = c.status === "pending" && c.ahead > 0;
@@ -353,13 +392,17 @@ function renderTake(pkg, run, row, c, usedId) {
         h("button", { type: "button", class: "btn small", title: "Render this take again with the same seed", onclick: (e) => epAction(url, e.currentTarget, { revision_id: pkg.revision_id, fast: c.fast, takes: 1, seed: c.seed }) }, "Retry"), del));
   }
   const used = c.clip_id === usedId;
-  return h("div", { class: `ep-take ${used ? "used" : ""} ${c.state === "outdated" ? "outdated" : ""}` },
-    c.has_file && h("video", { controls: true, preload: "none", src: clipUrl(c.clip_id), poster: c.has_poster ? clipUrl(c.clip_id, "poster") : null, class: "ep-clip" }),
-    h("div", { class: "small muted" }, who, c.state === "outdated" && h("span", { class: "chip warn", title: "The prompt or the pictures changed since this take was rendered" }, "out of date")),
+  const rejected = c.state === "rejected";
+  return h("div", { class: `ep-take ${used ? "used" : ""} ${c.state === "outdated" ? "outdated" : ""} ${rejected ? "rejected" : ""}` },
+    c.has_file && epVideo(clipUrl(c.clip_id), c.has_poster ? clipUrl(c.clip_id, "poster") : null, "ep-clip"),
+    h("div", { class: "small muted" }, who,
+      c.state === "outdated" && h("span", { class: "chip warn", title: "The prompt or the pictures changed since this take was rendered" }, "out of date"),
+      speechChip(c)),
+    rejected && h("ul", { class: "small warn-text ep-findings" }, c.check.items.filter((i) => !i.passed).map((i) => h("li", {}, i.finding || i.item))),
     renderStats(c),
     used ? h("div", { class: "small ok-text" }, "In the episode") : null,
     h("div", { class: "ep-take-actions" },
-      !used && c.has_file && h("button", { type: "button", class: "btn small", title: "Cut the episode from this take", onclick: (e) => epAction(clipUrl(c.clip_id, "use"), e.currentTarget, {}) }, "Use"),
+      !used && c.has_file && h("button", { type: "button", class: "btn small", title: rejected ? "Accept this take despite the check and cut the episode from it" : "Cut the episode from this take", onclick: (e) => epAction(clipUrl(c.clip_id, "use"), e.currentTarget, {}) }, rejected ? "Use anyway" : "Use"),
       c.has_file && h("a", { class: "btn ghost small", href: clipUrl(c.clip_id), download: `${row.shot_id}-s${c.seed ?? 0}.mp4` }, "Download"),
       del));
 }

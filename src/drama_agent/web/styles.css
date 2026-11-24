@@ -987,11 +987,20 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .ep-takes { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; align-items: flex-start; }
 .ep-take { width: 120px; font-size: 12px; }
 .ep-take .ep-clip { margin-top: 0; }
+.ep-play { position: relative; padding: 0; border: 0; cursor: pointer; overflow: hidden; min-height: 60px; }
+.ep-play img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.ep-play-badge { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 34px; height: 34px; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 14px; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.ep-play:hover .ep-play-badge { background: rgba(0, 0, 0, 0.8); }
+.ep-play.ep-video { min-height: 120px; }
 .ep-take.outdated .ep-clip { opacity: 0.7; }
 .ep-take.used .ep-clip { outline: 2px solid var(--ok, #2e9e5b); outline-offset: 1px; }
 .ep-take-box { width: 120px; height: 160px; border-radius: 4px; background: var(--border, #e5e5e5); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; text-align: center; padding: 6px; box-sizing: border-box; }
 .ep-take.busy .ep-take-box { animation: ep-pulse 1.6s ease-in-out infinite; }
 .ep-take.failed .ep-take-box { background: transparent; border: 1px dashed var(--warn, #c0392b); height: auto; min-height: 80px; }
+.ep-take.rejected .ep-clip { outline: 2px solid var(--bad, #c0392b); outline-offset: 1px; }
+.ep-findings { margin: 2px 0 0; padding-left: 16px; max-width: 220px; }
+.ep-findings li { margin: 0; }
+.ep-steps-input { width: 64px; }
 .ep-err { max-height: 72px; overflow: hidden; }
 .ep-spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--muted, #888); border-top-color: transparent; animation: ep-spin 0.9s linear infinite; }
 @keyframes ep-spin { to { transform: rotate(360deg); } }

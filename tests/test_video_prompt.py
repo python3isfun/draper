@@ -8,6 +8,7 @@ from drama_agent.shots.video_prompt import (
     VideoPromptOutput,
     dialogue_pace,
     prompt_findings,
+    template_prompt,
 )
 
 from .test_shot_frames import Board, member
@@ -155,3 +156,55 @@ def test_dialogue_pace(tmp_path):
         talky = max(pkg.shot_list, key=lambda s: len(s.dialogue_cues))
         assert dialogue_pace(pkg, talky, 100) is not None  # a tenth of a second holds nothing
         assert dialogue_pace(pkg, talky, 600_000) is None
+
+
+def _reaction(line="I don't remember.", on=("McKenna",), off=("Lila",)):
+    """One cut on `on` while `off` speaks the line off screen."""
+    return {
+        "pictures": [{"pic": "{pic:A}", "kind": "face", "shows": "", "of": "McKenna", "cuts": [1]}],
+        "scene": {"place": "the office"},
+        "shot": {"sound": "the hum of the office"},
+        "cuts": [{"index": 1, "start_s": 0, "end_s": 4, "framing": "close-up of McKenna",
+                  "camera": "static", "action": "McKenna listens",
+                  "people": [{"name": n, "frame": "right"} for n in on],
+                  "off_screen": [{"name": n, "side": "left"} for n in off],
+                  "lines": [{"speaker": n, "line": line, "where": "off screen left",
+                             "delivery": ""} for n in off]}],
+    }  # fmt: skip
+
+
+def test_a_line_spoken_off_screen_is_voice_over_not_picture_text():
+    """H3 lip-syncs a quoted line to the face in frame, so a line whose speaker is off
+    screen goes in the sound sentence and the picture text keeps the frame silent."""
+    ctx = _reaction()
+    quoted = '"I don\'t remember."'
+    wrong = ("A close-up facing her. McKenna from {pic:A} is at frame right. Lila from "
+             f"{{pic:A}} is off frame left. Lila says in an off-screen voice: {quoted} "
+             "McKenna keeps her mouth closed.")  # fmt: skip
+    problems, advice = prompt_findings(_out(wrong), ctx, [])
+    assert any("quotes Lila's off-screen line in the picture text" in p for p in problems)
+    assert any("`sound` doesn't carry Lila's off-screen line" in p for p in problems)
+    assert any("binds Lila, who is off screen" in a for a in advice)
+    right = ("A close-up facing her. McKenna from {pic:A} is at frame right, facing Lila, who "
+             "is off frame left. McKenna listens in silence, mouth closed; no one in frame "
+             "speaks.")  # fmt: skip
+    sound = f"Off screen, Lila's voice, dry: {quoted} Apart from that the only sound is the hum."
+    problems, advice = prompt_findings(_out(right, sound=sound), ctx, [])
+    assert problems == []
+    assert not any("silent" in a or "binds" in a or "lips" in a for a in advice)
+    # The frame must say it listens in silence, else H3 invents speech.
+    _, advice = prompt_findings(_out(right.replace(" McKenna listens in silence, mouth closed; "
+                                                   "no one in frame speaks.", ""), sound=sound),
+                                ctx, [])  # fmt: skip
+    assert any("no line spoken in frame" in a for a in advice)
+    # The template writes it that way.
+    out = template_prompt(ctx)
+    assert quoted not in out.blocks[0].text
+    assert "McKenna listens in silence, mouth closed; no one in frame speaks." in out.blocks[0].text
+    assert out.sound.startswith(f"Off screen, Lila's voice: {quoted} Apart from the spoken lines")
+    assert prompt_findings(out, ctx, [])[0] == []
+    # With nobody in frame (an insert) the line is quoted in the text: no face to lip-sync.
+    empty = _reaction(on=())
+    out = template_prompt(empty)
+    assert f"Lila says in an off-screen voice: {quoted}" in out.blocks[0].text
+    assert prompt_findings(out, empty, [])[0] == []

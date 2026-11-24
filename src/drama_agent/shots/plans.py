@@ -9,8 +9,6 @@ from typing import Any
 
 from ..models import ProductionPackage
 from ..models.storyboard import Shot
-from ..pace import reaction_holds
-from ..pace import rule as pace_rule
 from .common import _dialogue, _names
 from .models import (
     COVERAGE_MS,
@@ -92,7 +90,8 @@ TOO_LONG = "the storyboard shot runs"  # the start of the problem a plan can't f
 
 ONE_CUT = "dialogue held in one cut"  # the start of the coverage problem
 
-LISTENER = "a listener held"  # the start of the pace problem (check_plan with a pace)
+# The start of the problem of a line spoken off screen while someone else is in frame.
+OFF_SCREEN_LINE = "an off-screen line"
 # The start of the problem of a plan whose sub-shots aren't the number the shot asks for.
 CUT_COUNT = "the plan has"
 
@@ -103,9 +102,8 @@ _HOLD_TWO_SHOT = re.compile(r"\bhold(?:s|ing)?\b[^.;]{0,30}\btwo[- ]shot\b", re.
 def advisory(problem: str) -> bool:
     """A problem flagged on the board and in the export but never refused on a save: a shot
     too long for H3 (no plan fixes it), dialogue held in one cut (a person may hold the
-    two-shot on purpose), a listener held longer than the pace allows (a judgement) and a
-    cut count other than the one asked for."""
-    return problem.startswith((TOO_LONG, ONE_CUT, LISTENER, CUT_COUNT))
+    two-shot on purpose) and a cut count other than the one asked for."""
+    return problem.startswith((TOO_LONG, ONE_CUT, CUT_COUNT))
 
 
 def cut_count_problem(subs: list[Any], cuts: int | None) -> str | None:
@@ -148,11 +146,12 @@ def check_plan(
     the clip's length, every line wholly inside the clip and inside one sub-shot (no cut in
     the middle of a line), each speaker on screen or placed off screen, every on-screen
     person (and only they) placed in the frame, each cut changing the framing, screen sides
-    that hold across cuts (the 180-degree rule), and dialogue between two people covered
-    speaker by speaker when the clip is long enough and a cut can fall between their lines
-    (unless the storyboard holds the two-shot). With a `pace` (pace.py), also a listener held
-    longer than it allows while someone off screen speaks: the planner is asked to fix it once.
-    With `cuts` (the count the shot asks for), also a plan with another count; a shot asked
+    that hold across cuts (the 180-degree rule), every line spoken by someone of the shot
+    with its speaker in frame or nobody in frame (H3 lip-syncs a quoted line to the face it
+    sees, so a listener can't hold the frame through someone else's line), and dialogue
+    between two people covered speaker by speaker when the clip is long enough and a cut can
+    fall between their lines (unless the storyboard holds the two-shot). `pace` is accepted
+    for the callers that judge a plan at one (the rules no longer depend on it). With `cuts` (the count the shot asks for), also a plan with another count; a shot asked
     for one cut isn't told to cover its dialogue speaker by speaker. See `advisory` for the problems that are flagged but never refused."""
     names = _names(pkg)
     out: list[str] = []
@@ -183,6 +182,13 @@ def check_plan(
         if who in in_shot and who not in sub.people and who not in sub.off_screen:
             out.append(f"{x['speaker']} speaks in sub-shot {sub.index} but is neither on "
                        "screen nor placed off screen")  # fmt: skip
+        if who in in_shot and who not in sub.people and sub.people:
+            seen = ", ".join(names.get(w, w) for w in sub.people)
+            out.append(f"{OFF_SCREEN_LINE}: {x['speaker']} speaks in sub-shot {sub.index} "
+                       f"while {seen} {'is' if len(sub.people) == 1 else 'are'} in frame; H3 "
+                       "lip-syncs a quoted line to the face it sees. Cut to the speaker before "
+                       "the line starts (a reaction goes between lines), or hold both in a "
+                       "two-shot")  # fmt: skip
     on_screen_lines = [x for x in spoken if x["speaker_id"] in in_shot]
     if (
         len(subs) == 1
@@ -217,13 +223,6 @@ def check_plan(
             if {was, now} == {"left", "right"}:
                 out.append(f"{names.get(who, who)} moves from frame {was} to frame {now} across "
                            f"the cut at {b.start_ms / 1000:g} s (the 180-degree rule)")  # fmt: skip
-    if pace is not None:
-        limit = pace_rule(pace).reaction_s
-        for index, ms, away in reaction_holds(subs, spoken, shot.character_ids, pace):
-            out.append(f"{LISTENER} {ms / 1000:g} s in sub-shot {index} while "
-                       f"{', '.join(names.get(w, w) for w in away)} speaks off screen; at this "
-                       f"pace a reaction holds at most {limit:g} s: put the speaker on screen "
-                       "for their line")  # fmt: skip
     if wrong := cut_count_problem(subs, cuts):
         out.append(wrong)
     return out
@@ -232,8 +231,8 @@ def check_plan(
 def plan_problems(
     pkg: ProductionPackage, shot: Shot, plan: ShotPlan, pace: str | None = None
 ) -> list[str]:
-    """Where a shot's plan in force isn't a clean spec (with a pace, the shot's own or else
-    the story's `pace`, also a listener held longer than it allows). An unplanned shot (the
+    """Where a shot's plan in force isn't a clean spec (`pace`: the story's, for callers that
+    judge at one). An unplanned shot (the
     single plan) is only flagged for what planning would answer or nothing can: dialogue
     held in one cut, and a shot too long for H3."""
     problems = check_plan(pkg, shot, plan.sub_shots, plan.pace or pace, plan.cuts)

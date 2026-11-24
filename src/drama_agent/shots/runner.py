@@ -169,8 +169,15 @@ class ShotFrameRunner:
         plans = {p.shot_id: p for p in self.repo.list_shot_plans(pkg.package_id, pkg.revision_id)}
         return images, plans
 
-    def fresh_reading(self, pkg: ProductionPackage, scene_id: str) -> SceneReading | None:
-        images, plans = self.scene_inputs(pkg)
+    def fresh_reading(
+        self,
+        pkg: ProductionPackage,
+        scene_id: str,
+        inputs: tuple[list[GeneratedImage], dict[str, ShotPlan]] | None = None,
+    ) -> SceneReading | None:
+        """The scene's reading if it is current (`inputs`: scene_inputs(pkg), worked out
+        once for many shots)."""
+        images, plans = inputs if inputs is not None else self.scene_inputs(pkg)
         return shot_reading.fresh(
             self.repo.get_scene_reading(pkg.package_id, pkg.revision_id, scene_id),
             shot_reading.fingerprint(pkg, scene_id, plans, images),
@@ -434,17 +441,25 @@ class ShotFrameRunner:
     # -- the shot's video prompt (video_prompt.py) ------------------------------
 
     def video_inputs(
-        self, pkg: ProductionPackage, shot: Shot
+        self,
+        pkg: ProductionPackage,
+        shot: Shot,
+        *,
+        takes: list[ShotTake] | None = None,
+        scene: tuple[list[GeneratedImage], dict[str, ShotPlan]] | None = None,
     ) -> tuple[dict[str, Any], dict[str, str]]:
-        """What the shot's video prompt is written from now, and its pictures' ids."""
-        plan = plan_of(pkg, shot, self.repo.get_shot_plan(pkg.package_id, pkg.revision_id,
-                                                          shot.shot_id))  # fmt: skip
+        """What the shot's video prompt is written from now, and its pictures' ids. A
+        caller going over many shots passes the revision's `takes` and `scene` inputs
+        (scene_inputs) once: reading them again per shot is what made the board slow."""
+        if scene is None:
+            scene = self.scene_inputs(pkg)
+        images, plans = scene
+        plan = plan_of(pkg, shot, plans.get(shot.shot_id))
+        if takes is None:
+            takes = self.repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         return prompt_inputs(
-            pkg, shot, plan,
-            self.repo.list_shot_takes(pkg.package_id, pkg.revision_id),
-            self.repo.list_images(pkg.package_id, pkg.revision_id),
-            self.fresh_reading(pkg, shot.scene_id),
-        )  # fmt: skip
+            pkg, shot, plan, takes, images, self.fresh_reading(pkg, shot.scene_id, scene)
+        )
 
     def start_video_prompt(self, vp: ShotVideoPrompt) -> None:
         """Write a shot's video prompt in the background (the API saved it as "writing",

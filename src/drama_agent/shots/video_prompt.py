@@ -115,7 +115,9 @@ shoulder, looking past him toward her").
 2. **Pictures, each with its role.** For the cut's keyframe: "{pic:A} is the reference \
 frame of this cut: it matches its framing, positions and light." For the set, once in the \
 first cut where it is seen: what it keeps (architecture, furniture placement, palette).
-3. **Each person, bound to their pictures, dressed and placed, in one sentence**: "the \
+3. **Each person in frame, bound to their pictures, dressed and placed, in one sentence** \
+(a person off screen in the cut is never bound to a picture there: H3 draws whoever is \
+described): "the \
 woman from {pic:B} and {pic:C}, in an ivory blouse and charcoal pants, standing at frame \
 left". A name alone means nothing to H3; give the picture every time a person is \
 introduced in a cut. The clothes and the screen side are what the keyframe shows (else \
@@ -128,9 +130,14 @@ the next cut picks up from. One beat fills 5 to 8 s; don't pad a small action.
 6. **The lines**, word for word, in order, in double quotes, after "says in English:", \
 the speaker on screen while speaking: `the man from {pic:D} says in English: "Took you \
 long enough." Only his lips move; the woman keeps quiet, mouth closed.` Delivery goes \
-outside the quotes. A line spoken off screen: "says in an off-screen voice:", and the \
-people on screen keep their lips closed. Every speaking verb has its quoted line. A cut \
-with no line says so in the positive: "Both stay silent, mouths closed."
+outside the quotes. Every speaking verb has its quoted line. A cut with no line says so \
+in the positive: "Both stay silent, mouths closed." **A line whose speaker is off screen \
+(or a voice from outside the shot) while anyone is in frame is not quoted in `text` and \
+never binds the speaker to a picture**: H3 lip-syncs a quoted line to the face it sees, \
+so the words go in `sound` as voice-over (`Off screen, Lila's voice, dry: "..."`) and \
+`text` says in the positive that the people in frame listen in silence, mouths closed, \
+with the speaker named only as a direction ("facing Lila, who is off frame left"). With \
+nobody in frame the line is quoted in `text` after "says in an off-screen voice:".
 
 `camera`: one sentence in MiniMax's camera vocabulary for this cut: static shot, push \
 in, pull out, pan left/right, truck left/right, tilt up/down, pedestal up/down, arc shot, \
@@ -386,7 +393,8 @@ def prompt_findings(
             continue
         tag = f"cut {block.sub_shot}"
         at = 0
-        for x in cut["lines"]:
+        shown = [x for x in cut["lines"] if x["where"] == "on screen" or not cut["people"]]
+        for x in shown:
             quoted = f'"{x["line"].strip()}"'
             k = block.text.find(quoted, at)
             if k < 0:
@@ -394,11 +402,29 @@ def prompt_findings(
                                 f"in order: {quoted}")  # fmt: skip
             else:
                 at = k + len(quoted)
-        if cut["lines"] and "lips" not in block.text.lower():
+        # A line spoken off screen while someone is in frame is voice-over: in the sound
+        # sentence, not in the picture text, which H3 would lip-sync to the face it sees.
+        for x in cut["lines"]:
+            if x in shown:
+                continue
+            quoted = f'"{x["line"].strip()}"'
+            if quoted in block.text:
+                problems.append(f"{tag} quotes {x['speaker']}'s off-screen line in the picture "
+                                "text: H3 lip-syncs it to the face in frame. Put it in `sound` "
+                                "as voice-over and keep the people in frame silent")  # fmt: skip
+            if quoted not in out.sound:
+                problems.append(f"`sound` doesn't carry {x['speaker']}'s off-screen line of "
+                                f"{tag} word for word: {quoted}")  # fmt: skip
+        if shown and "lips" not in block.text.lower():
             advice.append(f"{tag} doesn't say whose lips move on its line")
-        if not cut["lines"] and not _SILENT.search(block.text):
-            advice.append(f"{tag} has no line and doesn't say the people stay silent, mouths "
-                          "closed: H3 invents speech")  # fmt: skip
+        if not shown and cut["people"] and not _SILENT.search(block.text):
+            advice.append(f"{tag} has no line spoken in frame and doesn't say the people stay "
+                          "silent, mouths closed: H3 invents speech")  # fmt: skip
+        for person in cut.get("off_screen", []):
+            name = person["name"]
+            if re.search(rf"\b{re.escape(name)}\b[^.]*\{{pic:", _QUOTED.sub('""', block.text)):
+                advice.append(f"{tag} binds {name}, who is off screen in it, to a picture: H3 "
+                              "draws whoever is described; name them only as a direction")  # fmt: skip
         for s in _sentences(_QUOTED.sub('""', block.text)):
             if _SPEAKS.search(s) and '""' not in s:
                 advice.append(f"{tag} has a speaking verb with no quoted line: {s.strip()[:80]}")
@@ -462,6 +488,7 @@ def template_prompt(context: dict[str, Any]) -> VideoPromptOutput:
     props = [p for p in pics if p["kind"] == "prop"]
     place = context["scene"].get("place", "the set")
     blocks = []
+    voice: list[str] = []
     for k, cut in enumerate(context["cuts"]):
         parts = [
             f"{_cap(cut['framing'].rstrip('.'))} shot, camera at eye height facing the action."
@@ -493,18 +520,22 @@ def template_prompt(context: dict[str, Any]) -> VideoPromptOutput:
             f"From {cut['start_s']:g} to {cut['end_s']:g} s, {_low(cut['action'].rstrip('.'))}."
         )
         on = [p["name"] for p in cut["people"]]
+        heard = 0  # lines carried by the sound sentence (voice-over)
         for x in cut["lines"]:
             quiet = [n for n in on if n != x["speaker"]]
-            verb = (
-                "says in English:" if x["where"] == "on screen" else "says in an off-screen voice:"
-            )
-            parts.append(f'{x["speaker"]} {verb} "{x["line"].strip()}"')
             if x["where"] == "on screen":
+                parts.append(f'{x["speaker"]} says in English: "{x["line"].strip()}"')
                 rest = f"; {' and '.join(quiet)} keep quiet, mouths closed" if quiet else ""
                 parts.append(f"Only {x['speaker']}'s lips move{rest}.")
-            elif on:
-                parts.append(f"{' and '.join(on)} keep their lips closed.")
-        if not cut["lines"]:
+            elif on:  # a voice-over: the line is in the sound sentence, the frame listens
+                voice.append(f'Off screen, {x["speaker"]}\'s voice: "{x["line"].strip()}"')
+                heard += 1
+            else:
+                parts.append(f'{x["speaker"]} says in an off-screen voice: "{x["line"].strip()}"')
+        if heard == len(cut["lines"]) and on:
+            parts.append(f"{' and '.join(on)} listen{'s' if len(on) == 1 else ''} in silence, "
+                         "mouth closed; no one in frame speaks.")  # fmt: skip
+        elif not cut["lines"]:
             parts.append("Everyone stays silent, mouths closed." if on else "The frame is silent.")
         blocks.append(PromptBlock(sub_shot=cut["index"], text=" ".join(parts),
                                   camera=_camera(cut.get("camera", ""))))  # fmt: skip
@@ -512,7 +543,10 @@ def template_prompt(context: dict[str, Any]) -> VideoPromptOutput:
     spoken = any(c["lines"] for c in context["cuts"])
     lead = "Apart from the spoken lines, the only sounds are" if spoken else (
         "Everyone stays silent; the only sounds are")  # fmt: skip
-    return VideoPromptOutput(blocks=blocks, sound=f"{lead} {sound[0].lower()}{sound[1:]}.",
+    sound = f"{lead} {sound[0].lower()}{sound[1:]}."
+    if voice:
+        sound = " ".join([*voice, sound])
+    return VideoPromptOutput(blocks=blocks, sound=sound,
                              notes="Offline sample: built from the plan.")  # fmt: skip
 
 

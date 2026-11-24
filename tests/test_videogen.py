@@ -131,6 +131,13 @@ def test_mcphub_client_submits_a_job_and_polls_it():
     assert out.data == b"MP4DATA" and out.task_id == "job1" and out.model == "minimax-h3-ref2va"
     # A per-call seed (another take of the same shot) replaces the client's.
     assert client.body("p", 4, "9:16", [], seed=12)["seed"] == 12
+    # Steps go out as the route's num_inference_steps: the client's default, a per-call
+    # count over it, or nothing (the route's own default).
+    assert "num_inference_steps" not in client.body("p", 4, "9:16", [])
+    assert client.body("p", 4, "9:16", [], steps=14)["num_inference_steps"] == 14
+    low = MCPHubVideoClient("mcp_key", base_url="https://api.test", steps=10, poll_s=0)
+    assert low.body("p", 4, "9:16", [])["num_inference_steps"] == 10
+    assert low.body("p", 4, "9:16", [], steps=20)["num_inference_steps"] == 20
     assert seen[0].headers["x-api-key"] == "mcp_key" and "authorization" not in seen[0].headers
     body = json.loads(seen[0].content)
     assert (

@@ -99,6 +99,15 @@ def shrink_picture(path: Path, short_edge: int, quality: int = 3) -> bytes | Non
     return out.stdout
 
 
+def frame_at(clip: Path, at_s: float, out: Path, short_edge: int | None = None) -> None:
+    """The frame of a clip at `at_s` seconds as a JPEG, shrunk to `short_edge` if given."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    scale = ([] if short_edge is None else
+             ["-vf", f"scale='if(gt(iw,ih),-2,{short_edge})':'if(gt(iw,ih),{short_edge},-2)'"])  # fmt: skip
+    _run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{at_s:.3f}",
+          "-i", str(clip), "-frames:v", "1", *scale, "-q:v", "3", str(out)], timeout=120)  # fmt: skip
+
+
 def poster_of(clip: Path, poster: Path) -> None:
     """The first frame of a clip as a JPEG."""
     poster.parent.mkdir(parents=True, exist_ok=True)

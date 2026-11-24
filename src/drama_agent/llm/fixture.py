@@ -112,6 +112,10 @@ class FixtureModelClient:
                 from ..shot_frames import fixture_check
 
                 output = fixture_check(request)
+            case "speech_check":
+                from ..shots.speech_check import fixture_speech
+
+                output = fixture_speech(request)
             case _:
                 raise ValueError(f"unknown stage {request.stage}")
 

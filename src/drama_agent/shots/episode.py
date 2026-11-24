@@ -32,7 +32,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from ..design.prompts import plan_images
-from ..media import MediaStore
+from ..llm import GenerationRequest
+from ..media import MediaPart, MediaStore
 from ..models import ProductionPackage
 from ..models.images import GeneratedImage
 from ..models.package import utcnow
@@ -60,7 +61,17 @@ from .common import NotReady, _names, shot_of
 from .flow import approve_draw, start_prompt, start_take
 from .models import DEFAULT_DRAWS, MAX_DRAWS, MAX_ROUNDS, ShotPlan, ShotTake, ShotVideoPrompt
 from .picks import shot_picks
-from .plans import current_sub, plan_of
+from .plans import advisory, current_sub, plan_of, plan_problems, shot_lines
+from .speech_check import (
+    FRAME_SHORT_EDGE,
+    SPEECH_STAGE,
+    ClipCheck,
+    SpeechOutput,
+    sample_times,
+    speech_context,
+    speech_findings,
+    speech_instructions,
+)
 from .takes import plan_take
 from .video_prompt import approved_frames, fingerprint, prompt_state
 
@@ -69,6 +80,7 @@ from .video_prompt import approved_frames, fingerprint, prompt_state
 FAST_SHORT_EDGE = 512
 # The most takes of a shot a run renders.
 MAX_TAKES = 4
+MIN_STEPS, MAX_STEPS = 1, 100  # the route's bounds for num_inference_steps
 # The fast option's reference pictures are sent at most this big on the short edge: the
 # model works at its own size and the clip is FAST_SHORT_EDGE wide, so more pixels are
 # only upload. Full renders send the pictures as they are.
@@ -81,6 +93,15 @@ HoldPoint = Literal["approve", "render", "assemble"]
 MAX_EVENTS = 400
 CUT_RETRIES = 2  # new takes for a cut whose take failed before the run holds
 STEP_RETRIES = 1  # prompt writes and renders tried again before the run holds
+
+
+def _findings(clip: ShotClip | None) -> str:
+    """The speech check's failed findings of a clip, in one line."""
+    if clip is None or clip.check is None:
+        return ""
+    return "; ".join(i.finding for i in clip.check.items if not i.passed and i.finding) or (
+        clip.check.summary
+    )
 
 
 class RunSettings(BaseModel):
@@ -109,6 +130,12 @@ class RunSettings(BaseModel):
     # Takes of each shot's clip to render (each with its own seed); the newest finished
     # take is the one the episode is cut from.
     takes: int = Field(1, ge=1, le=MAX_TAKES)
+    # Check who is seen talking in each rendered take (speech_check.py); a take that puts
+    # a line on the wrong face is rejected and another take rendered.
+    check_speech: bool = True
+    # Sampling steps asked of the video model (None: the route's default, see
+    # DRAMA_VIDEO_STEPS); fewer render faster and rougher.
+    steps: int | None = Field(None, ge=MIN_STEPS, le=MAX_STEPS)
 
 
 class RunEvent(BaseModel):
@@ -373,6 +400,7 @@ class EpisodeRunner:
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         plans = {p.shot_id: p for p in repo.list_shot_plans(pkg.package_id, pkg.revision_id)}
         images = repo.list_images(pkg.package_id, pkg.revision_id)
+        scene = (images, plans)  # the scene inputs, read once for every shot below
         prompts = {p.shot_id: p for p in repo.list_video_prompts(pkg.package_id, pkg.revision_id)}
         clips = repo.list_shot_clips(pkg.package_id, pkg.revision_id)
         holds: dict[str, str] = {}
@@ -421,6 +449,16 @@ class EpisodeRunner:
                 self.frames.start_plan(plan, then={"sub_shot": 1, **self._options(s)})
                 run.event("Planning the cuts; the first keyframe follows.", shot_id=sid)
                 active += 1
+                continue
+
+            # A plan that isn't a clean spec for video (the planner was asked once to fix
+            # it and couldn't, or a hand-saved plan went stale) waits for a person.
+            pkey = f"{sid}:plan"
+            if (bad := [p for p in plan_problems(pkg, shot, plan) if not advisory(p)]) and (
+                not run.freed(pkey)
+            ):
+                complete = False
+                holds[pkey] = "the cut plan isn't a clean spec for video: " + "; ".join(bad)
                 continue
 
             pending = next(
@@ -495,7 +533,7 @@ class EpisodeRunner:
 
             # Every cut approved: the video prompt.
             vp = prompts.get(sid)
-            context, ids = self.frames.video_inputs(pkg, shot)
+            context, ids = self.frames.video_inputs(pkg, shot, takes=takes, scene=scene)
             state = prompt_state(vp, fingerprint(context, ids))
             pkey = f"{sid}:prompt"
             if state == "writing":
@@ -546,6 +584,11 @@ class EpisodeRunner:
                 if tries >= STEP_RETRIES and not run.freed(ckey):
                     holds[ckey] = f"the clip failed: {clip.error if clip else ''}"
                     continue
+            if cs == "rejected":
+                tries = run.retries.get(ckey, 0)
+                if tries >= STEP_RETRIES and not run.freed(ckey):
+                    holds[ckey] = "the take failed the speech check: " + _findings(clip)
+                    continue
             if inputs is None:
                 holds[ckey] = "the clip has no reference pictures to send"
                 continue
@@ -554,12 +597,17 @@ class EpisodeRunner:
             if cs == "failed":
                 run.retries[ckey] = run.retries.get(ckey, 0) + 1
                 run.event("The clip failed; rendering it again.", "warn", shot_id=sid)
+            elif cs == "rejected":
+                run.retries[ckey] = run.retries.get(ckey, 0) + 1
+                run.event("The take failed the speech check (" + _findings(clip) + "); "
+                          "rendering another take.", "warn", shot_id=sid)  # fmt: skip
             elif current_n:
                 run.event(f"Rendering take {current_n + 1} of {s.takes}.", shot_id=sid)
             else:
                 run.event("Rendering the clip." if cs == "none"
                           else "The clip is out of date; rendering it again.", shot_id=sid)  # fmt: skip
-            self.start_render(pkg, shot, run_id=run.run_id, fast=run.settings.fast)
+            self.start_render(pkg, shot, run_id=run.run_id, fast=run.settings.fast,
+                              check=run.settings.check_speech, steps=run.settings.steps)  # fmt: skip
             rendering += 1
 
         run.holds = holds
@@ -645,16 +693,21 @@ class EpisodeRunner:
         run_id: str | None = None,
         fast: bool = False,
         seed: int | None = None,
+        check: bool = True,
+        steps: int | None = None,
     ) -> ShotClip:
         """A new clip of the shot, rendered in the background (one at a time). `fast`
         renders it at a lower resolution with keyframes-only references; `seed` is the
-        take's seed (a seed the shot hasn't used when not given, so it is a new take)."""
+        take's seed (a seed the shot hasn't used when not given, so it is a new take);
+        `check` runs the speech check on it once rendered; `steps` are the sampling steps
+        asked of the model (None: its default)."""
         if seed is None:
             mine = shot_clips(self.repo.list_shot_clips(pkg.package_id, pkg.revision_id),
                               shot.shot_id)  # fmt: skip
             seed = next_seeds(mine, 1)[0]
         clip = ShotClip(package_id=pkg.package_id, revision_id=pkg.revision_id,
-                        shot_id=shot.shot_id, run_id=run_id, fast=fast, seed=seed)  # fmt: skip
+                        shot_id=shot.shot_id, run_id=run_id, fast=fast, seed=seed,
+                        check_speech=check, steps=steps)  # fmt: skip
         self.repo.save_shot_clip(clip)
         task = asyncio.create_task(self._render(clip.clip_id))
         self._renders[clip.clip_id] = task
@@ -708,7 +761,13 @@ class EpisodeRunner:
             self._reference_bytes, inputs.sent, FAST_REF_SHORT_EDGE if clip.fast else None
         )
         result = await self.video.generate(
-            inputs.prompt, inputs.duration_s, inputs.ratio, refs, inputs.short_edge, clip.seed
+            inputs.prompt,
+            inputs.duration_s,
+            inputs.ratio,
+            refs,
+            inputs.short_edge,
+            clip.seed,
+            clip.steps,
         )
         rel = f"clips/{pkg.package_id}/{clip.clip_id}.mp4"
         poster = f"clips/{pkg.package_id}/{clip.clip_id}.jpg"
@@ -730,8 +789,62 @@ class EpisodeRunner:
             result.model,
             result.task_id,
         )
-        clip.status, clip.error, clip.finished_at = "done", None, utcnow()
+        clip.finished_at = utcnow()
+        if clip.check_speech:  # still "rendering" to the board until the check is in
+            await self._check_speech(pkg, shot, plan, clip)
+        clip.status, clip.error = "done", None
         repo.save_shot_clip(clip)
+
+    async def _check_speech(
+        self, pkg: ProductionPackage, shot: Shot, plan: ShotPlan, clip: ShotClip
+    ) -> None:
+        """Who is seen talking in the rendered clip, against the plan (speech_check.py).
+        Never raises: a check that couldn't run leaves `check_error` and the take stands."""
+        if not clip.file:
+            return
+        names = _names(pkg)
+        lines = shot_lines(pkg, shot)
+        samples = sample_times(plan.sub_shots, lines)
+        faces: dict[str, int] = {}
+        media: list[MediaPart] = []
+        for r in clip.references:  # the faces sent with the clip identify the people
+            if r.kind != "face" or r.about not in names.values():
+                continue
+            who = next((c for c, n in names.items() if n == r.about), None)
+            found = self.frames._ref_file(r.ref_id, "thumb")
+            if who is None or who in faces or found is None or not found[0].is_file():
+                continue
+            faces[who] = len(media) + 1
+            media.append(MediaPart(label=f"<Picture {faces[who]}>", path=found[0], mime=found[1]))
+        context = speech_context(names, shot.character_ids, plan.sub_shots, lines, samples, faces)
+        root = self.media.path(f"clips/{pkg.package_id}/{clip.clip_id}_check")
+        try:
+            frames: list[MediaPart] = []
+            for index, times in samples:
+                for j, at in enumerate(times, 1):
+                    out = root / f"c{index}_{j}.jpg"
+                    await asyncio.to_thread(asm.frame_at, self.media.path(clip.file), at, out,
+                                            FRAME_SHORT_EDGE)  # fmt: skip
+                    frames.append(MediaPart(label=f"<Cut {index} frame {j}>", path=out))
+            request = GenerationRequest(
+                stage=SPEECH_STAGE,  # type: ignore[arg-type]
+                instructions=speech_instructions(),
+                context=context,
+                media=[*media, *frames],
+            )
+            out = await self.frames.text.generate(request, SpeechOutput)
+        except Exception as exc:
+            log.warning("speech check failed for %s", clip.clip_id, exc_info=True)
+            clip.check, clip.check_error = None, f"The speech check couldn't run: {str(exc)[:200]}"
+            return
+        items = speech_findings(out, context["cuts"])
+        clip.check = ClipCheck(
+            items=items, summary=out.summary.strip(),
+            passed=all(i.passed or i.severity == "minor" for i in items),
+            model=request.model or getattr(self.frames.text, "model_id", None),
+            checked_at=utcnow(), frames=len(frames),
+        )  # fmt: skip
+        clip.check_error = None
 
     def _reference_bytes(
         self, ids: list[str], short_edge: int | None = None
@@ -771,6 +884,7 @@ class EpisodeRunner:
         takes = repo.list_shot_takes(pkg.package_id, pkg.revision_id)
         plans = {p.shot_id: p for p in repo.list_shot_plans(pkg.package_id, pkg.revision_id)}
         images = repo.list_images(pkg.package_id, pkg.revision_id)
+        scene = (images, plans)  # the scene inputs, read once for every shot below
         prompts = {p.shot_id: p for p in repo.list_video_prompts(pkg.package_id, pkg.revision_id)}
         clips = repo.list_shot_clips(pkg.package_id, pkg.revision_id)
         names = _names(pkg)
@@ -788,7 +902,7 @@ class EpisodeRunner:
             vstate = "none"
             labels: dict[str, str] = {}
             if k == n and n:
-                context, ids = self.frames.video_inputs(pkg, shot)
+                context, ids = self.frames.video_inputs(pkg, shot, takes=takes, scene=scene)
                 vstate = prompt_state(vp, fingerprint(context, ids))
                 labels = picture_labels(context, ids)
             mine = shot_clips(clips, sid)
@@ -896,8 +1010,11 @@ def estimate(
     ids = {s.shot_id for s in shots}
     cut_s = [(t.finished_at - t.created_at).total_seconds() for t in takes
              if t.shot_id in ids and t.approved is not None and t.finished_at]  # fmt: skip
-    clip_s = [(c.finished_at - c.created_at).total_seconds() for c in clips
-              if c.shot_id in ids and c.status == "done" and c.finished_at]  # fmt: skip
+    # From when it was queued (a take made the newest by "Use" has its created_at moved
+    # forward: its render time is measured from when it began instead).
+    clip_s = [(c.finished_at - min(c.created_at, c.started_at or c.created_at)).total_seconds()
+              for c in clips if c.shot_id in ids and c.status == "done" and c.finished_at]  # fmt: skip
+    clip_s = [x for x in clip_s if x >= 0]
     per_cut = sum(cut_s) / len(cut_s) if cut_s else None
     per_clip = sum(clip_s) / len(clip_s) if clip_s else None
     remaining = None

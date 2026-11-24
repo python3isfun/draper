@@ -23,6 +23,7 @@ from ..models import ProductionPackage
 from ..models.package import utcnow
 from ..videogen import H3_RATIOS, clamp_seconds
 from .models import ShotPlan, ShotVideoPrompt
+from .speech_check import ClipCheck
 from .video_prompt import PIC
 
 ClipStatus = Literal["pending", "rendering", "done", "failed"]
@@ -74,6 +75,7 @@ class ShotClip(BaseModel):
     written_from: str = ""
     fast: bool = False  # low resolution, keyframes + faces only as references, to render faster
     seed: int | None = None  # the render's seed; another seed is another take of the shot
+    steps: int | None = None  # sampling steps asked of the model (None: its default)
     run_id: str | None = None  # the episode run that rendered it, if one did
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)  # queued
@@ -84,10 +86,22 @@ class ShotClip(BaseModel):
     width: int | None = None
     height: int | None = None
     media_s: float | None = None  # the file's actual length
+    # The speech check (speech_check.py): asked for at render time, its result once the
+    # clip is rendered, or why it couldn't run. A take that failed it is rejected unless a
+    # person accepts it ("Use" on the episode page).
+    check_speech: bool = True
+    check: ClipCheck | None = None
+    check_error: str | None = None
+    accepted: bool = False
 
     @property
     def busy(self) -> bool:
         return self.status in ("pending", "rendering")
+
+    @property
+    def rejected(self) -> bool:
+        """Rendered, but the speech check failed and nobody accepted it."""
+        return self.check is not None and not self.check.passed and not self.accepted
 
     @property
     def render_s(self) -> float | None:
@@ -179,7 +193,8 @@ def clip_print(
 
 
 def clip_state(clip: ShotClip | None, now: str | None) -> str:
-    """none, rendering, failed, current (rendered from the shot as it is now) or outdated.
+    """none, rendering, failed, rejected (by the speech check), current (rendered from the
+    shot as it is now) or outdated.
     `now` is the clip print the shot would be rendered with (None: it can't be rendered
     yet, so any finished clip is out of date)."""
     if clip is None:
@@ -188,14 +203,18 @@ def clip_state(clip: ShotClip | None, now: str | None) -> str:
         return "rendering"
     if clip.status == "failed":
         return "failed"
+    if clip.rejected:
+        return "rejected"
     return "current" if now is not None and clip.written_from == now else "outdated"
 
 
 def latest_clip(clips: list[ShotClip], shot_id: str) -> ShotClip | None:
     """The shot's newest clip: the one the episode is cut from (`use_clip` makes an older
-    take the newest)."""
+    take the newest). A take the speech check rejected is passed over while the shot has
+    another."""
     mine = [c for c in clips if c.shot_id == shot_id]
-    return max(mine, key=lambda c: c.created_at, default=None)
+    kept = [c for c in mine if not c.rejected] or mine
+    return max(kept, key=lambda c: c.created_at, default=None)
 
 
 def shot_clips(clips: list[ShotClip], shot_id: str) -> list[ShotClip]:
@@ -231,7 +250,7 @@ def clip_view(clip: ShotClip | None, state: str) -> dict[str, Any]:
         out |= clip.model_dump(mode="json", include={
             "clip_id", "status", "duration_s", "ratio", "model", "error", "created_at",
             "started_at", "finished_at", "run_id", "fast", "seed", "bytes", "width", "height",
-            "media_s"})  # fmt: skip
+            "media_s", "check", "check_error", "accepted", "steps"})  # fmt: skip
         out["render_s"] = clip.render_s
         out["queue_s"] = clip.queue_s
         out["has_file"] = bool(clip.file)

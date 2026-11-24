@@ -8,6 +8,7 @@ from drama_agent.models.request import JobOptions, JobRequest
 from drama_agent.pace import as_pace, planner_rules, storyboard_rules
 from drama_agent.pipeline.steps import ReviewStep, StoryboardStep
 from drama_agent.shot_frames import check_plan, make_sub_shots, plan_instructions, spread
+from drama_agent.shots.plans import OFF_SCREEN_LINE
 
 from .test_shot_frames import BODY, Board, TwoCuts, _specs, busiest, two_cuts, two_speakers
 
@@ -72,28 +73,29 @@ def _listening(package, shot, on_second):
     ], strict=False)  # fmt: skip
 
 
-def test_a_listener_held_through_someone_elses_line_is_flagged(package):
+def test_a_line_spoken_off_screen_while_someone_is_in_frame_is_refused(package):
     shot = two_speakers(package)  # Ross 1-6.18 s, Maya 8-11 s, in a 15 s clip
     subs = _listening(package, shot, "ch_ross")
-    [held] = [p for p in check_plan(package, shot, subs, "brisk") if p.startswith("a listener")]
-    assert held.startswith("a listener held 8 s in sub-shot 2 while Maya")
-    assert "at most 1.5 s" in held
-    assert any(p.startswith("a listener") for p in check_plan(package, shot, subs, "slow_burn"))
-    # Only with a pace (the planner's check), and never refused on a save.
-    assert not any(p.startswith("a listener") for p in check_plan(package, shot, subs))
+    [bad] = [p for p in check_plan(package, shot, subs, "brisk") if p.startswith(OFF_SCREEN_LINE)]
+    assert "Maya" in bad and "sub-shot 2" in bad and "Ross is in frame" in bad
+    assert "lip-syncs" in bad
+    # Whatever the pace, and refused on a save: H3 can't render it.
+    assert any(p.startswith(OFF_SCREEN_LINE) for p in check_plan(package, shot, subs))
     from drama_agent.shot_frames import advisory
 
-    assert advisory(held)
+    assert not advisory(bad)
     # The speaker on screen for her line is fine.
     ok = _listening(package, shot, "ch_maya")
-    assert not any(p.startswith("a listener") for p in check_plan(package, shot, ok, "brisk"))
+    assert not any(p.startswith(OFF_SCREEN_LINE) for p in check_plan(package, shot, ok, "brisk"))
 
 
-def test_a_silent_single_or_a_voice_from_outside_is_not_a_listener(package):
+def test_a_silent_single_or_a_voice_from_outside_is_not_refused(package):
     shot = two_speakers(package)
     silent = shot.model_copy(update={"dialogue_cues": shot.dialogue_cues[:1]})
     subs = _listening(package, silent, "ch_ross")
-    assert not any(p.startswith("a listener") for p in check_plan(package, silent, subs, "brisk"))
+    assert not any(
+        p.startswith(OFF_SCREEN_LINE) for p in check_plan(package, silent, subs, "brisk")
+    )
     # Maya's line as a voice from outside the shot (a phone): she isn't one of its people.
     away = shot.model_copy(update={"character_ids": ["ch_ross", "ch_jess"]})
     subs = make_sub_shots(package, away, [
@@ -102,7 +104,15 @@ def test_a_silent_single_or_a_voice_from_outside_is_not_a_listener(package):
         {"start_ms": 7000, "framing": "close-up", "action": "y", "people": ["ch_ross"],
          "placement": {"ch_ross": "left"}, "off_screen": {"ch_jess": "right"}},
     ], strict=False)  # fmt: skip
-    assert not any(p.startswith("a listener") for p in check_plan(package, away, subs, "brisk"))
+    assert not any(p.startswith(OFF_SCREEN_LINE) for p in check_plan(package, away, subs, "brisk"))
+    # An empty frame (an insert) while someone speaks is fine too: no face to lip-sync.
+    subs = make_sub_shots(package, shot, [
+        {"start_ms": 0, "framing": "wide", "action": "x", "people": shot.character_ids,
+         "placement": spread(shot.character_ids)},
+        {"start_ms": 7000, "framing": "insert of the letter", "action": "y", "people": [],
+         "off_screen": dict.fromkeys(shot.character_ids, "left")},
+    ], strict=False)  # fmt: skip
+    assert not any(p.startswith(OFF_SCREEN_LINE) for p in check_plan(package, shot, subs))
 
 
 def test_the_pace_is_chosen_with_the_story_and_changed_on_it(tmp_path):
@@ -217,8 +227,8 @@ def test_the_cut_plans_name_people_as_the_cast_sheet_does(package):
 
 
 class ListenerThenMidLine(TwoCuts):
-    """The first plan holds a listener through the speaker's line (advisory only); the
-    retry cuts in the middle of that line (a problem a save refuses)."""
+    """The first plan holds a listener through the speaker's line (refused: H3 would put the
+    line on the listener's face); the retry cuts in the middle of that line (refused too)."""
 
     async def generate(self, request, output_model):
         if request.stage != "shot_plan":
@@ -243,7 +253,7 @@ class ListenerThenMidLine(TwoCuts):
         ], notes=f"attempt {request.attempt}")  # fmt: skip
 
 
-def test_a_retry_for_a_listener_never_costs_a_cleaner_plan(tmp_path):
+def test_a_plan_that_holds_a_listener_through_a_line_is_sent_back_and_flagged(tmp_path):
     with Board(tmp_path, text=ListenerThenMidLine()) as b:
         b.design()
         shot = b.busiest()
@@ -252,8 +262,8 @@ def test_a_retry_for_a_listener_never_costs_a_cleaner_plan(tmp_path):
         s = b.wait() and b.shot(sid)
         assert len(b.calls("shot_plan")) == 2  # the listener sent it back once
         assert s["plan"]["notes"] == "attempt 0"  # the retry cut mid-line: the first stands
-        # The board flags the listener (a judgement, so the plan is kept).
-        assert any(p.startswith("a listener held") for p in s["plan"]["problems"])
+        # The board flags the off-screen line; the plan stays until a person fixes it.
+        assert any(p.startswith(OFF_SCREEN_LINE) for p in s["plan"]["problems"])
 
 
 def test_the_pace_api_takes_any_spelling(tmp_path):

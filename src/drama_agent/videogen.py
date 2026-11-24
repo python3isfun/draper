@@ -71,6 +71,7 @@ class VideoClient(Protocol):
         references: list[VideoReference],
         short_edge: int | None = None,
         seed: int | None = None,
+        steps: int | None = None,
     ) -> VideoResult: ...
 
 
@@ -124,6 +125,7 @@ class MiniMaxVideoClient:
         references: list[VideoReference],
         short_edge: int | None = None,
         seed: int | None = None,
+        steps: int | None = None,
     ) -> dict:
         content: list[dict] = [{"type": "text", "text": prompt}]
         for r in references:
@@ -137,8 +139,8 @@ class MiniMaxVideoClient:
             "duration": max(MIN_CLIP_S, min(MAX_CLIP_S, int(duration_s))),
             "resolution": f"{short_edge}P" if short_edge else self.resolution,
             "ratio": ratio if ratio in H3_RATIOS else "adaptive",
-            # MiniMax's API has no documented seed: takes differ by the model's own
-            # randomness there; `seed` is honored on the MCPHub route.
+            # MiniMax's API has no documented seed or step count: takes differ by the
+            # model's own randomness there; both are honored on the MCPHub route.
             "generate_audio": True,
         }
 
@@ -150,6 +152,7 @@ class MiniMaxVideoClient:
         references: list[VideoReference],
         short_edge: int | None = None,
         seed: int | None = None,
+        steps: int | None = None,
     ) -> VideoResult:
         if len(references) > MAX_VIDEO_REFERENCES:
             raise VideoGenError(f"at most {MAX_VIDEO_REFERENCES} reference pictures")
@@ -157,7 +160,7 @@ class MiniMaxVideoClient:
             raise VideoGenError(f"the prompt is over {MAX_PROMPT_CHARS} characters")
         if not references:
             raise VideoGenError("a clip needs at least one reference picture")
-        body = self.body(prompt, duration_s, ratio, references, short_edge, seed)
+        body = self.body(prompt, duration_s, ratio, references, short_edge, seed, steps)
         task_id = await self._create(body)
         url = await self._wait(task_id)
         return VideoResult(await self._download(url), model=self.model_id, task_id=task_id)
@@ -232,6 +235,7 @@ class MCPHubVideoClient(MiniMaxVideoClient):
         short_edge: int = 768,
         *,
         seed: int = 1,
+        steps: int | None = None,
         poll_s: float = 15.0,
         timeout_s: float = 3600.0,
         max_retries: int = 2,
@@ -243,6 +247,7 @@ class MCPHubVideoClient(MiniMaxVideoClient):
                          transport=transport)  # fmt: skip
         self.short_edge = short_edge
         self.seed = seed
+        self.steps = steps  # None: the route's default (num_inference_steps, 1 to 100)
         self._http.headers.pop("Authorization", None)
         self._http.headers["X-API-Key"] = api_key
 
@@ -254,15 +259,18 @@ class MCPHubVideoClient(MiniMaxVideoClient):
         references: list[VideoReference],
         short_edge: int | None = None,
         seed: int | None = None,
+        steps: int | None = None,
     ) -> dict:
         conditions = []
         for r in references:
             fmt = r.mime.split("/", 1)[-1].lower().replace("jpg", "jpeg")
             uri = f"data:image/{fmt};base64,{base64.b64encode(r.data).decode()}"
             conditions.append({"type": "image", "role": "reference", "uri": uri})
+        steps = self.steps if steps is None else steps
         return {
             "task": "ref2va",
             "seed": self.seed if seed is None else seed,
+            **({"num_inference_steps": steps} if steps is not None else {}),
             "prompt": prompt,
             "target": {
                 "short_edge": short_edge or self.short_edge,
@@ -368,10 +376,11 @@ class FixtureVideoClient:
         references: list[VideoReference],
         short_edge: int | None = None,
         seed: int | None = None,
+        steps: int | None = None,
     ) -> VideoResult:
         self.calls.append({"prompt": prompt, "duration_s": duration_s, "ratio": ratio,
                            "references": [r.name for r in references],
-                           "short_edge": short_edge, "seed": seed})  # fmt: skip
+                           "short_edge": short_edge, "seed": seed, "steps": steps})  # fmt: skip
         if not references:
             raise VideoGenError("a clip needs at least one reference picture")
         if not ffmpeg_available():
@@ -388,7 +397,8 @@ def video_client_from_env() -> VideoClient:
     """DRAMA_VIDEO_CLIENT selects the backend: 'fixture' (default: ffmpeg-made coloured
     clips), 'mcphub' (MiniMax-H3 Ref2VA on MCPHub's GPU route: MCPHUB_KEY; MCPHUB_VIDEO_URL, default https://api.mcphub.com;
     MCPHUB_VIDEO_MODEL, default minimax-h3-ref2va; DRAMA_VIDEO_SHORT_EDGE, default 768;
-    DRAMA_VIDEO_SEED) or 'minimax' (MINIMAX_API_KEY; MINIMAX_VIDEO_URL for a gateway, default
+    DRAMA_VIDEO_SEED; DRAMA_VIDEO_STEPS, the sampling steps, default the route's own) or
+    'minimax' (MINIMAX_API_KEY; MINIMAX_VIDEO_URL for a gateway, default
     https://api.minimax.io; MINIMAX_VIDEO_MODEL, default MiniMax-H3; DRAMA_VIDEO_RESOLUTION,
     default 768P). Real renders are opt-in, like the text and image clients."""
     kind = os.environ.get("DRAMA_VIDEO_CLIENT", "fixture").lower()
@@ -404,6 +414,9 @@ def video_client_from_env() -> VideoClient:
             model=os.environ.get("MCPHUB_VIDEO_MODEL", "minimax-h3-ref2va"),
             short_edge=int(os.environ.get("DRAMA_VIDEO_SHORT_EDGE", "768")),
             seed=int(os.environ.get("DRAMA_VIDEO_SEED", "1")),
+            steps=int(os.environ["DRAMA_VIDEO_STEPS"])
+            if os.environ.get("DRAMA_VIDEO_STEPS")
+            else None,
             poll_s=float(os.environ.get("DRAMA_VIDEO_POLL_S", "15")),
         )
     if kind == "minimax":

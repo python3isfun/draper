@@ -20,7 +20,15 @@ from ..shots.clips import (
     shot_clips,
 )
 from ..shots.common import shot_of
-from ..shots.episode import MAX_TAKES, EpisodeRun, EpisodeRunner, RunSettings, episode_shots
+from ..shots.episode import (
+    MAX_STEPS,
+    MAX_TAKES,
+    MIN_STEPS,
+    EpisodeRun,
+    EpisodeRunner,
+    RunSettings,
+    episode_shots,
+)
 from ..shots.plans import plan_of
 from ..shots.video_prompt import fingerprint, prompt_state
 
@@ -42,6 +50,8 @@ class SettingsPatch(BaseModel):
     parallel: int | None = Field(None, ge=1, le=6)
     fast: bool | None = None
     takes: int | None = Field(None, ge=1, le=MAX_TAKES)
+    check_speech: bool | None = None
+    steps: int | None = Field(None, ge=MIN_STEPS, le=MAX_STEPS)
 
 
 class ReleaseRequest(BaseModel):
@@ -60,6 +70,8 @@ class RenderRequest(BaseModel):
     fast: bool = False
     takes: int = Field(1, ge=1, le=MAX_TAKES_IN_FLIGHT)  # how many takes to render
     seed: int | None = Field(None, ge=0)  # the first take's seed; else unused seeds
+    check: bool = True  # run the speech check on the rendered take
+    steps: int | None = Field(None, ge=MIN_STEPS, le=MAX_STEPS)  # sampling steps (None: default)
 
 
 class EpisodeItem(BaseModel):
@@ -280,18 +292,20 @@ def register(
                 409, f"{shot_id} already has {busy} take{'s' if busy != 1 else ''} rendering; "
                 f"at most {MAX_TAKES_IN_FLIGHT} at a time"
             )  # fmt: skip
-        return [episodes.start_render(pkg, shot, fast=req.fast, seed=seed)
+        return [episodes.start_render(pkg, shot, fast=req.fast, seed=seed, check=req.check,
+                                      steps=req.steps)
                 for seed in next_seeds(mine, req.takes, req.seed)]  # fmt: skip
 
     @app.post("/v1/shot-clips/{clip_id}/use", response_model=ShotClip)
     async def use_clip(clip_id: str) -> ShotClip:
-        """Make this finished take the shot's newest clip, so the episode is cut from it."""
+        """Make this finished take the shot's newest clip, so the episode is cut from it
+        (a take the speech check rejected is accepted by this)."""
         clip = repo.get_shot_clip(clip_id)
         if clip is None:
             raise HTTPException(404, "clip not found")
         if not clip.file:
             raise HTTPException(409, "the clip has no video to use")
-        clip.created_at = utcnow()
+        clip.created_at, clip.accepted = utcnow(), True
         repo.save_shot_clip(clip)
         return clip
 

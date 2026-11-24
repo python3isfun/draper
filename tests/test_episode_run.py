@@ -14,6 +14,7 @@ from drama_agent.fixtures.sample import SAMPLE_SEED
 from drama_agent.imagegen import FixtureImageClient
 from drama_agent.llm import FixtureModelClient
 from drama_agent.media import MediaStore
+from drama_agent.models.package import utcnow
 from drama_agent.shot_frames import ShotFrameRunner
 from drama_agent.shots.clips import ShotClip, clip_prompt, clip_state
 from drama_agent.shots.episode import EpisodeRun, EpisodeRunner, RunSettings, episode_shots
@@ -316,6 +317,91 @@ def test_skipped_shots_are_left_out_and_one_run_per_episode(tmp_path):
         assert r.status_code == 200 and r.json()["settings"]["draws"] == 1
 
 
+@needs_ffmpeg
+def test_a_take_that_puts_a_line_on_the_wrong_face_is_rejected_and_rendered_again(tmp_path):
+    """The speech check looks at every rendered take; one that has the wrong person
+    talking is rejected, another take rendered, and the episode cut from the good one."""
+    with Studio(tmp_path) as s:
+        seen: list[int] = []
+
+        def wrong_face(out, attempt):
+            seen.append(attempt)
+            if len(seen) == 1:  # the first take checked: someone else is talking
+                out.cuts[0].speaking = ["someone else"]
+            return out
+
+        s.text.faults["speech_check"] = wrong_face
+        s.start(render=True, assemble=False)
+        run = s.wait(done, what="the run finishing")
+        assert len(seen) == run["counts"]["shots"] + 1  # every take checked, one of them twice
+        assert len(s.video.calls) == run["counts"]["shots"] + 1
+        bad = next(x for x in run["shots"] if len(x["clips"]) == 2)
+        newest, first = bad["clips"]
+        assert first["state"] == "rejected" and first["check"]["passed"] is False
+        assert first["has_file"] and first["status"] == "done"
+        finding = next(
+            i for i in first["check"]["items"] if not i["passed"] and i["severity"] == "major"
+        )
+        assert finding["finding"].startswith("someone else is seen speaking")
+        assert newest["state"] == "current" and newest["check"]["passed"] is True
+        assert newest["seed"] != first["seed"]
+        assert bad["clip"]["clip_id"] == newest["clip_id"]  # the episode is cut from the good one
+        assert any("failed the speech check" in e["text"] for e in run["events"])
+        # Every other take passed and says so.
+        others = [c for x in run["shots"] for c in x["clips"] if c["clip_id"] != first["clip_id"]]
+        assert all(c["check"]["passed"] and c["check"]["frames"] > 0 for c in others)
+        # A person may accept the rejected take anyway: it is then the newest and current.
+        r = s.http.post(f"/v1/shot-clips/{first['clip_id']}/use", json={})
+        assert r.status_code == 200 and r.json()["accepted"] is True
+        row = next(x for x in s.run()["shots"] if x["shot_id"] == bad["shot_id"])
+        assert row["clip"]["clip_id"] == first["clip_id"] and row["clip"]["state"] == "current"
+        # Off, nothing is checked.
+        before = len(seen)
+        r = s.http.post(f"/v1/drama-packages/{s.pid}/clips/{bad['shot_id']}", json={"check": False})
+        assert r.status_code == 202, r.text
+        s.wait(lambda run: all(not c["status"] in ("pending", "rendering")
+                               for x in run["shots"] for c in x["clips"]), what="the render")  # fmt: skip
+        assert len(seen) == before
+        row = next(x for x in s.run()["shots"] if x["shot_id"] == bad["shot_id"])
+        assert row["clip"]["check"] is None and row["clip"]["state"] == "current"
+
+
+def test_a_run_holds_a_shot_whose_plan_puts_a_line_on_the_wrong_face(tmp_path):
+    """A plan the planner couldn't clean (a listener held through someone else's line)
+    waits for a person instead of being drawn and rendered through."""
+    from drama_agent.shots.plans import shot_lines
+
+    with Studio(tmp_path) as s:
+        shot = next(x for x in s.pkg.shot_list if len(x.character_ids) >= 2
+                    and shot_lines(s.pkg, x))  # fmt: skip
+        [line, *_] = shot_lines(s.pkg, shot)
+        listener = next(c for c in shot.character_ids if c != line["speaker_id"])
+        clip = -(-shot.duration_ms // 1000) * 1000
+        plan = ShotPlan(package_id=s.pid, revision_id=s.pkg.revision_id, shot_id=shot.shot_id,
+                        source="user", sub_shots=[
+                            SubShot(index=1, start_ms=0, end_ms=clip, framing="close-up",
+                                    action="listens", people=[listener],
+                                    placement={listener: "left"},
+                                    off_screen={line["speaker_id"]: "right"})])  # fmt: skip
+        s.repo.save_shot_plan(plan)
+        s.start(render=False, assemble=False)
+        run = s.wait(lambda r: f"{shot.shot_id}:plan" in r["holds"], what="the plan hold")
+        why = run["holds"][f"{shot.shot_id}:plan"]
+        assert why.startswith("the cut plan isn't a clean spec for video: an off-screen line")
+        held = next(x for x in run["shots"] if x["shot_id"] == shot.shot_id)
+        assert held["stage"] == "waiting"
+        assert all(k["take_id"] is None for k in held["keyframes"])  # nothing drawn
+        # A person fixes the plan (the speaker in frame): the run goes on with the shot.
+        r = s.http.post(f"/v1/drama-packages/{s.pid}/keyframes/{shot.shot_id}/plan", json={
+            "sub_shots": [{"start_ms": 0, "framing": "two-shot", "action": "talks",
+                           "people": shot.character_ids,
+                           "placement": {c: ["left", "right", "center"][i % 3]
+                                         for i, c in enumerate(shot.character_ids)}}]})  # fmt: skip
+        assert r.status_code == 202, r.text
+        run = s.wait(done, what="the run finishing after the plan was fixed")
+        assert not run["holds"]
+
+
 def test_a_clip_prompt_numbers_the_pictures_sent_and_drops_the_rest(package):
     shot = package.shot_list[0]
     half = shot.duration_ms // 2
@@ -372,6 +458,44 @@ def test_a_reference_picture_is_shrunk_to_the_short_edge_asked(tmp_path):
     assert (info["width"], info["height"]) == (768, 1360)
     # Already small enough: sent as it is.
     assert asm.shrink_picture(small, 768) is None
+
+
+@needs_ffmpeg
+def test_the_steps_setting_reaches_the_video_model_and_the_take(tmp_path):
+    with Studio(tmp_path) as s:
+        s.start(render=True, assemble=False, steps=14)
+        run = s.wait(done, what="the run finishing")
+        assert run["settings"]["steps"] == 14
+        assert all(c["steps"] == 14 for c in s.video.calls)
+        assert all(c["steps"] == 14 for x in run["shots"] for c in x["clips"])
+        # A render by hand says its own; left out, the model's default (None).
+        shot = run["shots"][0]["shot_id"]
+        r = s.http.post(f"/v1/drama-packages/{s.pid}/clips/{shot}", json={"steps": 8})
+        assert r.status_code == 202 and r.json()[0]["steps"] == 8
+        r = s.http.post(f"/v1/drama-packages/{s.pid}/clips/{shot}", json={"steps": 101})
+        assert r.status_code == 422
+        s.wait(lambda run: all(c["status"] not in ("pending", "rendering")
+                               for x in run["shots"] for c in x["clips"]), what="the render")  # fmt: skip
+        assert s.video.calls[-1]["steps"] == 8
+        r = s.http.post(f"/v1/drama-packages/{s.pid}/clips/{shot}", json={})
+        assert r.status_code == 202 and r.json()[0]["steps"] is None
+
+
+def test_the_estimate_survives_a_take_made_the_newest(package):
+    """ "Use" moves a take's created_at forward; the estimate measures it from its start."""
+    from datetime import timedelta
+
+    from drama_agent.shots.episode import estimate
+
+    shot = package.shot_list[0]
+    t0 = utcnow()
+    used = ShotClip(package_id=package.package_id, revision_id=package.revision_id,
+                    shot_id=shot.shot_id, status="done", created_at=t0 + timedelta(hours=1),
+                    started_at=t0, finished_at=t0 + timedelta(minutes=5))  # fmt: skip
+    run = EpisodeRun(package_id=package.package_id, revision_id=package.revision_id,
+                     episode_id=package.episodes[0].episode_id, created_at=t0)  # fmt: skip
+    out = estimate(run, [shot], [], [used], 0, 3)
+    assert out["per_clip_s"] == 300 and out["remaining_s"] == 900
 
 
 def test_a_clip_is_current_only_for_the_print_it_was_rendered_from():

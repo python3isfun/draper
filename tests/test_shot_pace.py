@@ -56,16 +56,17 @@ def test_the_planner_is_told_the_cut_count():
     assert cut_count_problem([1, 2], 2) is None and cut_count_problem([1], None) is None
 
 
-def test_the_shots_own_pace_judges_its_listener(package):
+def test_a_listener_held_through_a_line_is_refused_at_any_pace(package):
+    from drama_agent.shots.plans import OFF_SCREEN_LINE
+
     shot = two_speakers(package)  # a listener held 8 s while Maya speaks
     subs = _listening(package, shot, "ch_ross")
     plan = ShotPlan(package_id=package.package_id, revision_id=package.revision_id,
                     shot_id=shot.shot_id, source="model", sub_shots=subs)  # fmt: skip
-    held = [p for p in plan_problems(package, shot, plan, "brisk") if p.startswith("a listener")]
-    assert held and "at most 1.5 s" in held[0]
+    bad = [p for p in plan_problems(package, shot, plan, "brisk") if p.startswith(OFF_SCREEN_LINE)]
+    assert bad and "Maya" in bad[0]
     slow = plan.model_copy(update={"pace": "slow_burn"})
-    held = [p for p in plan_problems(package, shot, slow, "brisk") if p.startswith("a listener")]
-    assert held and "at most 4 s" in held[0]
+    assert [p for p in plan_problems(package, shot, slow, "brisk") if p.startswith(OFF_SCREEN_LINE)]
 
 
 def test_the_specs_say_each_shots_pace(package):
