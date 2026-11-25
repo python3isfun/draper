@@ -16,6 +16,7 @@ from ..models import (
     SourceAsset,
 )
 from ..pipeline.orchestrator import new_id
+from ..templates import StoryTemplate, get_template, list_templates
 from ..worker import pause_job, resume_job, retry_job
 from .schemas import (
     OUTPUT_TAIL_CHARS,
@@ -58,6 +59,18 @@ def register(app: FastAPI, ctx: Any) -> None:
             )
         return out
 
+    @app.get("/v1/templates", response_model=list[StoryTemplate])
+    async def story_templates() -> list[StoryTemplate]:
+        """Story templates a new story can follow (docs/templates.md), by name."""
+        return list_templates()
+
+    @app.get("/v1/templates/{template_id}", response_model=StoryTemplate)
+    async def story_template(template_id: str) -> StoryTemplate:
+        t = get_template(template_id)
+        if t is None:
+            raise HTTPException(404, "no such story template")
+        return t
+
     @app.post("/v1/drama-jobs", status_code=202, response_model=JobCreated)
     async def create_job(req: JobRequest) -> JobCreated:
         if (req.options.language or "en-US").lower() not in ("en-us", "en"):
@@ -80,6 +93,13 @@ def register(app: FastAPI, ctx: Any) -> None:
             if src.type in ("image", "video") and kind != src.type:
                 raise HTTPException(
                     422, f"sources[{i}] is type {src.type} but {src.asset_id} is a {kind}"
+                )
+        if (tid := req.options.template_id) is not None:
+            if get_template(tid) is None:
+                raise HTTPException(422, f"unknown story template {tid}")
+            if req.options.reference_mode == "adaptation":
+                raise HTTPException(
+                    422, "a story template is for new stories: use inspiration mode with it"
                 )
         job = Job(job_id=new_id("job"), request=req)
         repo.save_job(job)

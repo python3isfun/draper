@@ -100,6 +100,9 @@ class JobOptions(BaseModel):
     # How the storyboard and cut plans keep the clips moving (pace.py); jobs stored before
     # it had none and are brisk.
     pace: Pace = DEFAULT_PACE
+    # A story template (templates/<id>.json, docs/templates.md): the pattern the story
+    # follows, learned from an existing title. Inspiration mode only.
+    template_id: str | None = None
     variants: int = Field(default=1, ge=1)
     # Automatic revision attempts per stage (spec section 8 suggests 2).
     revision_budget_per_stage: int = Field(default=2, ge=0, le=5)

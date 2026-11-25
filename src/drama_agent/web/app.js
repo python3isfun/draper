@@ -502,6 +502,64 @@ function uploadFile(file, onProgress, onSent) {
   });
 }
 
+// Story templates (docs/templates.md): the pattern a new story follows, learned from an
+// existing title. Choosing one fills genre, audience (when empty) and pace from it.
+const templates = { list: [], error: "" };
+
+async function loadTemplates() {
+  try {
+    templates.list = await api("/v1/templates");
+  } catch (e) {
+    templates.error = e.message;
+  }
+  const select = $("#new-job select[name=template_id]");
+  const keep = select.value;
+  select.replaceChildren(select.options[0], ...templates.list.map((t) =>
+    h("option", { value: t.template_id, selected: t.template_id === keep }, `${t.name} (${t.genre})`)));
+  renderTemplateCard();
+}
+
+function renderTemplateCard() {
+  const form = $("#new-job");
+  const card = $("#template-card");
+  const adapting = form.elements.reference_mode.value === "adaptation";
+  const select = form.elements.template_id;
+  select.disabled = adapting;
+  if (adapting) select.value = "";
+  const t = templates.list.find((x) => x.template_id === select.value);
+  if (!t) {
+    card.replaceChildren(adapting
+      ? h("p", { class: "muted" }, "Templates are for new stories: adaptation keeps the source's own shape.")
+      : templates.error ? h("p", { class: "form-error" }, `Couldn't load templates: ${templates.error}`)
+      : !templates.list.length ? h("p", { class: "muted" }, "No templates yet. Learn one with python -m drama_agent.templates learn \"<title>\".")
+      : "");
+    return;
+  }
+  const from = t.learned_from;
+  card.replaceChildren(
+    h("p", {}, h("strong", {}, t.summary)),
+    h("dl", { class: "template-facts" },
+      h("dt", {}, "Hook"), h("dd", {}, t.hook),
+      h("dt", {}, "Shape"), h("dd", {}, t.premise_pattern),
+      h("dt", {}, "Roles"), h("dd", {}, t.roles.map((r) => r.role).join(" · ")),
+      h("dt", {}, "Look"), h("dd", {}, `${t.look.color_and_light}; ${t.look.camera_and_framing}`),
+      h("dt", {}, "Pace"), h("dd", {}, `${t.pace.replace("_", " ")}: ${t.pacing_notes}`)),
+    h("p", { class: "muted" }, `Learned from ${from.title}${from.year ? ` (${from.year})` : ""}: its structure and craft only. Your story, people, places and lines stay your own; its names and signature scenes are kept out.`));
+}
+
+$("#new-job select[name=template_id]").addEventListener("change", (e) => {
+  const form = $("#new-job");
+  const t = templates.list.find((x) => x.template_id === e.target.value);
+  if (t) {
+    if (!form.elements.genre.value.trim()) form.elements.genre.value = t.genre;
+    if (!form.elements.audience.value.trim()) form.elements.audience.value = t.audience;
+    form.elements.pace.value = t.pace;
+  }
+  renderTemplateCard();
+});
+$("#new-job select[name=reference_mode]").addEventListener("change", renderTemplateCard);
+loadTemplates();
+
 $("#new-job").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const form = ev.currentTarget;
@@ -544,6 +602,7 @@ $("#new-job").addEventListener("submit", async (ev) => {
         reference_mode: f.get("reference_mode"),
         content_rating: f.get("content_rating"),
         pace: f.get("pace"),
+        template_id: f.get("template_id") || null,
         genre: f.get("genre").trim() || null,
         audience: f.get("audience").trim() || null,
       },

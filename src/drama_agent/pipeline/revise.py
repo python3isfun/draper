@@ -497,7 +497,7 @@ class ReviseRunner:
                         step.directive,
                         step.rules(state.request),
                         REVISE_RULES,
-                        mode_rules(state.request),
+                        mode_rules(state.request, step.name),
                         OUTPUT_RULES,
                     )
                     if p

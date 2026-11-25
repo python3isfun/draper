@@ -34,6 +34,13 @@ from ..models.package import STAGE_GROUPS, StageName
 from ..pace import rule as pace_rule
 from ..pace import storyboard_rules
 from ..prompts import ORCHESTRATOR_PROMPT_VERSION
+from ..templates import (
+    TEMPLATE_RULES_VERSION,
+    StoryTemplate,
+    get_template,
+    originality_issues,
+    template_rules,
+)
 from ..validation import PackageIndex
 from ..validation import hard_checks as hc
 from ..validation.prose import entity_names, find_prose_leaks, normalize_prose
@@ -185,6 +192,14 @@ class PipelineState:
                         if self.request.options.reference_mode == "adaptation"
                         else {}
                     ),
+                    **(
+                        {
+                            "template_rules": TEMPLATE_RULES_VERSION,
+                            f"template:{t.template_id}": str(t.version),
+                        }
+                        if (t := job_template(self.request)) is not None
+                        else {}
+                    ),
                 },
             ),
             qa_report=self.qa_report,
@@ -321,9 +336,38 @@ ADAPTATION_RULES = (
 )
 
 
-def mode_rules(request: JobRequest) -> str:
-    """Instructions that depend on the request's options (empty when none apply)."""
-    return ADAPTATION_RULES if request.options.reference_mode == "adaptation" else ""
+def job_template(request: JobRequest) -> StoryTemplate | None:
+    """The story template the job was started from (docs/templates.md), if any. A template
+    whose file is gone is logged and the job goes on without it."""
+    tid = request.options.template_id
+    if not tid:
+        return None
+    t = get_template(tid)
+    if t is None:
+        log.warning("story template %s not found: the job goes on without it", tid)
+    return t
+
+
+def mode_rules(request: JobRequest, stage: str | None = None) -> str:
+    """Instructions that depend on the request's options (empty when none apply): the
+    adaptation rules, and the story template's part for this step."""
+    parts = []
+    if request.options.reference_mode == "adaptation":
+        parts.append(ADAPTATION_RULES)
+    if (t := job_template(request)) is not None:
+        parts.append(template_rules(t, stage))
+    return "\n\n".join(parts)
+
+
+def template_originality(request: JobRequest, object_id: str, obj: BaseModel | list) -> list[Issue]:
+    """The template's source specifics (its source's names, catchphrases, signature scenes)
+    must not reach the story: each one found is an issue the step repairs."""
+    t = job_template(request)
+    if t is None:
+        return []
+    items = obj if isinstance(obj, list) else [obj]
+    text = " ".join(x.model_dump_json() for x in items)
+    return originality_issues(t, object_id, text)
 
 
 def missing_must_keep(request: JobRequest, brief: SourceBrief) -> list[Issue]:
@@ -463,6 +507,7 @@ class OutlineStep(Step):
         idx = PackageIndex.build(pkg)
         issues += hc.check_entity_keys(pkg, idx, state.request.options)
         issues += find_prose_leaks(bible)
+        issues += template_originality(state.request, "story_bible", bible)
         return issues
 
 
@@ -501,6 +546,7 @@ class ScriptStep(Step):
             + hc.check_entity_keys(pkg, idx, opts)
             + hc.check_intimacy(pkg, idx, opts)
             + find_prose_leaks(pkg.episodes)
+            + template_originality(state.request, "episodes", pkg.episodes)
         )
 
 

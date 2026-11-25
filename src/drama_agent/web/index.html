@@ -50,6 +50,14 @@
           <textarea name="text" rows="4"
             placeholder="A young woman about to lose her bookstore discovers that the old man who comes to collect the rent is the father who disappeared years ago."></textarea>
         </label>
+        <!-- Story templates (docs/templates.md): a pattern learned from an existing title. -->
+        <div class="field" id="template-field">
+          <span>Template <span class="muted">(optional)</span></span>
+          <select name="template_id" aria-describedby="template-card">
+            <option value="">None: the story finds its own shape</option>
+          </select>
+          <div id="template-card" class="template-card small"></div>
+        </div>
         <div class="field">
           <span>Images or videos <span class="muted">(optional)</span></span>
           <label class="dropzone" id="dropzone">

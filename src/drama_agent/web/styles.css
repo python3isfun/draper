@@ -1037,3 +1037,12 @@ label.update-step-head { cursor: pointer; margin: 0; }
 .ep-stats-table { border-collapse: collapse; font-size: 11px; margin-top: 2px; }
 .ep-stats-table td { padding: 1px 6px 1px 0; vertical-align: top; }
 .ep-stats-table td:first-child { white-space: nowrap; }
+
+/* The new-story form's template card (docs/templates.md). */
+.template-card:empty { display: none; }
+.template-card { margin-top: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); }
+.template-card p { margin: 0 0 6px; }
+.template-card p:last-child { margin-bottom: 0; }
+.template-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; margin: 0 0 6px; }
+.template-facts dt { color: var(--muted); }
+.template-facts dd { margin: 0; min-width: 0; }

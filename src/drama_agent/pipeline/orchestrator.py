@@ -178,7 +178,7 @@ class Orchestrator:
                             self.base_prompt,
                             step.directive,
                             step.rules(state.request),
-                            mode_rules(state.request),
+                            mode_rules(state.request, step.name),
                             OUTPUT_RULES,
                         )
                         if p
