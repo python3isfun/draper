@@ -1284,15 +1284,18 @@ class SqliteRepository:
         self._exec("DELETE FROM shot_clips WHERE clip_id = ?", (clip_id,))
 
     def fail_unfinished_shot_clips(self, error: str) -> int:
+        clips = self.list_unfinished_shot_clips()
+        for c in clips:
+            c.status, c.error = "failed", error
+            self.save_shot_clip(c)
+        return len(clips)
+
+    def list_unfinished_shot_clips(self) -> list[ShotClip]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT data FROM shot_clips WHERE status IN ('pending', 'rendering')"
             ).fetchall()
-        for (raw,) in rows:
-            c = ShotClip.model_validate_json(raw)
-            c.status, c.error = "failed", error
-            self.save_shot_clip(c)
-        return len(rows)
+        return [ShotClip.model_validate_json(raw) for (raw,) in rows]
 
     def fail_unfinished_shot_takes(self, error: str) -> int:
         with self._lock:

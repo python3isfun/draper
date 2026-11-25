@@ -22,6 +22,7 @@ import logging
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -72,7 +73,13 @@ class VideoClient(Protocol):
         short_edge: int | None = None,
         seed: int | None = None,
         steps: int | None = None,
+        on_submit: Callable[[str], None] | None = None,
     ) -> VideoResult: ...
+
+    async def cancel(self, task_id: str) -> bool:
+        """Drop a job the service is still running (after a restart orphaned it): True when
+        the service dropped it."""
+        ...
 
 
 def clamp_seconds(ms: int) -> int:
@@ -153,6 +160,7 @@ class MiniMaxVideoClient:
         short_edge: int | None = None,
         seed: int | None = None,
         steps: int | None = None,
+        on_submit: Callable[[str], None] | None = None,
     ) -> VideoResult:
         if len(references) > MAX_VIDEO_REFERENCES:
             raise VideoGenError(f"at most {MAX_VIDEO_REFERENCES} reference pictures")
@@ -162,8 +170,13 @@ class MiniMaxVideoClient:
             raise VideoGenError("a clip needs at least one reference picture")
         body = self.body(prompt, duration_s, ratio, references, short_edge, seed, steps)
         task_id = await self._create(body)
+        if on_submit is not None:  # the caller keeps the id: a restart can still cancel it
+            on_submit(task_id)
         url = await self._wait(task_id)
         return VideoResult(await self._download(url), model=self.model_id, task_id=task_id)
+
+    async def cancel(self, task_id: str) -> bool:
+        return False  # MiniMax's API documents no cancel
 
     async def _create(self, body: dict) -> str:
         last = ""
@@ -280,6 +293,16 @@ class MCPHubVideoClient(MiniMaxVideoClient):
             "conditions": conditions,
         }
 
+    async def cancel(self, task_id: str) -> bool:
+        """DELETE the job: MCPHub counts a job in flight until it ends, so a job a restart
+        stopped waiting on would block the key's quota for as long as it runs."""
+        try:
+            resp = await self._http.delete(f"/api/v3/gpu-videos/jobs/{task_id}")
+        except httpx.TransportError as exc:
+            log.info("video job %s: cancel failed (%r)", task_id, exc)
+            return False
+        return resp.status_code == 200
+
     async def _create(self, body: dict) -> str:
         last = ""
         for attempt in range(self.max_retries + 1):
@@ -367,6 +390,11 @@ class FixtureVideoClient:
         self.delay_s = delay_s
         self.model_id = model_id
         self.calls: list[dict] = []
+        self.cancelled: list[str] = []
+
+    async def cancel(self, task_id: str) -> bool:
+        self.cancelled.append(task_id)
+        return True
 
     async def generate(
         self,
@@ -377,10 +405,13 @@ class FixtureVideoClient:
         short_edge: int | None = None,
         seed: int | None = None,
         steps: int | None = None,
+        on_submit: Callable[[str], None] | None = None,
     ) -> VideoResult:
         self.calls.append({"prompt": prompt, "duration_s": duration_s, "ratio": ratio,
                            "references": [r.name for r in references],
                            "short_edge": short_edge, "seed": seed, "steps": steps})  # fmt: skip
+        if on_submit is not None:
+            on_submit(f"fixture-{len(self.calls)}")
         if not references:
             raise VideoGenError("a clip needs at least one reference picture")
         if not ffmpeg_available():
@@ -390,7 +421,7 @@ class FixtureVideoClient:
         color = "#" + hashlib.sha1(f"{prompt}|{seed}".encode()).hexdigest()[:6]
         secs = max(MIN_CLIP_S, min(MAX_CLIP_S, int(duration_s)))
         data = await asyncio.to_thread(synthetic_clip, secs, ratio, color)
-        return VideoResult(data, model=self.model_id)
+        return VideoResult(data, model=self.model_id, task_id=f"fixture-{len(self.calls)}")
 
 
 DEFAULT_STEPS = 14  # measured: the same clip as the route's ~50, 3.5x faster (docs/render-speed.md)

@@ -253,15 +253,32 @@ class EpisodeRunner:
     # -- lifecycle ------------------------------------------------------------
 
     def recover(self) -> int:
+        # The jobs the restart stopped waiting on keep running (and counting against the
+        # key's jobs in flight) unless the service is told to drop them.
+        orphans = [c.task_id for c in self.repo.list_unfinished_shot_clips() if c.task_id]
         n = self.repo.fail_unfinished_shot_clips(
             "Interrupted by a server restart. Render it again."
         )
+        if orphans:
+            task = asyncio.get_running_loop().create_task(self._cancel_jobs(orphans))
+            self._renders["recover"] = task
+            task.add_done_callback(lambda _t: self._renders.pop("recover", None))
         for run in self.repo.list_episode_runs(status="running"):
             run.status, run.error = "paused", "Paused by a server restart. Resume to go on."
             run.event(run.error, "warn")
             self._save(run)
             n += 1
         return n
+
+    async def _cancel_jobs(self, task_ids: list[str]) -> None:
+        for task_id in task_ids:
+            try:
+                dropped = await self.video.cancel(task_id)
+            except Exception:
+                log.warning("video job %s could not be cancelled", task_id, exc_info=True)
+                continue
+            log.info("video job %s orphaned by the restart: %s", task_id,
+                     "cancelled" if dropped else "not cancelled")  # fmt: skip
 
     async def aclose(self) -> None:
         tasks = [*self._loops.values(), *self._renders.values()]
@@ -848,6 +865,11 @@ class EpisodeRunner:
         refs = await asyncio.to_thread(
             self._reference_bytes, inputs.sent, FAST_REF_SHORT_EDGE if clip.fast else None
         )
+
+        def submitted(task_id: str) -> None:  # kept at once: a restart can cancel the job
+            clip.task_id = task_id
+            repo.save_shot_clip(clip)
+
         result = await self.video.generate(
             inputs.prompt,
             inputs.duration_s,
@@ -856,6 +878,7 @@ class EpisodeRunner:
             inputs.short_edge,
             clip.seed,
             clip.steps,
+            on_submit=submitted,
         )
         rel = f"clips/{pkg.package_id}/{clip.clip_id}.mp4"
         poster = f"clips/{pkg.package_id}/{clip.clip_id}.jpg"

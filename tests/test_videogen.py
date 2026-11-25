@@ -123,11 +123,14 @@ def test_mcphub_client_submits_a_job_and_polls_it():
             super().__init__(**kw)
 
     httpx.AsyncClient = Patched  # type: ignore[misc]
+    submitted: list[str] = []
     try:
         out = asyncio.run(client.generate(
-            "[Shot 1] She waits.", 8, "9:16", [VideoReference("kf.png", b"\x89PNG", "image/png")]))  # fmt: skip
+            "[Shot 1] She waits.", 8, "9:16", [VideoReference("kf.png", b"\x89PNG", "image/png")],
+            on_submit=submitted.append))  # fmt: skip
     finally:
         httpx.AsyncClient = real  # type: ignore[misc]
+    assert submitted == ["job1"]  # known before the wait: a restart can cancel the job
     assert out.data == b"MP4DATA" and out.task_id == "job1" and out.model == "minimax-h3-ref2va"
     # A per-call seed (another take of the same shot) replaces the client's.
     assert client.body("p", 4, "9:16", [], seed=12)["seed"] == 12
@@ -158,3 +161,19 @@ def test_the_steps_default_comes_from_the_environment(monkeypatch):
     assert _steps_from_env() is None
     monkeypatch.setenv("DRAMA_VIDEO_STEPS", "25")
     assert _steps_from_env() == 25
+
+
+def test_mcphub_client_cancels_a_job_by_deleting_it():
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        if request.method == "DELETE" and request.url.path == "/api/v3/gpu-videos/jobs/job1":
+            return httpx.Response(200, json={"id": "job1", "deleted": True})
+        return httpx.Response(404, json={"error": "Not Found"})
+
+    client = MCPHubVideoClient("mcp_key", base_url="https://api.test",
+                               transport=httpx.MockTransport(handle))  # fmt: skip
+    assert asyncio.run(client.cancel("job1")) is True
+    assert asyncio.run(client.cancel("gone")) is False
+    assert seen == ["DELETE /api/v3/gpu-videos/jobs/job1", "DELETE /api/v3/gpu-videos/jobs/gone"]

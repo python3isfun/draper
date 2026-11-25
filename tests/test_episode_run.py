@@ -544,16 +544,24 @@ def test_recover_pauses_running_runs_and_fails_clips_in_flight(tmp_path, package
                      episode_id=package.episodes[0].episode_id)  # fmt: skip
     repo.save_episode_run(run)
     clip = ShotClip(package_id=package.package_id, revision_id=package.revision_id,
-                    shot_id=package.shot_list[0].shot_id, status="rendering")  # fmt: skip
+                    shot_id=package.shot_list[0].shot_id, status="rendering",
+                    task_id="job-orphan")  # fmt: skip
     repo.save_shot_clip(clip)
+    video = FixtureVideoClient()
 
     async def go():
         frames = ShotFrameRunner(
             repo, MediaStore(tmp_path), FixtureImageClient(), FixtureModelClient()
         )
-        return EpisodeRunner(repo, MediaStore(tmp_path), frames, FixtureVideoClient()).recover()
+        runner = EpisodeRunner(repo, MediaStore(tmp_path), frames, video)
+        n = runner.recover()
+        await asyncio.gather(*runner._renders.values())
+        return n
 
     assert asyncio.run(go()) == 2
     assert repo.get_episode_run(run.run_id).status == "paused"
     assert repo.get_shot_clip(clip.clip_id).status == "failed"
+    # The job the restart orphaned is dropped at the service, so it stops counting
+    # against the jobs in flight.
+    assert video.cancelled == ["job-orphan"]
     assert RunSettings().holds == [] and RunSettings().render
