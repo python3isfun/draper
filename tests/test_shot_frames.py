@@ -1892,3 +1892,41 @@ def test_a_missing_script_line_keeps_the_shot_from_ready(package):
     mine = next(s for s in out["shots"] if s["shot_id"] == shot.shot_id)
     assert not mine["ready"] and "dialogue dl_gone is not in the script" in mine["not_ready"]
     assert cue is None or any(d["id"] == cue.dialogue_id for d in mine["spec"]["dialogue"])
+
+
+class NewHairEachRead(FixtureModelClient):
+    """Every reading after the first gives everyone a different hairstyle: a model that
+    doesn't repeat itself word for word."""
+
+    async def generate(self, request, output_model):
+        out = await super().generate(request, output_model)
+        if request.stage == "shot_reading" and request.attempt == 0:
+            n = len([r for r in self.calls if r.stage == "shot_reading"])
+            if n > 1:
+                for st in out.states:
+                    st.hair = f"pinned up (reading {n})"
+        return out
+
+
+def test_a_new_reading_keeps_the_choices_of_the_cuts_that_didnt_change(tmp_path):
+    with Board(tmp_path, text=NewHairEachRead()) as b:
+        b.design()
+        shot = b.busiest()
+        sid = shot["shot_id"]
+        others = [s for s in b.board()["shots"] if s["scene_id"] == shot["scene_id"]
+                  and s["shot_id"] != sid]  # fmt: skip
+        assert others, "the sample scene has more than one shot"
+        oid = others[0]["shot_id"]
+        b.http.post(f"{b.base}/{oid}", json={"draws": 1})
+        b.wait()
+        before = b.shot(oid)["sub_shots"][0]["choices"]
+        assert before and all(c["state"]["hair"] != "pinned up (reading 2)" for c in before)
+        # Another shot of the scene is re-planned: the reading is stale and read again.
+        b.http.post(f"{b.base}/{sid}/plan", json=b.two_cuts(shot))
+        b.http.post(f"{b.base}/{sid}", json={"draws": 1})
+        b.wait()
+        assert len(b.calls("shot_reading")) == 2
+        # The re-planned shot is read anew; the untouched shot keeps its choices.
+        assert all(c["state"]["hair"] == "pinned up (reading 2)"
+                   for s in b.shot(sid)["sub_shots"] for c in s["choices"])  # fmt: skip
+        assert b.shot(oid)["sub_shots"][0]["choices"] == before

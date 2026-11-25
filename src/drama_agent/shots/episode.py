@@ -69,6 +69,7 @@ from .speech_check import (
     SPEECH_STAGE,
     ClipCheck,
     SpeechOutput,
+    face_owner,
     sample_times,
     speech_context,
     speech_findings,
@@ -895,9 +896,9 @@ class EpisodeRunner:
         faces: dict[str, int] = {}
         media: list[MediaPart] = []
         for r in clip.references:  # the faces sent with the clip identify the people
-            if r.kind != "face" or r.about not in names.values():
+            if r.kind != "face":
                 continue
-            who = next((c for c, n in names.items() if n == r.about), None)
+            who = face_owner(r.about, names)
             found = self.frames._ref_file(r.ref_id, "thumb")
             if who is None or who in faces or found is None or not found[0].is_file():
                 continue

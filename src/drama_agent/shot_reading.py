@@ -92,6 +92,9 @@ class SceneReading(BaseModel):
     scene_id: str
     status: Literal["writing", "done", "failed"] = "done"
     fingerprint: str = ""
+    # Per cut ("shot_id:sub_shot"), a print of the cut as read: a new reading keeps the
+    # choices of the cuts that haven't changed (see carry_unchanged).
+    cuts: dict[str, str] = Field(default_factory=dict)
     candidates: list[Candidate] = Field(default_factory=list)
     choices: list[Choice] = Field(default_factory=list)
     model: str | None = None
@@ -172,6 +175,42 @@ def fingerprint(
                   [lk.model_dump() for lk in pkg.story_bible.looks if lk.character_id in people]],
     }  # fmt: skip
     return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def cut_prints(pkg: ProductionPackage, scene_id: str, plans: dict[str, Any]) -> dict[str, str]:
+    """Per cut of the scene ("shot_id:sub_shot"), a print of what the reading sees of it:
+    the cut's view, action, timing and people. Same print, same cut."""
+    from .shot_frames import plan_of
+
+    out: dict[str, str] = {}
+    for s in scene_shots(pkg, scene_id):
+        for sub in plan_of(pkg, s, plans.get(s.shot_id)).sub_shots:
+            raw = json.dumps(sub.model_dump(exclude={"placement", "off_screen"}), sort_keys=True,
+                             default=str)  # fmt: skip
+            out[f"{s.shot_id}:{sub.index}"] = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return out
+
+
+def carry_unchanged(
+    new: list[Choice], old: SceneReading | None, cuts: dict[str, str], pool: list[Candidate]
+) -> list[Choice]:
+    """A new reading keeps the old one's choices for every cut that is the same as when it
+    was read (`cuts`: cut_prints now), where the person still has that picture to choose.
+    A plan change in one shot then leaves the scene's other shots as they were: their
+    keyframes, prompts and clips stay current instead of being redone from a reading
+    that only differs in wording."""
+    if old is None or not old.cuts:
+        return new
+    ids = {(c.character_id, c.image_id) for c in pool}
+    out = []
+    for c in new:
+        key = f"{c.shot_id}:{c.sub_shot}"
+        before = old.choice(c.shot_id, c.sub_shot, c.character_id)
+        if (before is not None and old.cuts.get(key) == cuts.get(key)
+                and (c.character_id, before.image_id) in ids):  # fmt: skip
+            c = before.model_copy()
+        out.append(c)
+    return out
 
 
 def fresh(reading: SceneReading | None, print_: str) -> SceneReading | None:

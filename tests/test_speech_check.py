@@ -6,6 +6,7 @@ from drama_agent.shots.speech_check import (
     MAX_FRAMES,
     CutSpeech,
     SpeechOutput,
+    face_owner,
     fixture_speech,
     sample_times,
     speech_context,
@@ -98,3 +99,12 @@ def test_the_offline_check_passes_everyone():
     assert [(c.sub_shot, c.speaking) for c in out.cuts] == [(1, ["Ann"]), (2, [])]
     items = speech_findings(out, request.context["cuts"])
     assert all(i.passed for i in items)
+
+
+def test_a_face_picture_is_matched_to_its_person_by_what_it_is_about():
+    names = {"ch_a": "Ann Lee", "ch_b": "Bo"}
+    assert face_owner("Ann Lee's face", names) == "ch_a"
+    assert face_owner("Ann Lee", names) == "ch_a"
+    assert face_owner("Bo, full body", names) is None  # not a bare name or "X's ..."
+    assert face_owner("Bo's face", names) == "ch_b"
+    assert face_owner("the set, wide view", names) is None

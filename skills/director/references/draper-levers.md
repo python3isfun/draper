@@ -6,9 +6,9 @@ can't cut faster than the lines allow, so fix upstream first.
 
 | Finding | Step | Where | What to change |
 | --- | --- | --- | --- |
-| Long shots, few cuts | Storyboard | `src/drama_agent/pace.py`, `COVERAGE_RULES` and `storyboard_rules()` | Shot length per pace (brisk: 1.5 to 3 s, one line per shot, one hold per scene) |
+| Long shots, few cuts | Storyboard | `src/drama_agent/pace.py`, `COVERAGE_RULES` and `storyboard_rules()` | Today: 3 to 6 s and up to two lines per shot at every pace. Make it depend on the pace (brisk: 1.5 to 3 s, one line per shot, one hold per scene) |
 | Two-shots carry the exchange | Storyboard | `pace.COVERAGE_RULES`; `validation/hard_checks.py`, `check_coverage` (at most one shot in two is a two-shot or group shot; consecutive shots differ) | The size defaults and the share of group shots |
-| No reaction at the turn | Storyboard and cut plan | `pace.storyboard_rules()`; `pace.planner_rules()` (`reaction_s` caps listener cuts) | Plan a close-up of the person each turning line lands on; a review check `"reaction"` |
+| No reaction at the turn | Storyboard and cut plan | `pace.storyboard_rules()`; `pace.planner_rules()` (`reaction_s`, the listener cap: advice to the planner, no longer checked since the off-screen-line rule replaced it) | Plan a close-up of the person each turning line lands on; a review check `"reaction"` |
 | Dead air after a line | Cut plan and trim | Episode runs (`shots/episode.py`, `trim` setting) | Trim to the line's end; cut on the word |
 | Lines too long to cut on | Script | `pipeline/steps.py`, `ScriptStep.directive` | Most lines under 8 words, turns 1 to 3; split speeches across a reaction |
 | Slow opening, soft ending | Outline and script | `OutlineStep` / `ScriptStep` directives; story templates (`docs/templates.md`) | Open inside the conflict in 3 s; end on a reversal |

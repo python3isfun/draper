@@ -220,9 +220,10 @@ class ShotFrameRunner:
         pool = [c for who in people for c in shot_reading.candidates(pkg, images, who)]
         if not pool:
             return None
+        cuts = shot_reading.cut_prints(pkg, scene_id, plans)
         reading = SceneReading(package_id=pkg.package_id, revision_id=pkg.revision_id,
                                scene_id=scene_id, status="writing", fingerprint=print_,
-                               candidates=pool)  # fmt: skip
+                               cuts=cuts, candidates=pool)  # fmt: skip
         if stored is not None:  # the board keeps showing the old choices meanwhile
             reading.choices = stored.choices
         self.repo.save_scene_reading(reading)
@@ -252,6 +253,8 @@ class ShotFrameRunner:
             reading.candidates = pool
             # The person's choices as they are now (choices can't change while a scene is read).
             latest = self.repo.get_scene_reading(pkg.package_id, pkg.revision_id, scene_id)
+            # The cuts that didn't change keep their old choices; then the person's own.
+            choices = shot_reading.carry_unchanged(choices, stored, cuts, pool)
             reading.choices = shot_reading.merge_overrides(choices, latest or stored, pool)
             reading.model = request.model or getattr(self.text, "model_id", None)
             reading.status, reading.error = "done", None

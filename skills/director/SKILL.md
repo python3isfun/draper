@@ -60,6 +60,14 @@ its characters, lines or scenes (see `docs/templates.md`).
 
 Measured and slow-burn stories may hold longer, but the coverage rules (1, 3) still apply.
 
+These targets are the bar, not yet the code. `pace.COVERAGE_RULES` still asks the
+storyboard for shots of 3 to 6 s with up to two lines, at every pace, and the listener cap
+(`reaction_s` in `pace.planner_rules()`) is advice to the cut planner, not a check. A
+storyboard written under the current rules will land between the two: say which rules it
+was written under before scoring it, and treat the gap to the targets as the change to make
+in Draper (the first rows of
+[references/draper-levers.md](references/draper-levers.md)).
+
 ## Workflow: review a clip or an episode
 
 1. **Measure.**
@@ -92,9 +100,10 @@ Measured and slow-burn stories may hold longer, but the coverage rules (1, 3) st
    Snippets are in [references/draper-levers.md](references/draper-levers.md).
 5. **Score against the targets,** and list the reference's flaws so nobody copies them.
 6. **Write the report** to `director/<YYYY-MM-DD>-<slug>.md` with
-   [references/report-template.md](references/report-template.md). Our own contact sheets
-   may be saved next to it. **Never save a third-party clip's frames in the repo**; give
-   the measure command instead.
+   [references/report-template.md](references/report-template.md). Contact sheets stay
+   in the measure folder, ours included: the report cites shot numbers and start times, and
+   gives the measure command that rebuilds the sheet. **Never save a third-party clip's
+   frames in the repo.** (The founding study's sheet predates this rule.)
 7. **Recommend changes in Draper,** ranked by impact, each naming the file and rule
    ([references/draper-levers.md](references/draper-levers.md)). Re-measuring after a fix
    is part of the recommendation.

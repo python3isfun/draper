@@ -150,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
               f"{s['longest_s']} s, over 4 s: {s['over_4s']} ({s['over_4s_share']:.0%}), "
               f"{s['cuts_per_minute']} cuts/min")  # fmt: skip
         if loud:
-            clip = "  (at full scale: check for clipping)" if (loud["peak_db"] or -1) > -0.5 else ""
+            peak = loud["peak_db"]  # 0.0 dB is a value, and the loudest one
+            clip = "  (at full scale: check for clipping)" if peak is not None and peak > -0.5 else ""
             print(f"  loudness mean {loud['mean_db']} dB, peak {loud['peak_db']} dB{clip}")
         print(f"  -> {out}/shots.json" + ("" if args.no_sheet else f", {out}/shots.jpg"))
     return 0

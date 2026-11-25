@@ -191,6 +191,16 @@ def speech_findings(out: SpeechOutput, cuts: list[dict[str, Any]]) -> list[Check
     return items
 
 
+def face_owner(about: str, names: dict[str, str]) -> str | None:
+    """Whose face a clip's picture shows, from what the picture is about ("Lila Montgomery",
+    "Lila Montgomery's face"): the character id, or None for a picture of nobody known."""
+    about = about.strip()
+    for who, name in names.items():
+        if about == name or about.startswith((f"{name}'s ", f"{name} ")):
+            return who
+    return None
+
+
 def _match(seen: list[str], known: list[str]) -> list[str]:
     """The names the model gave, as the plan's names where they match (the same name in
     another case first, else the same first name); others as given."""
