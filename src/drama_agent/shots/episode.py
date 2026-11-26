@@ -75,6 +75,7 @@ from .speech_check import (
     speech_findings,
     speech_instructions,
 )
+from .staleness import plan_outdated
 from .takes import plan_take
 from .video_prompt import approved_frames, fingerprint, prompt_state
 
@@ -269,6 +270,16 @@ class EpisodeRunner:
             self._save(run)
             n += 1
         return n
+
+    async def _drop_job(self, task_id: str) -> None:
+        """Cancel one job at the service from a task being cancelled: briefly, never raising."""
+        try:
+            dropped = await asyncio.wait_for(self.video.cancel(task_id), timeout=10)
+        except Exception:
+            log.warning("video job %s could not be cancelled", task_id, exc_info=True)
+            return
+        log.info("video job %s of a stopped render: %s", task_id,
+                 "cancelled" if dropped else "not cancelled")  # fmt: skip
 
     async def _cancel_jobs(self, task_ids: list[str]) -> None:
         for task_id in task_ids:
@@ -490,6 +501,19 @@ class EpisodeRunner:
                 repo.save_shot_plan(plan)
                 self.frames.start_plan(plan, then={"sub_shot": 1, **self._options(s)})
                 run.event("Planning the cuts; the first keyframe follows.", shot_id=sid)
+                active += 1
+                continue
+
+            # A plan from before a revision changed the shot (or its design text) describes
+            # the old shot: plan the cuts again rather than hold on its problems.
+            if stored is not None and stored.status == "done" and plan_outdated(pkg, shot, stored):
+                complete = False
+                if active >= s.parallel:
+                    continue
+                plan = stored.model_copy(update={"status": "writing", "error": None})
+                repo.save_shot_plan(plan)
+                self.frames.start_plan(plan, then={"sub_shot": 1, **self._options(s)})
+                run.event("The cut plan is out of date; planning the cuts again.", shot_id=sid)
                 active += 1
                 continue
 
@@ -830,6 +854,8 @@ class EpisodeRunner:
             clip.status, clip.error = "failed", "Stopped by the user."
             clip.finished_at = utcnow()
             self.repo.save_shot_clip(clip)
+            if clip.task_id:  # the job would otherwise run on, counting as in flight
+                await self._drop_job(clip.task_id)
             raise
         except Exception as exc:
             log.warning("clip %s failed", clip_id, exc_info=True)

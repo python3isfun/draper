@@ -565,3 +565,51 @@ def test_recover_pauses_running_runs_and_fails_clips_in_flight(tmp_path, package
     # against the jobs in flight.
     assert video.cancelled == ["job-orphan"]
     assert RunSettings().holds == [] and RunSettings().render
+
+
+def test_a_run_plans_again_a_plan_from_before_the_shot_was_revised(tmp_path):
+    """A stored plan whose design text has changed since (a revision rewrote the shot)
+    describes the old shot: the run plans the cuts again instead of holding on the old
+    plan's problems."""
+    from drama_agent.shots.plans import shot_lines
+
+    with Studio(tmp_path) as s:
+        shot = next(x for x in s.pkg.shot_list if len(x.character_ids) >= 2
+                    and shot_lines(s.pkg, x))  # fmt: skip
+        [line, *_] = shot_lines(s.pkg, shot)
+        listener = next(c for c in shot.character_ids if c != line["speaker_id"])
+        clip = -(-shot.duration_ms // 1000) * 1000
+        plan = ShotPlan(package_id=s.pid, revision_id=s.pkg.revision_id, shot_id=shot.shot_id,
+                        source="model", design_print="from-before-the-revision", sub_shots=[
+                            SubShot(index=1, start_ms=0, end_ms=clip, framing="close-up",
+                                    action="listens", people=[listener],
+                                    placement={listener: "left"},
+                                    off_screen={line["speaker_id"]: "right"})])  # fmt: skip
+        s.repo.save_shot_plan(plan)
+        s.start(render=False, assemble=False)
+        run = s.wait(lambda r: r["status"] == "done", what="the run")
+        assert f"{shot.shot_id}:plan" not in run["holds"]
+        assert any(e["shot_id"] == shot.shot_id and "planning the cuts again" in e["text"]
+                   for e in run["events"])  # fmt: skip
+        new = s.repo.get_shot_plan(s.pid, s.pkg.revision_id, shot.shot_id)
+        assert new.status == "done" and new.design_print != "from-before-the-revision"
+
+
+@needs_ffmpeg
+def test_dropping_a_render_cancels_its_job_at_the_service(tmp_path):
+    """ "Pause now" drops the clip being rendered: the job is cancelled at the service too,
+    so it stops counting against the key's jobs in flight (MCPHub holds a key to three)."""
+    with Studio(tmp_path) as s:
+        s.video.delay_s = 30  # a render long enough to be caught in flight
+        run = s.start(assemble=False, takes=1, parallel=1)
+        s.wait(lambda r: any(x["stage"] == "rendering" for x in r["shots"]),
+               what="a render in flight")  # fmt: skip
+        r = s.http.post(f"/v1/episode-runs/{run['run_id']}/pause?now=true")
+        assert r.status_code == 202 and r.json()["status"] == "paused"
+        deadline = time.monotonic() + 10
+        while not s.video.cancelled:
+            assert time.monotonic() < deadline, "the job wasn't cancelled"
+            time.sleep(0.05)
+        clips = [c for c in s.repo.list_shot_clips(s.pid, s.pkg.revision_id)
+                 if c.error == "Stopped by the user."]  # fmt: skip
+        assert [c.task_id for c in clips] == s.video.cancelled == ["fixture-1"]
