@@ -228,6 +228,12 @@ def planned_sub_shots(
     """The planner's sub-shots (names become character ids), checked as make_sub_shots
     checks them. A first cut a moment after 0 s is moved to 0 s."""
     planned = sorted(out.sub_shots, key=lambda p: p.start_s)
+    if not planned:  # the planner sees no cut to make: the shot is its one sub-shot
+        return make_sub_shots(pkg, shot, [{
+            "start_ms": 0, "framing": shot.framing, "camera": shot.camera,
+            "action": shot.visual_action, "people": list(shot.character_ids),
+            "placement": spread(list(shot.character_ids)),
+        }], clip, strict=strict)  # fmt: skip
     rows = []
     for k, p in enumerate(planned):
         start = 0 if k == 0 and p.start_s * 1000 < MIN_SUB_SHOT_MS else round(p.start_s * 1000)

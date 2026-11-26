@@ -146,3 +146,45 @@ def test_a_wrong_cut_count_is_flagged_and_ranks_below_a_refused_plan(package):
     refused = "the cut at 1 s falls in the middle of Maya's line"
     assert _rank(wrong) < _rank([refused])
     assert _rank([]) < _rank(wrong)
+
+
+def test_a_line_cut_across_shots_is_spoken_in_parts(package):
+    """Each shot quotes only the words spoken in it, by the share of the line's time it
+    holds; together the parts are the whole line, in order."""
+    from drama_agent.shots.plans import _line_part, shot_lines
+
+    line = "You know, in the history of humankind nobody has ever regretted a good breakfast."
+    assert _line_part(line, 0, 1700, 6300) == ("You know, in the", "start")
+    assert _line_part(line, 1700, 3000, 6300) == ("history of humankind nobody has ever", "middle")
+    assert _line_part(line, 4700, 1600, 6300) == ("regretted a good breakfast.", "end")
+    assert _line_part(line, 0, 6300, 6300) == (line, "whole")
+    assert _line_part("Hi.", 0, 100, 4000) == ("Hi.", "start")  # at least one word a shot
+
+    first = next(s for s in package.shot_list if s.dialogue_cues)
+    nxt = next(s for s in package.shot_list if s.episode_id == first.episode_id
+               and s.start_ms > first.start_ms)  # fmt: skip
+    cue = first.dialogue_cues[-1]
+    end = cue.end_ms
+    cue.end_ms = first.start_ms + first.duration_ms  # the line runs over the cut
+    nxt.dialogue_cues = [cue.model_copy(update={"start_ms": nxt.start_ms,
+                                                "end_ms": nxt.start_ms + (end - cue.end_ms)
+                                                if end > cue.end_ms else nxt.start_ms + 1500}),
+                         *nxt.dialogue_cues]  # fmt: skip
+    head = next(x for x in shot_lines(package, first) if x["dialogue_id"] == cue.dialogue_id)
+    tail = next(x for x in shot_lines(package, nxt) if x["dialogue_id"] == cue.dialogue_id)
+    assert (head["part"], tail["part"]) == ("start", "end")
+    assert head["full_text"] == tail["full_text"]
+    assert f"{head['text']} {tail['text']}" == head["full_text"]
+    assert tail["start_ms"] == 0
+
+
+def test_a_planner_answer_with_no_cuts_plans_the_shot_as_one(package):
+    """A short single with one line needs no cut; a planner that answers with no sub-shots
+    (rather than one covering the shot) gets the storyboard's shot as its one cut instead
+    of a refused plan."""
+    from drama_agent.shots.planner import PlanOutput, planned_sub_shots
+
+    shot = package.shot_list[0]
+    [only] = planned_sub_shots(package, shot, PlanOutput(sub_shots=[], notes="no cut needed"))
+    assert (only.start_ms, only.framing, only.people) == (0, shot.framing, shot.character_ids)
+    assert only.end_ms >= shot.duration_ms

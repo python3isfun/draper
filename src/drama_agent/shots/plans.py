@@ -44,23 +44,68 @@ def single_plan(pkg: ProductionPackage, shot: Shot) -> ShotPlan:
 
 def shot_lines(pkg: ProductionPackage, shot: Shot) -> list[dict[str, Any]]:
     """The shot's lines of dialogue, timed from the start of its clip (the one source of
-    line timing for the planner, the writer, the judge, the checks and the export)."""
+    line timing for the planner, the writer, the judge, the checks and the export).
+    A line the storyboard cuts across shots is spoken in parts: `text` is the words spoken
+    in this shot (by the share of the line's time that falls in it), `part` says which
+    ("whole", "start", "middle", "end") and `full_text` is the whole line. H3 lip-syncs
+    the words it is given to the seconds it has, so a shot quotes only its own words."""
     names = _names(pkg)
     lines = _dialogue(pkg)
+    shares = _line_shares(pkg, shot)
     out = []
     for c in shot.dialogue_cues:
         line = lines.get(c.dialogue_id)
         if line is None:
             continue
+        text, part = _line_part(line.text, *shares.get(c.dialogue_id, (0, 1, 1)))
         out.append({
             "dialogue_id": c.dialogue_id,
             "speaker_id": line.character_id,
             "speaker": names.get(line.character_id, line.character_id),
-            "text": line.text,
+            "text": text,
+            "full_text": line.text,
+            "part": part,
             "start_ms": max(0, c.start_ms - shot.start_ms),
             "end_ms": max(0, c.end_ms - shot.start_ms),
         })  # fmt: skip
     return sorted(out, key=lambda x: x["start_ms"])
+
+
+def _line_shares(pkg: ProductionPackage, shot: Shot) -> dict[str, tuple[int, int, int]]:
+    """Per line cued in the shot: (ms of it spoken in earlier shots, ms spoken in this
+    shot, ms in all), over the episode's shots in order."""
+    mine = {c.dialogue_id for c in shot.dialogue_cues}
+    before: dict[str, int] = dict.fromkeys(mine, 0)
+    here: dict[str, int] = dict.fromkeys(mine, 0)
+    total: dict[str, int] = dict.fromkeys(mine, 0)
+    for s in pkg.shot_list:
+        if s.episode_id != shot.episode_id:
+            continue
+        for c in s.dialogue_cues:
+            if c.dialogue_id not in mine:
+                continue
+            ms = max(0, c.end_ms - c.start_ms)
+            total[c.dialogue_id] += ms
+            if s.shot_id == shot.shot_id:
+                here[c.dialogue_id] += ms
+            elif s.start_ms < shot.start_ms:
+                before[c.dialogue_id] += ms
+    return {d: (before[d], here[d], total[d]) for d in mine}
+
+
+def _line_part(text: str, before: int, here: int, total: int) -> tuple[str, str]:
+    """The words of `text` spoken in a shot that holds `here` ms of the line's `total`,
+    after `before` ms spoken in the shots before, and which part of the line that is."""
+    if total <= 0 or here >= total:
+        return text, "whole"
+    words = text.split()
+    n = len(words)
+    a = min(n - 1, round(n * before / total))
+    b = max(a + 1, min(n, round(n * (before + here) / total)))
+    if before + here >= total:
+        b = n
+    part = "start" if before == 0 else "end" if b >= n else "middle"
+    return " ".join(words[a:b]), part
 
 
 def sub_shot_lines(lines: list[dict[str, Any]], sub: SubShot) -> list[dict[str, Any]]:

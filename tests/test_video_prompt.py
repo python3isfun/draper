@@ -208,3 +208,22 @@ def test_a_line_spoken_off_screen_is_voice_over_not_picture_text():
     out = template_prompt(empty)
     assert f"Lila says in an off-screen voice: {quoted}" in out.blocks[0].text
     assert prompt_findings(out, empty, [])[0] == []
+
+
+def test_a_line_continued_from_the_shot_before_quotes_only_its_own_words():
+    """A clip that opens mid-sentence quotes the words spoken in it, introduced as
+    mid-sentence; a prompt that says the speech carries over without words is refused,
+    since H3 then mouths nonsense."""
+    ctx = _reaction(line="a good breakfast.", on=("Lila",), off=())
+    cut = ctx["cuts"][0]
+    cut["lines"] = [{"speaker": "Lila", "line": "a good breakfast.", "where": "on screen",
+                     "delivery": "", "continued": True, "cut_off": False}]  # fmt: skip
+    ctx["pictures"][0]["of"] = "Lila"
+    out = template_prompt(ctx)
+    text = out.blocks[0].text
+    assert 'Lila, mid-sentence as the clip opens, says in English: "a good breakfast."' in text
+    assert prompt_findings(out, ctx, [])[0] == []
+    carried = text.replace('says in English: "a good breakfast."',
+                           "finishes her carried speech with synchronized lips.")  # fmt: skip
+    problems, _ = prompt_findings(_out(carried), ctx, [])
+    assert any("doesn't quote Lila's line word for word" in p for p in problems)

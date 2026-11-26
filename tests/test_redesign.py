@@ -397,3 +397,23 @@ def test_your_own_prompt_is_screened_knowing_who_is_a_real_person(tmp_path):
         kinds = [p["kind"] for p in watcher.screens[-1]["pictures"]]
         assert kinds and all("real person" in k for k in kinds)
         assert all("no real person's likeness" in k for k in kinds)  # designed, not uploaded
+
+
+def test_a_locked_plan_is_outdated_by_a_revision_that_rewrote_the_shot(package):
+    """A lock exempts a plan from the design-text check (it describes the keyframes), not
+    from a revision that changed the shot itself: the run then plans the cuts again."""
+    from datetime import timedelta
+
+    from drama_agent.models.package import ChangeLogEntry, utcnow
+    from drama_agent.shot_frames import PLAN_SHOT_REVISED, plan_outdated
+
+    from .test_shot_frames import busiest, two_cuts
+
+    shot = busiest(package)
+    locked = two_cuts(package, shot).model_copy(update={
+        "source": "keyframes", "updated_at": utcnow() - timedelta(days=1)})  # fmt: skip
+    assert plan_outdated(package, shot, locked) is None
+    package.change_log.append(ChangeLogEntry(
+        revision_id=package.revision_id, target_ids=[shot.shot_id], changed_ids=[shot.shot_id],
+        note="Revised the storyboard", at=utcnow()))  # fmt: skip
+    assert plan_outdated(package, shot, locked) == PLAN_SHOT_REVISED

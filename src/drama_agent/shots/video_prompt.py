@@ -97,7 +97,9 @@ happens in the cut (its action, timing, lines) and the camera's movement. When a
 keyframe differs from the plan in a way the story needs fixed (the wrong person, a prop \
 missing, a side flipped), say so in `notes` so the keyframe can be redrawn. A cut with \
 no keyframe is written from the plan.
-- `carried`: lines begun in the shot before, still being finished as this clip opens.
+- A line the storyboard cuts across shots arrives in parts: `line` holds only the words \
+spoken in this clip. `continued` is true when the line began in the shot before (the \
+clip opens mid-sentence); `cut_off` is true when it runs on past this clip's end.
 - On a second try: `previous` (your prompt) and `problems` (what a check found). Fix \
 exactly those.
 
@@ -164,8 +166,11 @@ as a direction ("his eyes on a point just right of the lens").
 - Concrete over abstract: name the light, the lens height, the gesture; not "cinematic", \
 "beautiful", "emotional".
 - Quote any sign or writing that must read; keep other writing out of focus.
-- Lines spoken in the shot before (`carried`) aren't spoken again: say the voice carries \
-over as the clip opens.
+- Quote exactly the words in `line`, no more: for a `continued` line say the person is \
+mid-sentence as the clip opens (`Derek, mid-sentence: "..."`), for a `cut_off` one that \
+the sentence breaks off at the cut. The words spoken in another shot are never quoted \
+here: H3 lip-syncs what it is given to the seconds it has, and a line with no words to \
+say comes out as nonsense.
 - No timestamps like "[Shot 2] At 00:02.000": they are added from the plan.
 - 150 to 500 words in all (`text` of every cut, `camera` and `sound`).
 """
@@ -240,7 +245,7 @@ def prompt_context(
     base = shot_context(pkg, shot)
     base["shot"].pop("dialogue", None)
     base["shot"] |= {"summary": shot.narrative_function, "sound": shot.sound}
-    lines = [x for x in shot_lines(pkg, shot) if (shot.shot_id, x["dialogue_id"]) not in carried]
+    lines = shot_lines(pkg, shot)
     cuts = []
     for sub in plan.sub_shots:
         states = {w: r.state for w, r in chosen_pictures(pkg, shot, sub, reading).items()
@@ -248,7 +253,9 @@ def prompt_context(
         cut = sub_shot_context(pkg, shot, sub, len(plan.sub_shots), states)
         cut["lines"] = [
             {"speaker": x["speaker"], "line": x["text"], "where": x["where"],
-             "delivery": getattr(script.get(x["dialogue_id"]), "delivery", "") or ""}
+             "delivery": getattr(script.get(x["dialogue_id"]), "delivery", "") or "",
+             "continued": x["part"] in ("middle", "end"),
+             "cut_off": x["part"] in ("start", "middle")}
             for x in sub_shot_lines(lines, sub)
         ]  # fmt: skip
         f = frames.get(sub.index)
@@ -261,9 +268,6 @@ def prompt_context(
         "clip_s": round(plan.sub_shots[-1].end_ms / 1000, 3),
         "pictures": pictures,
         "cuts": cuts,
-        "carried": [{"speaker": names.get(script[d].character_id, ""), "line": script[d].text}
-                    for c in shot.dialogue_cues
-                    if (shot.shot_id, d := c.dialogue_id) in carried and d in script],
     }  # fmt: skip
     return context, {v: k for k, v in ids.items()}
 
@@ -349,11 +353,9 @@ def word_count(blocks: list[PromptBlock], sound: str) -> int:
 def dialogue_pace(
     pkg: ProductionPackage, shot: Shot, clip_ms: int, carried: set[tuple[str, str]] | None = None
 ) -> str | None:
-    """A warning when the lines spoken in the shot (not those carried over from the shot
-    before) carry more words than the clip holds at a slow read, else None."""
-    carried = carried if carried is not None else carried_lines(pkg)
-    words = sum(len(x["text"].split()) for x in shot_lines(pkg, shot)
-                if (shot.shot_id, x["dialogue_id"]) not in carried)  # fmt: skip
+    """A warning when the words spoken in the shot (a line cut across shots counts only
+    the words spoken here) are more than the clip holds at a slow read, else None."""
+    words = sum(len(x["text"].split()) for x in shot_lines(pkg, shot))
     room = clip_ms / 1000 * WORDS_PER_S
     if words > room:
         return (f"{words} spoken words in a {clip_ms / 1000:g} s clip: at a slow read "
@@ -524,7 +526,10 @@ def template_prompt(context: dict[str, Any]) -> VideoPromptOutput:
         for x in cut["lines"]:
             quiet = [n for n in on if n != x["speaker"]]
             if x["where"] == "on screen":
-                parts.append(f'{x["speaker"]} says in English: "{x["line"].strip()}"')
+                how = ", mid-sentence as the clip opens," if x.get("continued") else ""
+                parts.append(f'{x["speaker"]}{how} says in English: "{x["line"].strip()}"')
+                if x.get("cut_off"):
+                    parts.append("The sentence breaks off at the cut.")
                 rest = f"; {' and '.join(quiet)} keep quiet, mouths closed" if quiet else ""
                 parts.append(f"Only {x['speaker']}'s lips move{rest}.")
             elif on:  # a voice-over: the line is in the sound sentence, the frame listens
