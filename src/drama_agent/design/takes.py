@@ -10,7 +10,16 @@ from typing import Any
 from ..models import ProductionPackage
 from ..models.images import DesignOption, GeneratedImage
 from ..models.package import utcnow
-from .prompts import DEFAULT_SIZE, NO_OTHER_TEXT, SIZES, _prompt_and_refs, _Slot, _subject, key_of
+from .prompts import (
+    DEFAULT_SIZE,
+    NO_OTHER_TEXT,
+    SIZES,
+    _prompt_and_refs,
+    _Slot,
+    _subject,
+    key_of,
+    view_size,
+)
 from .slots import NeedsPick, _graph, selected_image, slot_title
 
 
@@ -52,7 +61,7 @@ def _new_take_group(
     refs, template, brief = _prompt_and_refs(pkg, slot, slots, current)
     if selected_design:
         brief["selected_design"] = selected_design
-    full, small = SIZES.get(slot.view, DEFAULT_SIZE)
+    full, small = view_size(slot.view)
     size = small if draft else full
     group = f"grp_{uuid.uuid4().hex[:10]}"
     options, images = [], []
@@ -350,7 +359,7 @@ def import_pick(
         brief={"deliverable": slot.view, "imported_from": imported_from},
         job_id=job_id,
         # Full size (not a draft), so picking it never queues a full-size re-render.
-        size=SIZES.get(slot.view, DEFAULT_SIZE)[0],
+        size=view_size(slot.view)[0],
         seed=0,
         model="imported",
         file=file,
@@ -385,7 +394,7 @@ def select(images: list[GeneratedImage], image_id: str) -> tuple[str, GeneratedI
         update={
             "image_id": f"img_{uuid.uuid4().hex[:12]}",
             "status": "pending",
-            "size": SIZES.get(view, DEFAULT_SIZE)[0],
+            "size": view_size(view)[0],
             "finalizes": target.image_id,
             "prompt": finalize_prompt(view),
             "prompt_source": "template",

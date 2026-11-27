@@ -179,6 +179,9 @@ def edit_entry(
         if made is None:
             continue
         req.design_brief, req.must_keep, req.design_freedom = made
+        if "sheet.areas" in edit.changed and req.asset_type == "location":
+            # A set's areas are its mid-shot pictures: one deliverable each, by position.
+            req.deliverables = _deliverables(pkg, req) or req.deliverables
         edit.requirement_ids.append(req.requirement_id)
         if req.requirement_id in written:
             edit.replaced_written.append(req.requirement_id)
@@ -193,6 +196,14 @@ def edit_entry(
         )
     )
     return edit
+
+
+def _deliverables(pkg: ProductionPackage, req) -> list:
+    ref = req.subject_refs[0]
+    unit = ReuseUnit(req.asset_type, ref.entity_type, ref.entity_id, ref.variant_id)
+    sheets = DesignSheets(cast=pkg.cast_sheet, sets=pkg.set_sheet, props=pkg.prop_sheet)
+    made = default_design(unit, pkg.story_bible, sheets)
+    return [] if made is None else made.deliverables
 
 
 def _text(req) -> tuple[str, list[str], list[str]]:

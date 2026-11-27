@@ -43,7 +43,9 @@ def test_a_new_set_state_gets_a_wide_and_a_top_down_view(package):
         package, "loc_shop", "Ночь", {"time_of_day": "night", "lighting": "one lamp"}
     )
     assert added.entry_id == "ls_shop_new"  # no ASCII words to name it by
-    assert [d.split("_")[-1] for d in added.deliverable_ids] == ["wide", "layout"]
+    # The standard set: an establishing shot, a floor plan, a mid-shot of each of its areas.
+    assert [d.split("ls_shop_new_")[-1] for d in added.deliverable_ids] == [
+        "wide", "layout", *(f"area_{i}" for i in range(1, 7))]  # fmt: skip
     st = next(s for s in package.set_sheet.states if s.location_state_id == added.entry_id)
     assert st.lighting == "one lamp"
 

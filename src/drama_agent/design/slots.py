@@ -18,8 +18,8 @@ class _Graph:
     Anchors are explored first: each character's face, each location's first state (its
     wide view) and each prop's first state. Every other deliverable is drawn from one
     `parent` image the user picks first: a look from the face, a location state from the
-    first state, a plan view from its own state's wide view, a prop state from the first
-    state. `root` is the anchor a deliverable is shown under on the board."""
+    first state, a plan view and each area's mid-shot from their own state's wide view, a
+    prop state from the first state. `root` is the anchor a deliverable is shown under on the board."""
 
     slots: list[_Slot]
     anchors: list[tuple[str, str]]
@@ -57,7 +57,8 @@ def _graph(pkg: ProductionPackage) -> _Graph:
         anchor = first.get((group, entity))
         root[key] = anchor
         parent[key] = anchor
-        if kind == "location" and slot.deliverable_id.endswith("_layout"):
+        if kind == "location" and not slot.deliverable_id.endswith("_wide"):
+            # A state's plan and its area pictures are drawn from that state's wide view.
             wide = next(
                 (s.key for s in slots
                  if s.req.requirement_id == slot.req.requirement_id

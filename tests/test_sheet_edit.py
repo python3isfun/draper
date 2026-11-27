@@ -28,6 +28,34 @@ def reqs(pkg, entity_id):
     }
 
 
+def test_editing_a_sets_areas_changes_its_pictures(package):
+    """A set's areas are its mid-shot pictures: edit the list and each state's deliverables
+    follow, the establishing shot and the floor plan first."""
+    assert {len(r.deliverables) for r in reqs(package, "loc_shop").values()} == {8}
+    edit = edit_entry(package, "loc_shop", sheet={"areas": [
+        {"name": "Behind the counter", "view": "From the customer side, facing the back wall"},
+        {"name": "Front door", "view": "From the aisle, facing the glass front door"},
+    ]})  # fmt: skip
+    assert edit.changed == ["sheet.areas"]
+    for r in reqs(package, "loc_shop").values():
+        assert [d.view for d in r.deliverables] == [
+            "wide", "top-down", "mid-shot: Behind the counter", "mid-shot: Front door"]  # fmt: skip
+        assert r.deliverables[2].deliverable_id == f"d_{r.requirement_id}_area_1"
+    # Areas name pictures of the set; no keyframe is written against them, so listing or
+    # changing them leaves every shot's design print (and so its keyframes) as it was.
+    from drama_agent.shots.staleness import design_print
+
+    shot = next(s for s in package.shot_list if s.location_id == "loc_shop")
+    had = design_print(package, shot)
+    edit_entry(package, "loc_shop", sheet={"areas": []})
+    assert design_print(package, shot) == had
+    edit_entry(package, "loc_shop", sheet={"layout": "Another room entirely"})
+    assert design_print(package, shot) != had
+    with pytest.raises(EditError):  # six at most
+        edit_entry(package, "loc_shop", sheet={"areas": [{"name": str(i), "view": "v"}
+                                                         for i in range(7)]})  # fmt: skip
+
+
 def test_editing_a_location_rebuilds_the_design_text_of_its_states(package):
     edit = edit_entry(package, "loc_shop", sheet={"layout": f"  {LAYOUT}\n"})
     assert edit.changed == ["sheet.layout"]
@@ -158,7 +186,7 @@ def test_edit_endpoint(tmp_path):
         assert out["changed"] == ["sheet.layout"] and len(out["requirement_ids"]) == 2
         assert out["replaced_written"] == ["ar_location_loc_shop_ls_shop_night"]
         assert out["drawn_before"] and all(
-            "wide" in t or "top-down" in t for t in out["drawn_before"]
+            "wide" in t or "top-down" in t or "mid-shot" in t for t in out["drawn_before"]
         )
         pkg = http.get(f"/v1/drama-packages/{pid}", params={"revision_id": rid}).json()
         assert pkg["revision_id"] == rid  # in place: no new revision

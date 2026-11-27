@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from ..models import ProductionPackage
@@ -26,7 +27,8 @@ def sub_shot_references(
 ) -> tuple[list[FrameRef], list[str]]:
     """(the pictures a sub-shot's keyframe is drawn from, what is missing): for each person
     in this sub-shot, the picture a fresh `reading` of the scene chose (with their state at
-    this moment), else their storyboard look; the set and the props. First comes the
+    this moment), else their storyboard look; the set (the picture of the area the reading
+    placed this cut in, when the set has one, else its wide view) and the props. First comes the
     approved keyframe of the sub-shot before it (sub-shot 2 on; it must be approved), or for
     sub-shot 1, of the previous shot of the scene when it has one (light, set dressing and
     everyone's state carry over the cut; not waited for). Chosen per sub-shot, then capped at
@@ -57,7 +59,14 @@ def sub_shot_references(
                           None)  # fmt: skip
             if before is not None and judge(before):
                 previous_shot = None  # it shows an earlier design
-    return picks.refs(people, previous, chosen, previous_shot), missing
+    # The part of the set behind this framing, as the reading chose it (0: the wide view).
+    # Off unless DRAMA_KEYFRAME_SET_AREAS=1: tried on Heartbeats episode 1 (2026-11-27), an
+    # area picture pulled close shots wider (the person drawn at the empty room's scale)
+    # and brought its own foreground into the frame (a fender across a close-up).
+    area = 0
+    if reading is not None and os.environ.get("DRAMA_KEYFRAME_SET_AREAS") == "1":
+        area = reading.set_view(shot.shot_id, sub.index)
+    return picks.refs(people, previous, chosen, previous_shot, area), missing
 
 
 def chosen_pictures(

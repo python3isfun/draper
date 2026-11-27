@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..images import selected_image
@@ -22,6 +22,9 @@ class ShotPicks:
     sets: list[FrameRef]
     props: list[FrameRef]
     missing: list[tuple[str | None, str]]  # (the character it is for, or None; what)
+    # The set's area pictures that have a pick, by the area's number (a standard set has a
+    # mid-shot of each of its most used areas).
+    areas: dict[int, FrameRef] = field(default_factory=dict)
 
     def refs(
         self,
@@ -29,10 +32,12 @@ class ShotPicks:
         previous: FrameRef | None = None,
         chosen: dict[str, FrameRef] | None = None,
         previous_shot: FrameRef | None = None,
+        area: int = 0,
     ) -> list[FrameRef]:
         """The pictures for `people` (None: everyone), in the order the prompt names them,
         as dramer sends them: the previous keyframe, each person in their look (or the
-        picture `chosen` for them by reading the scene), the set's wide view, the props, then
+        picture `chosen` for them by reading the scene), the set (the picture of `area`,
+        the part of it behind this framing, when it has one; else its wide view), the props, then
         faces while the limit allows (`keyframe_max_references`: six unless set)."""
         chosen = chosen or {}
 
@@ -44,7 +49,8 @@ class ShotPicks:
                   and all(x.entity_id != who for x in looks)]  # fmt: skip
         used = {r.ref_id for r in looks}
         faces = [f for f in self.faces if mine(f) and f.ref_id not in used]
-        refs = [*([previous] if previous else []), *looks, *self.sets,
+        sets = [self.areas[area]] if area in self.areas else self.sets
+        refs = [*([previous] if previous else []), *looks, *sets,
                 *([previous_shot] if previous_shot else []), *self.props]  # fmt: skip
         most = keyframe_max_references()
         refs = refs[:most]
@@ -101,13 +107,25 @@ def shot_picks(pkg: ProductionPackage, images: list[GeneratedImage], shot: Shot)
     if loc is not None and (img := pick(loc)) is not None:
         sets.append(FrameRef(ref_id=img.image_id, role=f"{names.get(shot.location_id, '')} "
                              "(the set), wide view", kind="set", entity_id=shot.location_id))  # fmt: skip
+    areas: dict[int, FrameRef] = {}
+    for d in loc.deliverables if loc is not None else []:
+        _, _, n = d.deliverable_id.rpartition("_area_")
+        if not n.isdigit():
+            continue
+        img = selected_image(images, (loc.requirement_id, d.deliverable_id))
+        if img is not None:  # an area not drawn yet is no gap: the wide view stands in
+            label = d.view.split(":", 1)[-1].strip()
+            areas[int(n)] = FrameRef(
+                ref_id=img.image_id, kind="set", entity_id=shot.location_id,
+                role=f"{names.get(shot.location_id, '')} (the set): {label}, the part of it "
+                "behind this framing")  # fmt: skip
     props: list[FrameRef] = []
     for r in shot.prop_state_refs:
         req = of("prop", r.prop_id)
         if req is not None and (img := pick(req)) is not None:
             props.append(FrameRef(ref_id=img.image_id, role=f"{names.get(r.prop_id, r.prop_id)} "
                                   "(prop)", kind="prop", entity_id=r.prop_id))  # fmt: skip
-    return ShotPicks(looks, faces, sets, props, missing)
+    return ShotPicks(looks, faces, sets, props, missing, areas)
 
 
 def shot_references(

@@ -44,6 +44,7 @@ from ..models.design_sheets import (
     PropItem,
     PropSheet,
     PropVariant,
+    SetArea,
     SetLocation,
     SetSheet,
     SetState,
@@ -782,6 +783,38 @@ def sample_set_sheet() -> SetSheet:
                     "counter, and Maya's place is behind the counter"
                 ),
                 ambient_sound="The door bell, traffic on Main Street",
+                areas=[
+                    SetArea(
+                        name="Behind the counter",
+                        used_for="Maya at work",
+                        view="From the customer side, facing the back wall: the wooden counter across the lower frame with the desk lamp on it, shelves of books behind",
+                    ),
+                    SetArea(
+                        name="Customer side of the counter",
+                        used_for="customers talking to Maya",
+                        view="From behind the counter, facing the front: the counter edge in the foreground, the aisle and the glass front door beyond",
+                    ),
+                    SetArea(
+                        name="Front door",
+                        used_for="entrances and exits",
+                        view="From the middle of the aisle, facing the glass front door with the bell above it and Main Street outside",
+                    ),
+                    SetArea(
+                        name="Left-hand shelves",
+                        used_for="browsing",
+                        view="From the aisle, facing the floor-to-ceiling bookshelves on the left wall at an angle",
+                    ),
+                    SetArea(
+                        name="Right-hand shelves",
+                        used_for="browsing",
+                        view="From the aisle, facing the floor-to-ceiling bookshelves on the right wall at an angle",
+                    ),
+                    SetArea(
+                        name="Middle of the aisle",
+                        used_for="walking to the counter",
+                        view="From the front door, facing down the narrow aisle to the counter at the back, shelves on both sides",
+                    ),
+                ],
                 must_keep=["The front door facing the counter", "The bell over the door"],
                 design_freedom=["How the books are arranged on the shelves"],
             ),
@@ -796,6 +829,20 @@ def sample_set_sheet() -> SetSheet:
                 lighting="The window is the main light; at night only a desk lamp",
                 entrances_and_blocking="A wooden door from the hallway; the window is straight ahead as you enter",
                 ambient_sound="Footsteps on the stairs, a TV through the wall",
+                areas=[
+                    SetArea(
+                        name="By the window",
+                        view="From the door, facing the window straight ahead, the table edge at the right",
+                    ),
+                    SetArea(
+                        name="At the table",
+                        view="From the bed, facing the small table on the right wall with the takeout container on it",
+                    ),
+                    SetArea(
+                        name="On the bed",
+                        view="From the table, facing the single bed against the left wall, the jacket on its hook above",
+                    ),
+                ],
                 must_keep=["The door facing the window"],
             ),
         ],

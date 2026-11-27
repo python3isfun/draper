@@ -279,10 +279,14 @@ On a finished package, **Generate images** (Casting tab, or `POST
 MCPHub's GPU route, using the same `MCPHUB_KEY`:
 
 - **What gets an image:** one per required deliverable of each character identity (front
-  face), look (full body), location state (wide view and top-down plan) and prop state
-  (detail). Shot composition references are skipped. A sample-size package has about 20.
+  face), look (full body), location state (the standard set: a wide establishing view, a
+  top-down floor plan, and a mid-shot of each of the set's six most used areas) and prop state
+  (detail). Shot composition references are skipped. A sample-size package has 37, 18 of them set areas.
+  A set's areas are listed in its set sheet (`areas`: a name and what a mid-shot of that
+  portion shows; the Sets step writes them from the script, and a hand edit of the list
+  changes the set's pictures). A set whose sheet lists none has the first two only.
 - **Consistency:** a look uses the character's face image as a reference, so the same
-  person appears in every look. A location's top-down plan uses its wide view, and its other
+  person appears in every look. A location's top-down plan and its area mid-shots use its wide view, and its other
   states use the first state's wide view. A prop's other states use its first state's
   image. Uploaded photos cited in a requirement's `source_refs` are added as references too.
 - **Prompts.** MCPHub's GPU server renders a prompt exactly as written: it doesn't expand it
@@ -308,7 +312,7 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
   template. Regenerate reuses the written prompt with a new seed. Each image shows its prompt
   and who wrote it, and the writer's call appears in the job's Activity view.
 - **Running it:** images are generated in the background one at a time, as the GPU server
-  works, at about 4 MP (1728x2304 faces, 1536x2720 looks, 2304x1728 sets, 2048x2048 plans
+  works, at about 4 MP (1728x2304 faces, 1536x2720 looks and set areas, 2304x1728 sets, 2048x2048 plans
   and props; images made before keep their size). `draft=true` makes
   about 1024 px images, much faster. Progress is live on the Casting tab and the Characters and Sets pages; interrupted images
   resume after a restart. Images never block or fail a job.
@@ -443,7 +447,9 @@ Each keyframe is made in steps:
    board and in the export (`clean: false`) for you to fix in **Edit**, where a save that
    isn't clean is refused with the reasons.
 2. **References**: the design picks of the sub-shot's people, in the order dramer sends
-   them: each person in this shot's look, the set's wide view, the props, then faces while
+   them: each person in this shot's look, the set's wide view (or, with
+   `DRAMA_KEYFRAME_SET_AREAS=1`, the mid-shot picture of the area the scene's reading placed
+   this cut in), the props, then faces while
    the limit allows (six pictures unless `DRAMA_KEYFRAME_MAX_REFERENCES` says else; H3 takes nine). From sub-shot 2 on, `<Picture 1>` is the approved keyframe of the
    sub-shot before, so light, wardrobe state and set dressing carry across the cut.
 3. **Write, draw, check**: the text model writes an H3 edit prompt for the sub-shot's
@@ -507,7 +513,14 @@ hands"), so a picture's bag or pinned hair isn't carried into a moment that does
 the writer and the judge both see each person's state, and the judge checks the wardrobe
 against it. Each sub-shot on the board shows the choice, the state and the reason, with a menu
 to draw a person from another of their pictures (**Read the scene again** keeps your choices).
-A reading is redone when a shot of the scene is re-planned or a pick changes; if it can't be
+The same reading says which part of the set is behind each cut: when the set sheet lists
+areas, each cut gets the number of the area whose picture shows its background, or the wide
+view for an establishing shot or an insert with no background (`set_views`). Keyframes use
+that choice only with `DRAMA_KEYFRAME_SET_AREAS=1`: in the first trial an area picture pulled
+close shots wider and brought its own foreground into the frame, so it is off by default.
+
+A reading is redone when a shot of the scene is re-planned, a pick changes or the set's areas
+change; if it can't be
 used, the storyboard's looks are. A shot's first cut also starts from the approved keyframe of
 the shot before it in the scene, when there is one, so light, set dressing and everyone's state
 carry across the cut. Each prompt version keeps the pictures it was written for. The export's

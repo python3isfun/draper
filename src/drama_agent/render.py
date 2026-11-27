@@ -120,6 +120,9 @@ def sheet_md(pkg: ProductionPackage, which: str, level: int = 2) -> list[str]:
         for loc in s.locations:
             out.append(f"{h2} {loc.name} ({loc.interior_exterior})")
             out += _fields(loc, SET_FIELDS)
+            for i, a in enumerate(loc.areas, 1):
+                out.append(f"- area {i}, {a.name}: {a.view}"
+                           + (f" ({a.used_for})" if a.used_for else ""))  # fmt: skip
             for st in (x for x in s.states if x.location_id == loc.location_id):
                 out.append(f"- state `{st.location_state_id}`:")
                 out += _fields(st, SET_STATE_FIELDS, "  ")

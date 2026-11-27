@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 STAGE = "image_prompts"
 # Bump when the instructions or the shared rules file change; stored on each written prompt.
-PROMPT_RULES_VERSION = "7"
+PROMPT_RULES_VERSION = "8"
 MAX_PROMPT_CHARS = 6000  # ~1,500 tokens; H3 reads at most 4,096 tokens
 
 ROLE = """\

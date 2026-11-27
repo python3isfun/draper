@@ -81,6 +81,31 @@ class CastSheet(BaseModel):
 # Sets
 
 
+# A standard set is drawn as an establishing shot, a floor plan and one mid-shot of each
+# of its most used areas (pipeline/asset_aggregation.py turns them into deliverables).
+SET_AREAS = 6
+# An area picture's deliverable view is "mid-shot: <the area's name>": the name is what the
+# board and the library show, and `view_kind` gives the part that sets its size and prompt.
+AREA_VIEW = "mid-shot"
+
+
+def view_kind(view: str) -> str:
+    """A deliverable view without its label: "mid-shot" for "mid-shot: By the bed"."""
+    return view.split(":", 1)[0].strip()
+
+
+class SetArea(BaseModel):
+    """One portion of a set where the action plays, as a mid-shot would frame it."""
+
+    name: str = Field(description='Two to five words, e.g. "Window-side dressing aisle".')
+    view: str = Field(
+        description="What a mid-shot of this portion shows with nobody in it: where the "
+        "camera stands and which way it faces, the furniture a person standing or sitting "
+        "there would be next to, and the wall, window or door behind them."
+    )
+    used_for: str = Field("", description="What plays here in the script, in a few words.")
+
+
 class SetLocation(BaseModel):
     location_id: str
     name: str = Field("", description="Filled from the story bible; leave empty.")
@@ -95,6 +120,13 @@ class SetLocation(BaseModel):
         description="Doors and windows, and how characters enter, exit and move."
     )
     ambient_sound: str = ""
+    areas: list[SetArea] = Field(
+        default_factory=list,
+        max_length=SET_AREAS,
+        description=f"The {SET_AREAS} portions of this set where most of the script's action "
+        "plays, the most used first; each a different background (a set too small for "
+        f"{SET_AREAS} different ones lists fewer). Names are unique within the set.",
+    )
     must_keep: list[str] = Field(default_factory=list, description=_MUST_KEEP)
     design_freedom: list[str] = Field(default_factory=list, description=_FREEDOM)
 

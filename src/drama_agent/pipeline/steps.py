@@ -620,7 +620,11 @@ class SetsStep(_SheetStep):
         + _SHEET_RULES.format(kinds="location and every location state")
         + " The layout and entrances must support the blocking in the script (who enters "
         "from where, who stands where). Each state describes time of day, lighting and what "
-        "changes from the base set."
+        "changes from the base set. For each location also list its `areas`: the six "
+        "portions of the set where most of the script's action plays, the most used first "
+        "(by the bed, at the desk, in the doorway). Each becomes a reference picture of "
+        "that portion at mid-shot scale, so describe six different backgrounds, each "
+        "consistent with the layout."
     )
 
     def fill_names(self, state: PipelineState, sheet: SetSheet) -> None:

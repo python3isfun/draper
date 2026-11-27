@@ -43,7 +43,11 @@ def design_print(pkg: ProductionPackage, shot: Shot) -> str:
     lines = {x.look_id: x.description for x in bible.looks}
     lines |= {x.location_state_id: x.description for x in bible.location_states}
     lines |= {x.prop_state_id: x.description for x in bible.prop_states}
-    data = {i: [e.model_dump() if (e := entries.get(i)) is not None else None, lines.get(i)]
+    # A set's areas are not in the print: they name its mid-shot pictures, and no keyframe
+    # is written or checked against them (so listing a set's areas outdates no keyframe,
+    # and a sheet from before the field has the print it had).
+    data = {i: [e.model_dump(exclude={"areas"}) if (e := entries.get(i)) is not None else None,
+                lines.get(i)]
             for i in ids}  # fmt: skip
     return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 

@@ -267,6 +267,7 @@ class ShotFrameRunner:
                         raise
                     context = context | {"problems": str(exc).split("; ")}
             reading.candidates = pool
+            reading.set_views = shot_reading.read_views(pkg, scene_id, plans, out)
             # The person's choices as they are now (choices can't change while a scene is read).
             latest = self.repo.get_scene_reading(pkg.package_id, pkg.revision_id, scene_id)
             # The cuts that didn't change keep their old choices; then the person's own.

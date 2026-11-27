@@ -15,8 +15,10 @@ from ..models.design_sheets import (
     CastMember,
     PropItem,
     PropVariant,
+    SetArea,
     SetLocation,
     SetState,
+    view_kind,
 )
 from ..models.images import GeneratedImage
 from ..pipeline.asset_aggregation import ReuseUnit
@@ -32,6 +34,8 @@ SIZES: dict[str, tuple[str, str]] = {
     "full body": ("1536x2720", "576x1024"),
     "wide": ("2304x1728", "1024x768"),
     "top-down": ("2048x2048", "1024x1024"),
+    # An area of a set at mid-shot scale: vertical, as the frames it stands behind.
+    "mid-shot": ("1536x2720", "576x1024"),
     "detail": ("2048x2048", "1024x1024"),
 }
 
@@ -42,8 +46,23 @@ ASPECTS = {
     "full body": "9:16 tall portrait",
     "wide": "4:3 landscape",
     "top-down": "1:1 square",
+    "mid-shot": "9:16 tall portrait",
     "detail": "1:1 square",
 }
+
+
+def view_size(view: str) -> tuple[str, str]:
+    """(full size, draft size) of a deliverable view."""
+    return SIZES.get(view_kind(view), DEFAULT_SIZE)
+
+
+def _area(base: Any, slot: _Slot) -> SetArea | None:
+    """The set area a deliverable pictures ("d_<requirement>_area_<n>"), if it is one."""
+    head, _, n = slot.deliverable_id.rpartition("_area_")
+    if not head or not n.isdigit() or not isinstance(base, SetLocation):
+        return None
+    areas = base.areas
+    return areas[int(n) - 1] if 0 < int(n) <= len(areas) else None
 
 
 def _seed(*parts: str) -> int:
@@ -141,7 +160,7 @@ def plan_images(
         if only is not None and prev is not None and prev.prompt_source == "model" and not rewrite:
             # Regenerate: same written prompt (same reference layout), new seed.
             prompt, source = prev.prompt, "model"
-        full, small = SIZES.get(slot.view, DEFAULT_SIZE)
+        full, small = view_size(slot.view)
         img = GeneratedImage(
             image_id=f"img_{uuid.uuid4().hex[:12]}",
             package_id=pkg.package_id,
@@ -215,7 +234,9 @@ def _prompt_and_refs(
     def facts(obj: Any) -> dict[str, Any]:
         if obj is None:
             return {}
-        data = obj.model_dump(exclude={"must_keep", "design_freedom", "name"})
+        # A set's areas belong to its area pictures alone (each is in that picture's own
+        # details), not to the design text of the set's other pictures.
+        data = obj.model_dump(exclude={"must_keep", "design_freedom", "name", "areas"})
         return {k: v for k, v in data.items() if v not in ("", [], None) and not k.endswith("_id")}
 
     keep = list(req.must_keep)
@@ -280,7 +301,33 @@ def _prompt_and_refs(
                  and _subject(s.req)[0] == entity_id and s.deliverable_id.endswith("_wide")),
                 None,
             )  # fmt: skip
-            if slot.deliverable_id.endswith("_layout"):
+            area = _area(base, slot)
+            if area is not None:
+                # The area is this picture's own design text: edit it and the picture is
+                # out of date (design/staleness.py reads variant_facts).
+                variant_facts = {**variant_facts, "area": area.model_dump()}
+                # A mid-shot of one area references its state's wide view: the same room,
+                # light and dressing, with the camera moved in to where a scene plays.
+                n = ref_to(req.requirement_id, "_wide", f"The set of {name}",
+                           "the same set; this picture shows one portion of it closer")  # fmt: skip
+                what = (
+                    f"A production design photograph of the empty set of {name}: "
+                    f"{area.name}, framed as the background of a mid-shot, with the camera at "
+                    "chest height and nobody in the frame."
+                )
+                if n:
+                    relationships.append(
+                        f"<Subject {n}> is partially preserved; its room, furniture, materials, "
+                        "dressing, time of day and light remain exactly, while the camera moves "
+                        "in to this one portion of it and the frame turns vertical."
+                    )
+                details.append(f"In frame: {area.view.rstrip('.')}.")
+                details.append(
+                    "The space where a person would stand or sit is clear, from the waist up "
+                    "to above head height; what is behind them fills the upper two thirds of "
+                    "the frame and is in focus."
+                )
+            elif slot.deliverable_id.endswith("_layout"):
                 # The plan view of a state references that state's wide view (same room,
                 # same dressing), seen from above.
                 n = ref_to(req.requirement_id, "_wide", f"The set of {name}",
@@ -422,7 +469,7 @@ def _prompt_and_refs(
         task = "new image"
     brief = {
         "deliverable": slot.view,
-        "aspect": ASPECTS.get(slot.view, "1:1 square"),
+        "aspect": ASPECTS.get(view_kind(slot.view), "1:1 square"),
         "task": task,
         "subject": name,
         "subject_facts": subject_facts,

@@ -21,6 +21,11 @@ scene's shots and sub-shots with every candidate picture attached. A person can 
 any choice; overrides survive a new reading as long as the picture is still a candidate.
 A reading is fresh while the scene's plans and candidate pictures are what it read
 (`fingerprint`); a stale one is read again before the next written take.
+
+The same reading says which part of the set is behind each cut. A standard set has a
+mid-shot picture of each of its most used areas (the set sheet's `areas`); a close shot is
+drawn from the picture of the area it plays in, and a wide shot from the set's wide view
+(`set_views`, read by shots/references.py).
 """
 
 from __future__ import annotations
@@ -97,6 +102,9 @@ class SceneReading(BaseModel):
     cuts: dict[str, str] = Field(default_factory=dict)
     candidates: list[Candidate] = Field(default_factory=list)
     choices: list[Choice] = Field(default_factory=list)
+    # Per cut ("shot_id:sub_shot"), the area of the set behind it, numbered from 1 as the
+    # set sheet lists them; 0 (or no entry) is the set's wide view.
+    set_views: dict[str, int] = Field(default_factory=dict)
     model: str | None = None
     error: str | None = None
     updated_at: datetime = Field(default_factory=utcnow)
@@ -104,6 +112,9 @@ class SceneReading(BaseModel):
     @property
     def busy(self) -> bool:
         return self.status == "writing"
+
+    def set_view(self, shot_id: str, sub_shot: int) -> int:
+        return self.set_views.get(f"{shot_id}:{sub_shot}", 0)
 
     def choice(self, shot_id: str, sub_shot: int, character_id: str) -> Choice | None:
         return next(
@@ -119,6 +130,16 @@ class SceneReading(BaseModel):
 
 def scene_shots(pkg: ProductionPackage, scene_id: str) -> list[Shot]:
     return sorted((s for s in pkg.shot_list if s.scene_id == scene_id), key=lambda s: s.start_ms)
+
+
+def set_areas(pkg: ProductionPackage, scene_id: str) -> list[Any]:
+    """The areas of the scene's set, as its sheet lists them (SetArea); [] for none."""
+    shots = scene_shots(pkg, scene_id)
+    if not shots or pkg.set_sheet is None:
+        return []
+    loc = next((x for x in pkg.set_sheet.locations if x.location_id == shots[0].location_id),
+               None)  # fmt: skip
+    return list(loc.areas) if loc is not None else []
 
 
 def candidates(
@@ -174,6 +195,9 @@ def fingerprint(
                    if lk.character_id in people],
                   [lk.model_dump() for lk in pkg.story_bible.looks if lk.character_id in people]],
     }  # fmt: skip
+    # The set's areas, when it lists any (a set without them keeps the print it had).
+    if areas := set_areas(pkg, scene_id):
+        data["areas"] = [a.model_dump() for a in areas]
     return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
@@ -234,7 +258,9 @@ closest picture makes the best frame.\
 GUIDE = """\
 ## Your input
 
-- `scene`: where and when, and its staging when it has intimacy.
+- `scene`: where and when, and its staging when it has intimacy. `scene.areas`, when \
+present, lists the parts of the set that have their own reference picture: each with its \
+number, name and what that picture shows.
 - `shots`: the scene's shots in order. Each has its storyboard `look` per person (the \
 outfit intended for the shot; it may not fit the moment, e.g. a work look with a bag while \
 someone is still dressing), its framing, action, lines, and its `sub_shots` (the cuts inside \
@@ -260,10 +286,19 @@ for continuity, prefer the picture already chosen for that person earlier in the
 it fits as well. `keep`: what the picture already gets right (e.g. "ivory blouse", \
 "charcoal trousers", "loose hair"). `reason`: one short sentence.
 
+4. When `scene.areas` is present, for every sub-shot, the `area` behind the people in that \
+framing: the number of the area whose picture shows the background this framing describes \
+(what is behind and beside whoever is on screen, from that side of the room). Give 0 when \
+the framing is wider than one area (an establishing shot, a shot across the room), when it \
+is an insert that shows no background, or when no area fits: the set's wide view is used \
+then. Go by the framing's own words about the background and where people stand, not by \
+which area the scene mostly plays in.
+
 Describe visible things only. Return {"pictures": [{"image": "<Image 1>", "shows": "..."}], \
 "states": [{"shot_id": "...", "sub_shot": 1, "person": "<name>", "wearing": "...", "hair": \
 "...", "carrying": "", "condition": "...", "image": "<Image 2>", "keep": ["..."], "reason": \
-"..."}]}, with one state per person on screen per sub-shot.\
+"..."}], "views": [{"shot_id": "...", "sub_shot": 1, "area": 2}]}, with one state per person \
+on screen per sub-shot, and one view per sub-shot when the scene lists areas.\
 """
 
 
@@ -285,9 +320,16 @@ class StateOut(BaseModel):
     reason: str = ""
 
 
+class ViewOut(BaseModel):
+    shot_id: str
+    sub_shot: int
+    area: int = 0
+
+
 class ReadingOutput(BaseModel):
     pictures: list[PictureOut] = Field(default_factory=list)
     states: list[StateOut] = Field(default_factory=list)
+    views: list[ViewOut] = Field(default_factory=list)
 
 
 def instructions() -> str:
@@ -305,6 +347,9 @@ def reading_context(
     looks = {lk.look_id: lk for lk in (pkg.cast_sheet.looks if pkg.cast_sheet else [])}
     people = sorted({c for s in shots for c in s.character_ids}, key=lambda c: names.get(c, c))
     scene: dict[str, Any] = {"place": names.get(shots[0].location_id, "") if shots else ""}
+    if areas := set_areas(pkg, scene_id):
+        scene["areas"] = [{"area": i, "name": a.name, "shows": a.view}
+                          for i, a in enumerate(areas, 1)]  # fmt: skip
     if sc is not None:
         scene |= {"int_ext": sc.int_ext, "time_of_day": sc.time_of_day}
         if sc.intimacy is not None and sc.intimacy.level != "none":
@@ -404,6 +449,24 @@ def read_output(
     if problems:
         raise ValueError("; ".join(problems))
     return pool, choices
+
+
+def read_views(
+    pkg: ProductionPackage, scene_id: str, plans: dict[str, Any], out: ReadingOutput
+) -> dict[str, int]:
+    """The area behind each cut as the reading chose it: only cuts the scene has, only
+    areas the set lists (anything else is the wide view)."""
+    from .shot_frames import plan_of
+
+    n = len(set_areas(pkg, scene_id))
+    cuts = {f"{s.shot_id}:{sub.index}" for s in scene_shots(pkg, scene_id)
+            for sub in plan_of(pkg, s, plans.get(s.shot_id)).sub_shots}  # fmt: skip
+    views = {}
+    for v in out.views:
+        key = f"{v.shot_id}:{v.sub_shot}"
+        if key in cuts and 0 < v.area <= n:
+            views[key] = v.area
+    return views
 
 
 def merge_overrides(

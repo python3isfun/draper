@@ -135,6 +135,30 @@ def test_references_keep_people_places_and_props_consistent(package):
     # A state's plan view is drawn from that state's wide view (same room, same dressing).
     assert night_plan.reference_ids == [night_wide.image_id]
 
+    # A standard set: the establishing shot, the floor plan, and a mid-shot of each of its
+    # most used areas, drawn from that state's wide view, vertical like the frames.
+    shop = next(r for r in package.asset_requirements.items
+                if r.requirement_id == "ar_location_loc_shop_ls_shop_night")  # fmt: skip
+    assert [d.view for d in shop.deliverables] == [
+        "wide", "top-down", "mid-shot: Behind the counter",
+        "mid-shot: Customer side of the counter", "mid-shot: Front door",
+        "mid-shot: Left-hand shelves", "mid-shot: Right-hand shelves",
+        "mid-shot: Middle of the aisle"]  # fmt: skip
+    areas = [i for i in p.values()
+             if i.requirement_id == shop.requirement_id and "_area_" in i.deliverable_id]  # fmt: skip
+    assert len(areas) == 6
+    door = areas[2]
+    assert door.reference_ids == [night_wide.image_id] and door.size == "1536x2720"
+    assert door.brief["task"] == "edit" and door.brief["aspect"] == "9:16 tall portrait"
+    assert "Front door, framed as the background of a mid-shot" in door.prompt
+    assert (
+        "nobody in the frame" in door.prompt and "the glass front door with the bell" in door.prompt
+    )
+    assert "the camera moves in to this one portion of it" in door.prompt
+    # A set with fewer areas has fewer pictures; one with none is as before.
+    room = next(r for r in package.asset_requirements.items if "loc_room" in r.requirement_id)
+    assert len(room.deliverables) == 2 + 3
+
     props = [i for k, i in p.items() if k.startswith("ar_prop_prop_photo")]
     assert props[0].reference_ids == [] and props[1].reference_ids == [props[0].image_id]
     assert face.size == "1728x2304" and look.size == "1536x2720"  # about 4 MP

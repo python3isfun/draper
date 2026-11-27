@@ -78,6 +78,7 @@ turns each image's brief into a prompt (`src/drama_agent/image_prompts.py`).
 | Set, first state (wide) | text-to-image | `2304x1728` | production design photograph of the empty set; eye-level wide; layout, materials, palette, entrances; light source |
 | Set, other state (wide) | edit, `<Picture 1>` = first state | `2304x1728` | the set is `<Subject 1>`, partially preserved: layout, furniture, materials and camera stay; time of day, light, dressing, condition change |
 | Set plan (top-down) | edit, `<Picture 1>` = wide | `2048x2048` | same inventory and coordinate frame as the wide view; overhead plan-view; every opening and piece of furniture |
+| Set area (mid-shot) | edit, `<Picture 1>` = wide | `1536x2720` | one portion of the set as the background of a mid-shot, camera at chest height, nobody in frame; the set is `<Subject 1>`, partially preserved: room, furniture, materials, dressing and light stay, the camera moves in and the frame turns vertical; say what is behind where a person would stand |
 | Prop, first state (detail) | text-to-image | `2048x2048` | product photograph; close-up; materials, wear, distinguishing marks; for a picture inside the prop, who is in it, exact count and positions |
 | Prop, other state | edit, `<Picture 1>` = first state | `2048x2048` | the prop is `<Subject 1>`, partially preserved; only the state changes |
 

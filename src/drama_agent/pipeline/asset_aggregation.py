@@ -18,6 +18,8 @@ from ..models.assets import (
     UsedBy,
 )
 from ..models.design_sheets import (
+    AREA_VIEW,
+    SET_AREAS,
     CastLook,
     CastMember,
     CastSheet,
@@ -164,12 +166,17 @@ def _default_brief_or_raise(unit: ReuseUnit, bible: StoryBible, sheets: DesignSh
                 keep += state.must_keep
             else:
                 parts += _legacy(st, "diff_from_base")
+            # A standard set: the establishing shot, the floor plan, and a mid-shot of
+            # each of its most used areas (the set sheet's `areas`, six of them).
+            areas = base.areas[:SET_AREAS] if isinstance(base, SetLocation) else []
             return Default(
                 f"{loc.name}: " + _join(*parts),
-                [d("wide", "wide", "space"), d("layout", "top-down", "blocking")],
+                [d("wide", "wide", "space"), d("layout", "top-down", "blocking")]
+                + [d(f"area_{i}", f"{AREA_VIEW}: {a.name}", "background")
+                   for i, a in enumerate(areas, 1)],
                 keep,
                 freedom,
-            )
+            )  # fmt: skip
         case "prop":
             p, st = props[unit.entity_id], prop_states[unit.variant_id or ""]
             base, state = design.get(p.prop_id), design.get(st.prop_state_id)

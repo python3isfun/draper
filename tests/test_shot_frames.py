@@ -1381,6 +1381,61 @@ def test_the_judge_is_told_the_direction(tmp_path):
 # Choosing the pictures by reading the scene (shot_reading.py)
 
 
+def test_a_close_shot_is_drawn_from_the_picture_of_its_part_of_the_set(package, monkeypatch):
+    """A standard set has a mid-shot of each of its areas. The scene's reading says which
+    area is behind each cut; with DRAMA_KEYFRAME_SET_AREAS=1 that picture replaces the wide
+    view, when it has been drawn. Off by default: the first trial drew worse frames."""
+    from drama_agent import shot_reading
+    from drama_agent.shot_reading import ReadingOutput, SceneReading, ViewOut
+    from drama_agent.shots.picks import shot_picks
+
+    shot = next(s for s in package.shot_list if s.location_id == "loc_shop")
+    plan = single_plan(package, shot)
+    sub = plan.sub(1)
+    images = done_images(package)
+    req = next(r for r in package.asset_requirements.items
+               if r.asset_type == "location" and r.requirement_id in shot.asset_requirement_ids)  # fmt: skip
+    for i in images:  # the helper's ids are cut short: give this set's pictures their own
+        if i.requirement_id == req.requirement_id:
+            i.image_id = "img_" + i.deliverable_id.removeprefix(f"d_{req.requirement_id}_")
+    picks = shot_picks(package, images, shot)
+    assert sorted(picks.areas) == [1, 2, 3, 4, 5, 6]
+    assert "Front door, the part of it behind this framing" in picks.areas[3].role
+
+    def set_ref(reading):
+        refs, _ = sub_shot_references(package, images, [], shot, sub, reading=reading)
+        return next(r for r in refs if r.kind == "set")
+
+    assert set_ref(None).ref_id == "img_wide"
+    reading = SceneReading(package_id=package.package_id, revision_id=package.revision_id,
+                           scene_id=shot.scene_id, set_views={f"{shot.shot_id}:1": 3})  # fmt: skip
+    assert set_ref(reading).ref_id == "img_wide"  # not unless switched on
+    monkeypatch.setenv("DRAMA_KEYFRAME_SET_AREAS", "1")
+    assert set_ref(reading).ref_id == "img_area_3"
+    # The wide view for a wide shot (0), and for an area whose picture isn't drawn yet.
+    reading.set_views = {f"{shot.shot_id}:1": 0}
+    assert set_ref(reading).ref_id == "img_wide"
+    reading.set_views = {f"{shot.shot_id}:1": 3}
+    images = [i for i in images if i.image_id != "img_area_3"]
+    assert set_ref(reading).ref_id == "img_wide"
+
+    # The reading is told the areas and its choices are checked; a set that lists no
+    # areas reads, and is fingerprinted, as before.
+    ctx = shot_reading.reading_context(package, shot.scene_id, {}, [])
+    assert [a["name"] for a in ctx["scene"]["areas"]][:2] == [
+        "Behind the counter", "Customer side of the counter"]  # fmt: skip
+    out = ReadingOutput(views=[ViewOut(shot_id=shot.shot_id, sub_shot=1, area=2),
+                               ViewOut(shot_id=shot.shot_id, sub_shot=9, area=1),
+                               ViewOut(shot_id="sh_other", sub_shot=1, area=1)])  # fmt: skip
+    assert shot_reading.read_views(package, shot.scene_id, {}, out) == {f"{shot.shot_id}:1": 2}
+    out.views[0].area = 7
+    assert shot_reading.read_views(package, shot.scene_id, {}, out) == {}
+    with_areas = shot_reading.fingerprint(package, shot.scene_id, {}, images)
+    package.set_sheet.locations[0].areas = []
+    assert "areas" not in shot_reading.reading_context(package, shot.scene_id, {}, [])["scene"]
+    assert shot_reading.fingerprint(package, shot.scene_id, {}, images) != with_areas
+
+
 def test_reading_the_scene_runs_on_gpt_6_luna_unless_set(monkeypatch):
     from drama_agent import config
 
