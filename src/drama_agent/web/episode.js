@@ -325,7 +325,7 @@ function renderShotSteps(pkg, run, row) {
     ],
     h("div", {},
       vp.error && h("div", { class: "small warn-text" }, vp.error),
-      editing ? renderPromptEditor(pkg, run, row, vpUrl) : (vp.blocks || []).length > 0 && h("details", { class: "small ep-prompt" },
+      editing ? renderEpPromptEditor(pkg, run, row, vpUrl) : (vp.blocks || []).length > 0 && h("details", { class: "small ep-prompt" },
         h("summary", { class: "muted" }, "Prompt text"),
         vp.blocks.map((b) => h("p", { class: "vp-text" }, h("strong", {}, vp.blocks.length > 1 ? `[Shot ${b.sub_shot}] ` : ""), epPicText(b.text, vp.pictures || {}), h("span", { class: "muted" }, ` · camera: ${b.camera}`))),
         vp.sound && h("p", { class: "vp-text" }, h("strong", {}, "Sound: "), vp.sound)),
@@ -480,7 +480,7 @@ setInterval(() => document.querySelectorAll(".ep-elapsed[data-since]").forEach((
 
 // The inline prompt editor: one field per cut, the camera sentence, the sound sentence, and
 // the pictures the prompt may name. Saving makes it the shot's prompt; its clips go out of date.
-function renderPromptEditor(pkg, run, row, vpUrl) {
+function renderEpPromptEditor(pkg, run, row, vpUrl) {
   const d = ep.edit[row.shot_id];
   const pics = row.prompt.pictures || {};
   const close = () => { delete ep.edit[row.shot_id]; renderMain(); };
@@ -527,7 +527,7 @@ function renderPromptEditor(pkg, run, row, vpUrl) {
       h("button", { type: "button", class: "btn ghost small", onclick: close }, "Cancel")));
 }
 
-function renderShotCard(pkg, run, row) {
+function renderEpShotCard(pkg, run, row) {
   const base = `/v1/episode-runs/${encodeURIComponent(run.run_id)}`;
   const skip = new Set(run.settings.skip_shots);
   const skipped = skip.has(row.shot_id);
@@ -549,7 +549,7 @@ function renderShotCard(pkg, run, row) {
 function renderRunShots(pkg, run) {
   return h("section", { class: "card" },
     h("div", { class: "section-head" }, h("h3", {}, "Shots & steps"), h("span", { class: "small muted" }, `${run.shots.length} shots, each from cuts to clip`)),
-    h("div", { class: "ep-shotlist" }, run.shots.map((row) => renderShotCard(pkg, run, row))));
+    h("div", { class: "ep-shotlist" }, run.shots.map((row) => renderEpShotCard(pkg, run, row))));
 }
 
 const EP_TONE = { ok: "ok", warn: "warn", bad: "bad", info: "" };
