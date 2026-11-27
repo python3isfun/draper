@@ -1,0 +1,68 @@
+# One-off test of the H3-Image server with online FP8 weights, on GPUs 3+4 while the
+# Ref2VA video server is scaled to 0. Its label is its own: it does not join the
+# minimax-h3-still Service. Delete after the test.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minimax-h3-still-fp8test
+  namespace: newsbreak-087
+  labels: {app: minimax-h3-still-fp8test}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: minimax-h3-still-fp8test}
+  template:
+    metadata:
+      labels: {app: minimax-h3-still-fp8test}
+    spec:
+      imagePullSecrets:
+      - name: registry-pull
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - {key: kubernetes.io/hostname, operator: In, values: [ny2g3r24hh2-lxc]}
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: sglang
+        image: registry.gpu.internal/newsbreak/minimax-h3-sglang@sha256:6fedf23f1ebff3767e372ddcadc3c237798c75755c45de0094cde4492ac0c795
+        args:
+        - --model-path=/hf/hub/models--MiniMaxAI--MiniMax-H3-Image/snapshots/00dd081ebdd33315adf2c4d84f64aa327ddf3039
+        - --text-encoder-path=/hf/hub/models--MiniMaxAI--MiniMax-H3/snapshots/42ed227ee7df40d41602854ae760620d6eb651fe/Ref2VA/text_encoder
+        - --num-gpus=2
+        - --tp-size=2
+        - --ulysses-degree=1
+        - --component-residency
+        - all=resident
+        - --encoder-parallel=fold
+        - --minimax-h3-adaln-online=true
+        - --quantization=fp8
+        - --host=0.0.0.0
+        - --port=30310
+        env:
+        - {name: HF_HUB_CACHE, value: /hf/hub}
+        ports:
+        - {name: http, containerPort: 30310}
+        resources:
+          requests: {cpu: "16", memory: 32Gi}
+          limits:   {memory: 128Gi, nvidia.com/gpu-pair-g34: 1}
+        startupProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+          failureThreshold: 90
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: hf-cache, mountPath: /hf/hub, subPath: hub, readOnly: true}
+        - {name: work, mountPath: /work}
+        - {name: shm, mountPath: /dev/shm}
+      volumes:
+      - name: hf-cache
+        persistentVolumeClaim: {claimName: minimax-h3-hf-cache, readOnly: true}
+      - name: work
+        emptyDir: {sizeLimit: 20Gi}
+      - name: shm
+        emptyDir: {medium: Memory, sizeLimit: 32Gi}
