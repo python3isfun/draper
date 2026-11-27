@@ -1381,6 +1381,51 @@ def test_the_judge_is_told_the_direction(tmp_path):
 # Choosing the pictures by reading the scene (shot_reading.py)
 
 
+def test_a_close_framing_names_only_what_it_shows(package):
+    """H3 draws what the prompt names: a medium close-up whose person sentence lists her
+    trousers and loafers comes out wide. In a close framing the state from the scene's
+    reading keeps what the frame shows; a wider framing and an insert keep all of it."""
+    from drama_agent.shot_reading import PersonState
+    from drama_agent.shots.writer import close_framing, in_frame, picture_sentences
+
+    assert in_frame("Rust fine-knit top, relaxed black tailored trousers, and flat loafers; "
+                    "small geometric earrings") == "Rust fine-knit top, small geometric earrings"  # fmt: skip
+    assert in_frame("Ivory blouse tucked into charcoal ankle-length trousers; barefoot") == (
+        "Ivory blouse")  # fmt: skip
+    assert in_frame("bare feet") == "" and in_frame("loose dark hair") == "loose dark hair"
+    assert close_framing("Medium close-up single of McKenna")
+    assert close_framing("Over-the-shoulder on Derek, Lila's shoulder frame left")
+    assert not close_framing("Tight insert of her hand on the shoe")
+    assert not close_framing("Medium-wide two-shot by the bed")
+
+    shot = busiest(package)
+    who = shot.character_ids[0]
+    take = plan_take(package, done_images(package), [], single_plan(package, shot))
+    look = next(r for r in take.references if r.kind == "look" and r.entity_id == who)
+    look.state = PersonState(wearing="Rust knit top, black trousers and flat loafers",
+                             hair="a copper bob", condition="clean")  # fmt: skip
+    look.keep = ["rust top", "black trousers", "flat loafers"]
+
+    def sentence(framing):
+        take.spec = take.spec.model_copy(update={"framing": framing})
+        n = take.references.index(look)
+        return picture_sentences(package, take)[n]["relationship"]
+
+    close = sentence("Medium close-up single, facing the desk")
+    assert "the face, build and the garments this framing shows remain" in close
+    assert "wears Rust knit top, hair a copper bob;" in close
+    assert "trousers" not in close and "loafers" not in close and "clean" not in close
+    assert "anything held in the picture appears only where the action puts it" in close
+    wide = sentence("Medium-wide single by the door")
+    assert "black trousers, flat loafers remain" in wide and "and flat loafers" in wide
+    # What the state says is out of the picture is not named either, at any size.
+    look.state = look.state.model_copy(update={
+        "carrying": "work bag on her shoulder; her left hand remains joined with Ryder's "
+                    "below frame"})  # fmt: skip
+    wide = sentence("Medium-wide single by the door")
+    assert "holding work bag on her shoulder," in wide and "Ryder" not in wide
+
+
 def test_a_close_shot_is_drawn_from_the_picture_of_its_part_of_the_set(package, monkeypatch):
     """A standard set has a mid-shot of each of its areas. The scene's reading says which
     area is behind each cut; with DRAMA_KEYFRAME_SET_AREAS=1 that picture replaces the wide

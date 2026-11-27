@@ -15,6 +15,7 @@ from ..models import ProductionPackage
 from ..models.request import DEFAULT_RATING
 from ..models.storyboard import Shot
 from ..shot_reading import PersonState
+from ..validation.hard_checks import shot_size
 from .common import _names, scene_of, shot_of
 from .models import NO_OTHER_TEXT, FrameRef, ShotTake, SubShot
 from .plans import shot_lines, single_plan, sub_shot_lines
@@ -264,6 +265,61 @@ def take_sub(pkg: ProductionPackage, shot: Shot, take: ShotTake) -> SubShot:
     return take.spec or single_plan(pkg, shot).sub_shots[0]
 
 
+# What a close framing leaves below its lower edge. H3 draws what a prompt names: a medium
+# close-up whose person "wears black trousers and flat loafers" comes out waist-down wide
+# (measured: reports/keyframe-person-sentence.md). So a close framing's person sentence
+# names only what it shows.
+_BELOW_FRAME = re.compile(
+    r"\b(trousers?|pants|jeans|slacks|leggings|shorts|skirt|hem|shoes?|pumps?|heels?|loafers?|"
+    r"boots?|sneakers?|sandals?|flats|socks?|stockings?|tights|barefoot|bare[- ]feet|feet|foot|"
+    r"legs?|ankles?|knees?|waistband|belt)\b",
+    re.IGNORECASE,
+)
+_JOINS = re.compile(r"\s+(?:tucked into|worn over|over|above|around|with|and)\s+", re.IGNORECASE)
+_CLOSE_SIZES = ("close-up", "medium close-up")
+_OTS = re.compile(r"\bover[- ]the[- ]shoulder\b|\bover\b[^.,;]*\bshoulder\b|\bOTS\b", re.IGNORECASE)
+
+
+# What a state says is out of the picture ("joined with Ryder's below frame"): named, it is
+# drawn, at any shot size.
+_UNSEEN = re.compile(
+    r"\b(?:below|beneath|under|outside|out of|beyond|off)[- ](?:the |this )?(?:frame|crop|shot|"
+    r"screen|camera)\b|\boff[- ]?screen\b|\boff[- ]?camera\b|\bunseen\b|\bnot visible\b",
+    re.IGNORECASE,
+)
+
+
+def seen(text: str) -> str:
+    """`text` without the clauses about what the frame doesn't show."""
+    parts = re.split(r"\s*(?:[;,]|\bwhile\b|\bas\b)\s*", text)
+    return ", ".join(p.strip() for p in parts if p.strip() and not _UNSEEN.search(p))
+
+
+def close_framing(framing: str) -> bool:
+    """Whether a framing ends at the chest or above: a close-up, a medium close-up, or an
+    over-the-shoulder shot that names no wider size."""
+    if re.search(r"\binsert\b|\bdetail\b", framing, re.IGNORECASE):
+        return False  # an insert of hands or feet shows exactly what it names
+    size = shot_size(framing)
+    return size in _CLOSE_SIZES or (size is None and bool(_OTS.search(framing)))
+
+
+def in_frame(text: str) -> str:
+    """`text` (garments, or a condition) without what a close framing doesn't show: "ivory
+    blouse tucked into charcoal trousers; barefoot" is "ivory blouse"."""
+    kept = []
+    for part in re.split(r"\s*[;,]\s*", text):
+        part = re.sub(r"^(?:and|with)\s+", "", part.strip(), flags=re.IGNORECASE)
+        head = []
+        for piece in _JOINS.split(part):
+            if _BELOW_FRAME.search(piece):
+                break  # what follows hangs on it ("trousers with a pressed crease")
+            head.append(piece)
+        if head and (shown := part[: part.index(head[-1]) + len(head[-1])].strip()):
+            kept.append(shown)
+    return ", ".join(kept)
+
+
 def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, Any]]:
     """Per <Picture N>: its role, and the definition and relationship sentences the prompt
     uses for it (MiniMax's edit form). Written here, not by the model, so every picture is
@@ -271,14 +327,32 @@ def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, 
     chosen by reading the scene keeps the face, build and what it already gets right, and
     states how they look at this moment (shot_reading.py), so what the picture shows that
     the moment doesn't (a bag in hand, pinned hair) is not carried over. Without a reading,
-    the garments carry over but things held only appear where the action puts them."""
+    the garments carry over but things held only appear where the action puts them. In a
+    close framing the state names only what the frame shows: trousers and shoes named in a
+    medium close-up are drawn, and the frame widens to fit them."""
     names = _names(pkg)
+    close = close_framing(take_sub(pkg, shot_of(pkg, take.shot_id), take).framing)
 
     def to_state(subject: str, who: str, r: FrameRef) -> str:
-        kept = ", ".join(["the face", "build", *r.keep])
         assert r.state is not None
+        keep = [k for k in (seen(k) for k in r.keep) if k]
+        state = r.state.model_copy(update={"wearing": seen(r.state.wearing),
+                                           "carrying": seen(r.state.carrying),
+                                           "condition": seen(r.state.condition)})  # fmt: skip
+        if close:
+            # A frame that ends at the chest: the face, the hair and the upper garment. What
+            # is held and the person's condition are mostly hands, bags and what happens
+            # below the crop; the description places whatever of them the frame shows.
+            wearing, hair = in_frame(state.wearing), state.hair.rstrip(".")
+            now = ", ".join(x for x in (f"{who or 'the person'} wears {wearing}" if wearing else "",
+                                        f"hair {hair}" if hair else "") if x)  # fmt: skip
+            return (f"{subject} is partially preserved: the face, build and the garments this "
+                    f"framing shows remain; {now + '; ' if now else ''}anything held in the "
+                    "picture appears only where the action puts it; the pose, position and "
+                    "expression follow this description.")  # fmt: skip
+        kept = ", ".join(["the face", "build", *keep])
         return (f"{subject} is partially preserved: {kept} remain; "
-                f"{r.state.sentence(who or 'the person')}; the pose, position and expression "
+                f"{state.sentence(who or 'the person')}; the pose, position and expression "
                 "follow this description.")  # fmt: skip
 
     look_of = {r.entity_id: n for n, r in enumerate(take.references, 1) if r.kind == "look"}
