@@ -42,22 +42,37 @@ def single_plan(pkg: ProductionPackage, shot: Shot) -> ShotPlan:
     )  # fmt: skip
 
 
+# A line the storyboard cuts across shots is spoken in parts. A part under MIN_PART_MS is
+# not spoken in its shot at all: its word or two go to the shots beside it (one word in a
+# tenth of a second is a clip of someone off screen mouthing a syllable). A part's first
+# word moves to a comma or a full stop when one is within SNAP_WORDS of where the time
+# falls and no part then runs faster than MAX_WORDS_PER_S.
+MIN_PART_MS = 400
+SNAP_WORDS = 2
+MAX_WORDS_PER_S = 3.8
+_PHRASE_END = re.compile(r"[.,;:!?…—–][\"'”’)\]]*$")
+
+
 def shot_lines(pkg: ProductionPackage, shot: Shot) -> list[dict[str, Any]]:
     """The shot's lines of dialogue, timed from the start of its clip (the one source of
     line timing for the planner, the writer, the judge, the checks and the export).
     A line the storyboard cuts across shots is spoken in parts: `text` is the words spoken
-    in this shot (by the share of the line's time that falls in it), `part` says which
-    ("whole", "start", "middle", "end") and `full_text` is the whole line. H3 lip-syncs
-    the words it is given to the seconds it has, so a shot quotes only its own words."""
+    in this shot (by the share of the line's time that falls in it, moved to the nearest
+    phrase end), `part` says which ("whole", "start", "middle", "end") and `full_text` is
+    the whole line. H3 lip-syncs the words it is given to the seconds it has, so a shot
+    quotes only its own words, every word is spoken in exactly one shot, and a shot that
+    holds a moment of a line (under MIN_PART_MS) doesn't have the line at all."""
     names = _names(pkg)
     lines = _dialogue(pkg)
-    shares = _line_shares(pkg, shot)
+    parts = _line_parts(pkg, shot)
     out = []
     for c in shot.dialogue_cues:
         line = lines.get(c.dialogue_id)
         if line is None:
             continue
-        text, part = _line_part(line.text, *shares.get(c.dialogue_id, (0, 1, 1)))
+        text, part = parts.get(c.dialogue_id, (line.text, "whole"))
+        if not text:
+            continue
         out.append({
             "dialogue_id": c.dialogue_id,
             "speaker_id": line.character_id,
@@ -71,41 +86,71 @@ def shot_lines(pkg: ProductionPackage, shot: Shot) -> list[dict[str, Any]]:
     return sorted(out, key=lambda x: x["start_ms"])
 
 
-def _line_shares(pkg: ProductionPackage, shot: Shot) -> dict[str, tuple[int, int, int]]:
-    """Per line cued in the shot: (ms of it spoken in earlier shots, ms spoken in this
-    shot, ms in all), over the episode's shots in order."""
+def _line_parts(pkg: ProductionPackage, shot: Shot) -> dict[str, tuple[str, str]]:
+    """Per line cued in the shot: (the words of it spoken in this shot, which part), from
+    the line's cues over the episode's shots in order. The words are "" where the shot
+    holds too little of the line to speak any."""
     mine = {c.dialogue_id for c in shot.dialogue_cues}
-    before: dict[str, int] = dict.fromkeys(mine, 0)
-    here: dict[str, int] = dict.fromkeys(mine, 0)
-    total: dict[str, int] = dict.fromkeys(mine, 0)
-    for s in pkg.shot_list:
-        if s.episode_id != shot.episode_id:
-            continue
+    cues: dict[str, list[tuple[str, int]]] = {d: [] for d in mine}  # (shot, ms) in order
+    for s in sorted((s for s in pkg.shot_list if s.episode_id == shot.episode_id),
+                    key=lambda s: s.start_ms):  # fmt: skip
         for c in s.dialogue_cues:
-            if c.dialogue_id not in mine:
+            if c.dialogue_id in mine:
+                cues[c.dialogue_id].append((s.shot_id, max(0, c.end_ms - c.start_ms)))
+    lines = _dialogue(pkg)
+    out = {}
+    for d, spans in cues.items():
+        if d not in lines:
+            continue
+        texts = split_line(lines[d].text, [ms for _, ms in spans])
+        spoken = [i for i, t in enumerate(texts) if t]
+        for i, (shot_id, _) in enumerate(spans):
+            if shot_id != shot.shot_id:
                 continue
-            ms = max(0, c.end_ms - c.start_ms)
-            total[c.dialogue_id] += ms
-            if s.shot_id == shot.shot_id:
-                here[c.dialogue_id] += ms
-            elif s.start_ms < shot.start_ms:
-                before[c.dialogue_id] += ms
-    return {d: (before[d], here[d], total[d]) for d in mine}
+            part = ("whole" if len(spoken) <= 1 else "start" if i == spoken[0]
+                    else "end" if i == spoken[-1] else "middle")  # fmt: skip
+            # A shot cued twice for one line (the storyboard shouldn't) speaks both parts.
+            had = out.get(d, ("", part))[0]
+            out[d] = (f"{had} {texts[i]}".strip(), part)
+    return out
 
 
-def _line_part(text: str, before: int, here: int, total: int) -> tuple[str, str]:
-    """The words of `text` spoken in a shot that holds `here` ms of the line's `total`,
-    after `before` ms spoken in the shots before, and which part of the line that is."""
-    if total <= 0 or here >= total:
-        return text, "whole"
+def split_line(text: str, spans: list[int]) -> list[str]:
+    """`text` cut into one part per span (the ms of the line each shot holds, in order):
+    every word in exactly one part, "" for a span too short to speak in."""
     words = text.split()
+    if not words or not spans:
+        return [text] * len(spans)
+    keep = [i for i, ms in enumerate(spans) if ms >= MIN_PART_MS]
+    if not keep:  # a line that short is spoken where most of it falls
+        keep = [max(range(len(spans)), key=lambda i: spans[i])]
+    keep = keep[: len(words)]  # never more parts than words
+    ms = [spans[i] for i in keep]
+    total = sum(ms) or 1
     n = len(words)
-    a = min(n - 1, round(n * before / total))
-    b = max(a + 1, min(n, round(n * (before + here) / total)))
-    if before + here >= total:
-        b = n
-    part = "start" if before == 0 else "end" if b >= n else "middle"
-    return " ".join(words[a:b]), part
+    # Where each part begins, by time; each part has at least one word.
+    cuts = [0]
+    for k in range(1, len(ms)):
+        at = round(n * sum(ms[:k]) / total)
+        cuts.append(max(cuts[-1] + 1, min(n - (len(ms) - k), at)))
+    cuts.append(n)
+
+    def rate(k: int, lo: int, hi: int) -> float:
+        return (hi - lo) / max(ms[k] / 1000, 0.001)
+
+    for k in range(1, len(ms)):
+        lo, here, hi = cuts[k - 1], cuts[k], cuts[k + 1]
+        ends = [i for i in range(max(lo + 1, here - SNAP_WORDS), min(hi - 1, here + SNAP_WORDS) + 1)
+                if _PHRASE_END.search(words[i - 1])]  # fmt: skip
+        for i in sorted(ends, key=lambda i: (abs(i - here), i)):
+            limit = max(MAX_WORDS_PER_S, rate(k - 1, lo, here), rate(k, here, hi))
+            if rate(k - 1, lo, i) <= limit and rate(k, i, hi) <= limit:
+                cuts[k] = i
+                break
+    out = [""] * len(spans)
+    for k, i in enumerate(keep):
+        out[i] = " ".join(words[cuts[k] : cuts[k + 1]])
+    return out
 
 
 def sub_shot_lines(lines: list[dict[str, Any]], sub: SubShot) -> list[dict[str, Any]]:

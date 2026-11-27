@@ -736,7 +736,9 @@ under the dialogue. Composed beds are kept on the run (`EpisodeRun.music`) and r
 the caption and the scene's length hold.
 
 **Coverage.** The storyboard is told how a scene is covered for a vertical frame
-(`pace.COVERAGE_RULES`): shots of 3 to 6 s with one or two beats, a wider shot to place the
+(`pace.COVERAGE_RULES`): each shot is one clip of 4 to 8 s (H3 renders nothing shorter)
+that the cut planner cuts inside, a new view every 1.5 to 3 s at a brisk pace; a line
+starts and ends inside one shot; a wider shot to place the
 people and then singles, over-the-shoulder shots and a close-up that alternate with the
 lines, medium close-up as the default size, each `framing` beginning with its size and
 subject. A hard check (`check_coverage`) refuses two consecutive shots of a scene with the

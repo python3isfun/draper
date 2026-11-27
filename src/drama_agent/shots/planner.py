@@ -50,7 +50,7 @@ or an over-the-shoulder) shortly before their line starts, and stay on them unti
 a short reaction can follow in the gap between lines (see Pace for how short). Keep a two-shot for a line only when the \
 storyboard's framing or notes ask to hold both people.
 - **A clip of {coverage_s:g} s or more in which two or more people on screen speak is 2 \
-or 3 sub-shots** (e.g. the two-shot for the first line, then a single of the person who answers), \
+to 4 sub-shots** (e.g. the two-shot for the first line, then a single of the person who answers), \
 unless the storyboard's framing or notes say to hold the two-shot.
 - **Never cut in the middle of a line.** Every cut falls between lines (or before the first \
 or after the last).

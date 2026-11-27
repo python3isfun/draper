@@ -163,6 +163,25 @@ def test_coverage_refuses_the_same_setup_twice_and_a_scene_of_two_shots(package,
     assert any(i.object_id == scene and "two-shots or group shots" in i.evidence for i in issues)
 
 
+def test_coverage_refuses_a_shot_under_the_shortest_clip_and_a_line_over_a_cut(package, options):
+    """The video model renders no clip under 4 s, and a line spoken across two clips is two
+    generations of one sentence: the storyboard keeps both from happening."""
+    assert not [i for i in run_hard_checks(package, options) if i.check == "coverage"]
+    a = next(s for s in package.shot_list if s.dialogue_cues)
+    b = next(s for s in package.shot_list if s.episode_id == a.episode_id
+             and s.start_ms > a.start_ms)  # fmt: skip
+    cue = a.dialogue_cues[-1]
+    b.dialogue_cues = [cue.model_copy(update={"start_ms": b.start_ms, "end_ms": b.start_ms + 900}),
+                       *b.dialogue_cues]  # fmt: skip
+    issues = [i for i in run_hard_checks(package, options) if i.check == "coverage"]
+    assert [i.object_id for i in issues] == [b.shot_id]
+    assert f"line {cue.dialogue_id} starts in {a.shot_id}" in issues[0].evidence
+    b.dialogue_cues = b.dialogue_cues[1:]
+    a.duration_ms = 3000
+    issues = [i for i in run_hard_checks(package, options) if i.check == "coverage"]
+    assert any(i.object_id == a.shot_id and "a shot of 3 s" in i.evidence for i in issues)
+
+
 def test_a_revision_is_held_to_coverage_only_where_it_rewrote_shots(package):
     from drama_agent.models import Issue
     from drama_agent.pipeline.revise import coverage_in_scope

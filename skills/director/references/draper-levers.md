@@ -6,7 +6,7 @@ can't cut faster than the lines allow, so fix upstream first.
 
 | Finding | Step | Where | What to change |
 | --- | --- | --- | --- |
-| Long shots, few cuts | Storyboard | `src/drama_agent/pace.py`, `COVERAGE_RULES` and `storyboard_rules()` | Today: 3 to 6 s and up to two lines per shot at every pace. Make it depend on the pace (brisk: 1.5 to 3 s, one line per shot, one hold per scene) |
+| Long shots, few cuts | Storyboard | `src/drama_agent/pace.py`, `COVERAGE_RULES` and `storyboard_rules()` | A shot is a clip of 4 to 8 s, cut inside by the planner (`setup_s` per pace: brisk 1.5 to 3 s a view; `shots/planner.py`, `PLANNER_MAX_SUB_SHOTS`). If clips still hold one view, look at the plans first: a one-cut fallback (`source: single`) or a planner that kept the storyboard's single framing |
 | Two-shots carry the exchange | Storyboard | `pace.COVERAGE_RULES`; `validation/hard_checks.py`, `check_coverage` (at most one shot in two is a two-shot or group shot; consecutive shots differ) | The size defaults and the share of group shots |
 | No reaction at the turn | Storyboard and cut plan | `pace.storyboard_rules()`; `pace.planner_rules()` (`reaction_s`, the listener cap: advice to the planner, no longer checked since the off-screen-line rule replaced it) | Plan a close-up of the person each turning line lands on; a review check `"reaction"` |
 | Dead air after a line | Cut plan and trim | Episode runs (`shots/episode.py`, `trim` setting) | Trim to the line's end; cut on the word |

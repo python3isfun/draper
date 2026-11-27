@@ -152,14 +152,31 @@ def test_a_wrong_cut_count_is_flagged_and_ranks_below_a_refused_plan(package):
 def test_a_line_cut_across_shots_is_spoken_in_parts(package):
     """Each shot quotes only the words spoken in it, by the share of the line's time it
     holds; together the parts are the whole line, in order."""
-    from drama_agent.shots.plans import _line_part, shot_lines
+    from drama_agent.shots.plans import shot_lines, split_line
 
-    line = "You know, in the history of humankind nobody has ever regretted a good breakfast."
-    assert _line_part(line, 0, 1700, 6300) == ("You know, in the", "start")
-    assert _line_part(line, 1700, 3000, 6300) == ("history of humankind nobody has ever", "middle")
-    assert _line_part(line, 4700, 1600, 6300) == ("regretted a good breakfast.", "end")
-    assert _line_part(line, 0, 6300, 6300) == (line, "whole")
-    assert _line_part("Hi.", 0, 100, 4000) == ("Hi.", "start")  # at least one word a shot
+    line = "You know that in the history of humankind nobody has ever regretted a good breakfast."
+    assert split_line(line, [1700, 3000, 1600]) == [
+        "You know that in", "the history of humankind nobody has ever", "regretted a good breakfast."]  # fmt: skip
+    assert split_line(line, [6300]) == [line]
+    # A cut moves to a comma or a full stop within two words of where the time falls...
+    assert split_line("It should be. You tell dad jokes, but dirty.", [1600, 1600]) == [
+        "It should be.", "You tell dad jokes, but dirty."]  # fmt: skip
+    assert split_line("Look at the curves, the way the lines glide. Soft, like a brush.",
+                      [3000, 2000]) == ["Look at the curves, the way the lines glide.",
+                                        "Soft, like a brush."]  # fmt: skip
+    # ...unless a part would then be spoken too fast for its seconds.
+    assert split_line("Fine. I will never say that to anyone at all.", [600, 2200]) == [
+        "Fine. I", "will never say that to anyone at all."]  # fmt: skip
+    # A shot that holds a moment of the line has none of it: no word is spoken twice, and
+    # nobody mouths one word in a tenth of a second.
+    assert split_line("Point proven. No. I would be late for work.", [3600, 100]) == [
+        "Point proven. No. I would be late for work.", ""]  # fmt: skip
+    assert split_line("I have the perfect idea. A car!", [200, 3300]) == [
+        "", "I have the perfect idea. A car!"]  # fmt: skip
+    assert split_line("Hi.", [100, 50]) == ["Hi.", ""]  # spoken where most of it falls
+    for text, spans in ((line, [1700, 3000, 1600]), ("One two three.", [900, 900, 900, 900]),
+                        ("Soft and deliberate, like brushstrokes across a canvas.", [4000, 500])):  # fmt: skip
+        assert " ".join(x for x in split_line(text, spans) if x) == text
 
     first = next(s for s in package.shot_list if s.dialogue_cues)
     nxt = next(s for s in package.shot_list if s.episode_id == first.episode_id
@@ -177,6 +194,11 @@ def test_a_line_cut_across_shots_is_spoken_in_parts(package):
     assert head["full_text"] == tail["full_text"]
     assert f"{head['text']} {tail['text']}" == head["full_text"]
     assert tail["start_ms"] == 0
+    # A sliver of the line in the next shot: the first shot speaks all of it, the next none.
+    nxt.dialogue_cues[0].end_ms = nxt.start_ms + 100
+    [whole] = [x for x in shot_lines(package, first) if x["dialogue_id"] == cue.dialogue_id]
+    assert (whole["part"], whole["text"]) == ("whole", whole["full_text"])
+    assert all(x["dialogue_id"] != cue.dialogue_id for x in shot_lines(package, nxt))
 
 
 def test_a_planner_answer_with_no_cuts_plans_the_shot_as_one(package):

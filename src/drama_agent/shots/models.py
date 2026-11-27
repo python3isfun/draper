@@ -23,7 +23,7 @@ PLAN_STAGE = "shot_plan"
 # at most PLANNER_MAX_SUB_SHOTS on its own, more only when asked for a count.
 MAX_SUB_SHOTS = 5
 
-PLANNER_MAX_SUB_SHOTS = 3
+PLANNER_MAX_SUB_SHOTS = 4
 
 MIN_SUB_SHOT_MS = 1000
 

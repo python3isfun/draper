@@ -60,13 +60,14 @@ its characters, lines or scenes (see `docs/templates.md`).
 
 Measured and slow-burn stories may hold longer, but the coverage rules (1, 3) still apply.
 
-These targets are the bar, not yet the code. `pace.COVERAGE_RULES` still asks the
-storyboard for shots of 3 to 6 s with up to two lines, at every pace, and the listener cap
-(`reaction_s` in `pace.planner_rules()`) is advice to the cut planner, not a check. A
-storyboard written under the current rules will land between the two: say which rules it
-was written under before scoring it, and treat the gap to the targets as the change to make
-in Draper (the first rows of
-[references/draper-levers.md](references/draper-levers.md)).
+The shot targets are sub-shot targets. Since 2026-11-26 a storyboard shot is one clip of
+4 to 8 s (H3 renders nothing shorter than 4 s) with every line inside one shot
+(`pace.COVERAGE_RULES`, checked by `check_coverage`), and the cut planner is told to change
+the view every 1.5 to 3 s at a brisk pace (`setup_s` in `pace.RULES`). The listener cap
+(`reaction_s`) and the view length are advice to the planner, not checks. A storyboard
+written before that date has shots of 3 to 6 s and lines that run over cuts: say which
+rules a revision was written under before scoring it
+([references/draper-levers.md](references/draper-levers.md)).
 
 ## Workflow: review a clip or an episode
 

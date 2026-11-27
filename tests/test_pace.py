@@ -51,11 +51,20 @@ def test_the_storyboard_is_told_continuity_across_neighbouring_shots():
 
 def test_the_storyboard_is_told_how_to_cover_a_scene():
     rules = storyboard_rules("brisk")
-    assert "Shots are 3 to 6 s" in rules and "medium close-up is the default size" in rules
+    assert "A shot is one clip of 4 to 8 s" in rules and "Never write a shot under 4 s" in rules
+    assert "A line starts and ends inside one shot" in rules
+    assert "medium close-up is the default size" in rules
     assert "Begin each `framing` with its size and subject" in rules
     assert "at most one shot in two is a two-shot or group shot" in rules
     review = ReviewStep().rules(JobRequest(sources=BODY["sources"], options={"pace": "brisk"}))
     assert "shots over 8 s" in review
+
+
+def test_the_planner_is_told_how_often_to_change_the_view():
+    """The storyboard's shots are clips; the cutting inside them follows the pace."""
+    assert "A new view every 1.5 to 3 s where people talk" in planner_rules("brisk")
+    assert "A new view every 2.5 to 5 s where people talk" in planner_rules("measured")
+    assert "A new view every 4 to 8 s where people talk" in planner_rules("slow_burn")
 
 
 def test_the_camera_rule_says_the_share_of_shots():

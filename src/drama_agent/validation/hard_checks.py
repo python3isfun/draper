@@ -20,6 +20,7 @@ from ..models import (
     Shot,
     as_rating,
 )
+from ..pace import MIN_SHOT_MS
 from ..pipeline.asset_aggregation import required_units_for_shot, shot_reference_unit
 from .index import PackageIndex, design_entries, lockable_objects
 from .prose import find_prose_leaks
@@ -101,7 +102,8 @@ def is_group_shot(framing: str, people: int) -> bool:
 def check_coverage(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> list[Issue]:
     """Within a scene: two consecutive shots never share a size and the same people on
     screen, and at most one shot in two is a two-shot or group shot (once a scene has
-    three or more shots). The storyboard is told the same rules (pace.COVERAGE_RULES)."""
+    three or more shots); no shot is shorter than the shortest clip; and a line is spoken
+    in one shot. The storyboard is told the same rules (pace.COVERAGE_RULES)."""
     issues: list[Issue] = []
     by_scene: dict[str, list[Shot]] = defaultdict(list)
     for sh in sorted(pkg.shot_list, key=lambda s: s.start_ms):
@@ -117,6 +119,15 @@ def check_coverage(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> 
                     "or who the shot is about (a single, an over-the-shoulder, a close-up, an "
                     "insert)",
                 ))  # fmt: skip
+        for sh in shots:
+            if sh.duration_ms < MIN_SHOT_MS:
+                issues.append(_issue(
+                    "coverage", sh.shot_id,
+                    f"a shot of {sh.duration_ms / 1000:g} s: the shortest clip is "
+                    f"{MIN_SHOT_MS / 1000:g} s, so it would hold after its action; make it a "
+                    "moment of the shot before or after it, or give it "
+                    f"{MIN_SHOT_MS / 1000:g} s of action",
+                ))  # fmt: skip
         if len(shots) >= 3:
             groups = [s for s in shots if is_group_shot(s.framing, len(s.character_ids))]
             if len(groups) * 2 > len(shots):
@@ -126,6 +137,17 @@ def check_coverage(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> 
                     "shots; cover the exchange with singles and over-the-shoulder shots that "
                     "alternate with the lines, keeping the two-shot to establish the people or "
                     "a move across the room",
+                ))  # fmt: skip
+    cued: dict[str, str] = {}  # a line -> the first shot that speaks it
+    for sh in sorted(pkg.shot_list, key=lambda s: s.start_ms):
+        for cue in sh.dialogue_cues:
+            first = cued.setdefault(cue.dialogue_id, sh.shot_id)
+            if first != sh.shot_id:
+                issues.append(_issue(
+                    "coverage", sh.shot_id,
+                    f"line {cue.dialogue_id} starts in {first} and runs on into this shot; a "
+                    "line starts and ends inside one shot (move the cut to the end of the "
+                    "line, or give the whole line to one of the two shots)",
                 ))  # fmt: skip
     return issues
 

@@ -23,19 +23,20 @@ DEFAULT_PACE: Pace = "brisk"
 class PaceRule:
     label: str
     reaction_s: float  # the longest a cut holds on a listener or a reaction
+    setup_s: tuple[float, float]  # how long one view lasts where people talk
     moving: str  # the share of shots that move the camera, in words ("at least half")
     words: tuple[int, int]  # the words of physical action per shot
     feel: str
 
 
 RULES: dict[str, PaceRule] = {
-    "brisk": PaceRule("Brisk", 1.5, "at least three in four", (45, 70),
+    "brisk": PaceRule("Brisk", 1.5, (1.5, 3), "at least three in four", (45, 70),
                       "Every clip moves: someone acts, the camera travels, and a new setup "
                       "comes every two or three seconds in dialogue."),
-    "measured": PaceRule("Measured", 2.5, "at least half", (40, 60),
+    "measured": PaceRule("Measured", 2.5, (2.5, 5), "at least half", (40, 60),
                          "Clips move steadily; a beat may breathe for a moment before the "
                          "next action."),
-    "slow_burn": PaceRule("Slow burn", 4.0, "at least one in three", (35, 55),
+    "slow_burn": PaceRule("Slow burn", 4.0, (4, 8), "at least one in three", (35, 55),
                           "Tension builds in held moments, but even a held moment has "
                           "movement in it: a hand, a breath, a slow push in."),
 }  # fmt: skip
@@ -56,12 +57,22 @@ def rule(pace: object) -> PaceRule:
     return RULES[as_pace(pace)]
 
 
+# The shortest storyboard shot: the video model renders no clip under 4 s, so a shorter
+# shot is padded to it and holds on a face after its line (hard_checks.check_coverage).
+MIN_SHOT_MS = 4000
+
 # How a scene is covered, for a vertical frame. Shot sizes the coverage check reads from
 # `framing` (hard_checks.check_coverage): the first words of the framing name the size.
 COVERAGE_RULES = (
-    "- **Shots are 3 to 6 s, one or two beats each, at most two lines.** A shot over 8 s "
-    "needs a camera move that carries it (a track with the walk, a slow push through the "
-    "turn) and says so. Give a scene more shots rather than longer ones.\n"
+    "- **A shot is one clip of 4 to 8 s, two or three beats, up to three lines.** The video "
+    "model renders nothing shorter than 4 s, and the cut planner cuts each clip into the "
+    "views it needs (the speaker, the listener, the hands), so the fast cutting happens "
+    "inside your shots, not between them. Never write a shot under 4 s: an insert or a "
+    "reaction is a moment of the shot it belongs to. A shot over 8 s needs a camera move "
+    "that carries it (a track with the walk, a slow push through the turn) and says so.\n"
+    "- **A line starts and ends inside one shot.** A shot ends on the last word of its last "
+    "line or on the action that finishes it; a line never runs over the cut into the next "
+    "shot, and no shot holds only the first or last word of someone's line.\n"
     "- **Cover a scene with a pattern, not a list of two-shots**: one wider shot to place "
     "the people, then singles and over-the-shoulder shots that alternate with the lines, a "
     "close-up for the turn of the scene, an insert for the prop or the hands that matter. "
@@ -115,6 +126,10 @@ def planner_rules(pace: object) -> str:
         "pan with the action, a small reframe. Write `still` only for a reason (an insert, a "
         'reveal held in frame) and say it. A storyboard camera of "locked off" or '
         '"static" that gives no reason is not one: move gently instead.\n'
+        f"- **A new view every {r.setup_s[0]:g} to {r.setup_s[1]:g} s where people talk**: a "
+        "clip that holds two lines or more is cut at the change of speaker, or onto the "
+        "listener for the line that lands on them; only a clip with one line and one "
+        "action holds a single view.\n"
         "- **Each sub-shot's `action` is visible physical movement**: what hands do, what is "
         "picked up, used or put down, where people go, for the speaker too while they talk. "
         "A smile, a look or a raised eyebrow alone is not action; take the business from the "
