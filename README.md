@@ -326,6 +326,7 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
 | `MCPHUB_IMAGE_URL` | `https://api.mcphub.com/api/v3/gpu-images` | image route (note: not under `/v1`) |
 | `MCPHUB_IMAGE_MODEL` | `minimax-h3-image` | image model |
 | `DRAMA_KEYFRAME_SHORT_EDGE` | `1536` | draws shot keyframes smaller, and sends their references smaller with them: `1024` gives 1024x1824 for 9:16, `768` gives 768x1344 (never larger than 1536; read at each draw). For when the image server's GPU is short of memory: a 4 MP draw with nine references is its heaviest request |
+| `DRAMA_KEYFRAME_MAX_REFERENCES` | `6` | the most pictures a shot keyframe is drawn from (1 to 9, the model's limit): the first of the order the board lists. Each reference adds about 1.6 s and 0.35 GB a card to an H3 draw ([measured](reports/h3-image-per-draw-cost.md)); a prompt version that cites more is refused for H3 |
 | `GEMINI_API_KEY` / `GEMINI_URL` | — / `https://generativelanguage.googleapis.com/v1beta` | enables Nano Banana (`nano-banana`) as a second provider for keyframes, chat messages and study tests; a gateway serving the Gemini API can stand in for the URL. With fixture images, a local stand-in is offered instead |
 | `GEMINI_IMAGE_MODEL` | `gemini-nano-banana-2.1` | the Gemini image model for keyframes, chats and studies |
 | `DRAMA_LOCAL_IMAGE_URL` | `http://localhost:8080` | a simple image server of your own that Face Lab tests can be drawn with (`local`): `POST /image` with a `prompt` form field (plus `size` and `seed`, which it may ignore), answering with a PNG or JPEG. With fixture images, a local stand-in |
@@ -443,7 +444,7 @@ Each keyframe is made in steps:
    isn't clean is refused with the reasons.
 2. **References**: the design picks of the sub-shot's people, in the order dramer sends
    them: each person in this shot's look, the set's wide view, the props, then faces while
-   nine pictures allow. From sub-shot 2 on, `<Picture 1>` is the approved keyframe of the
+   the limit allows (six pictures unless `DRAMA_KEYFRAME_MAX_REFERENCES` says else; H3 takes nine). From sub-shot 2 on, `<Picture 1>` is the approved keyframe of the
    sub-shot before, so light, wardrobe state and set dressing carry across the cut.
 3. **Write, draw, check**: the text model writes an H3 edit prompt for the sub-shot's
    first frame; 1 to 4 draws at the video's aspect ratio at about 4 MP (1536x2720 for 9:16:

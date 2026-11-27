@@ -104,6 +104,22 @@ def keyframe_short_edge() -> int:
     return max(MIN_KEYFRAME_SHORT_EDGE, min(edge, KEYFRAME_SHORT_EDGE))
 
 
+KEYFRAME_MAX_REFERENCES = 6
+H3_MAX_REFERENCES = 9  # what the model takes
+
+
+def keyframe_max_references() -> int:
+    """DRAMA_KEYFRAME_MAX_REFERENCES: the most pictures an H3 keyframe draw is sent, 6
+    unless set (1 to 9, the model's limit). Each reference adds about 1.6 s and 0.35 GB a
+    card to a draw, whatever its size up to 1024 px (reports/h3-image-per-draw-cost.md): a
+    draw with 9 took the image server down while its card had under 2.5 GB to spare."""
+    try:
+        most = int(os.environ.get("DRAMA_KEYFRAME_MAX_REFERENCES", "") or KEYFRAME_MAX_REFERENCES)
+    except ValueError:
+        return KEYFRAME_MAX_REFERENCES
+    return max(1, min(most, H3_MAX_REFERENCES))
+
+
 def scaled_keyframe_size(size: str) -> str:
     """A size of the table at the configured short edge, both sides multiples of 32."""
     edge = keyframe_short_edge()

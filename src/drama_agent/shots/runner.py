@@ -28,6 +28,7 @@ from .common import (
     NotReady,
     intimate_scene,
     keyframe_aspect,
+    keyframe_max_references,
     keyframe_short_edge,
     shot_of,
 )
@@ -157,9 +158,13 @@ class ShotFrameRunner:
         return name, self.providers[name]
 
     def take_options(self, name: str | None) -> dict[str, Any]:
-        """plan_take's provider arguments for a provider by name."""
+        """plan_take's provider arguments for a provider by name. H3 takes fewer pictures
+        than the model allows (`keyframe_max_references`): they cost its GPU time and memory."""
         name, client = self.provider(name)
-        return {"provider": name, "max_references": client.max_references}
+        most = client.max_references
+        if name == DEFAULT_PROVIDER:
+            most = min(most, keyframe_max_references())
+        return {"provider": name, "max_references": most}
 
     def recover(self) -> int:
         error = "Interrupted by a server restart. Retry to run it again."

@@ -114,10 +114,14 @@ def finished(take: ShotTake, approved: int | None = 0) -> ShotTake:
     return take
 
 
-def test_references_are_looks_then_set_then_props_then_faces(package):
+def test_references_are_looks_then_set_then_props_then_faces(package, monkeypatch):
     images = done_images(package)
     shot = busiest(package)
+    # Six pictures unless set: the first six of the same order.
+    six, _ = shot_references(package, images, shot)
+    monkeypatch.setenv("DRAMA_KEYFRAME_MAX_REFERENCES", "9")
     refs, missing = shot_references(package, images, shot)
+    assert len(six) <= 6 and six == refs[: len(six)]
     assert missing == []
     kinds = [r.kind for r in refs]
     n = len(shot.character_ids)
@@ -374,7 +378,7 @@ def test_a_sub_shot_needs_only_its_own_peoples_picks(package):
     assert {r.entity_id for r in refs if r.kind in ("look", "face")} == {shot.character_ids[0]}
 
 
-def test_the_nine_picture_cap_is_applied_per_sub_shot():
+def test_the_picture_cap_is_applied_per_sub_shot(monkeypatch):
     def ref(kind, who):
         return FrameRef(ref_id=f"img_{kind}_{who}", role=who, kind=kind, entity_id=who)
 
@@ -383,9 +387,20 @@ def test_the_nine_picture_cap_is_applied_per_sub_shot():
         looks=[ref("look", c) for c in crowd], faces=[ref("face", c) for c in crowd],
         sets=[ref("set", "loc")], props=[ref("prop", "p1"), ref("prop", "p2")], missing=[],
     )  # fmt: skip
+    # Six pictures a draw unless set (each costs the image server time and memory).
+    assert [r.kind for r in picks.refs()] == ["look"] * 6
+    prev = FrameRef(ref_id="frame:t:0", role="before", kind="previous_frame")
+    assert [r.kind for r in picks.refs({"ch_6"}, prev)] == [
+        "previous_frame", "look", "set", "prop", "prop", "face"]  # fmt: skip
+    # Up to the model's nine when asked for, and never more.
+    from drama_agent.shots.common import keyframe_max_references
+
+    for value, most in (("9", 9), ("12", 9), ("0", 1), ("many", 6)):
+        monkeypatch.setenv("DRAMA_KEYFRAME_MAX_REFERENCES", value)
+        assert keyframe_max_references() == most
+    monkeypatch.setenv("DRAMA_KEYFRAME_MAX_REFERENCES", "9")
     everyone = picks.refs()
     assert len(everyone) == 9 and not any(r.kind == "face" for r in everyone)
-    prev = FrameRef(ref_id="frame:t:0", role="before", kind="previous_frame")
     close = picks.refs({"ch_6"}, prev)
     assert [r.kind for r in close] == ["previous_frame", "look", "set", "prop", "prop", "face"]
     assert close[-1].entity_id == "ch_6"

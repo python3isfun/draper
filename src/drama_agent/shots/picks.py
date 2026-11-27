@@ -5,12 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..imagegen import MAX_REFERENCES
 from ..images import selected_image
 from ..models import ProductionPackage
 from ..models.images import GeneratedImage
 from ..models.storyboard import Shot
-from .common import _cached, _names
+from .common import _cached, _names, keyframe_max_references
 from .models import SHOT_VIEWS, FrameRef
 
 
@@ -34,7 +33,7 @@ class ShotPicks:
         """The pictures for `people` (None: everyone), in the order the prompt names them,
         as dramer sends them: the previous keyframe, each person in their look (or the
         picture `chosen` for them by reading the scene), the set's wide view, the props, then
-        faces while the nine-picture limit allows."""
+        faces while the limit allows (`keyframe_max_references`: six unless set)."""
         chosen = chosen or {}
 
         def mine(r: FrameRef) -> bool:
@@ -47,8 +46,9 @@ class ShotPicks:
         faces = [f for f in self.faces if mine(f) and f.ref_id not in used]
         refs = [*([previous] if previous else []), *looks, *self.sets,
                 *([previous_shot] if previous_shot else []), *self.props]  # fmt: skip
-        refs = refs[:MAX_REFERENCES]
-        return refs + faces[: MAX_REFERENCES - len(refs)]
+        most = keyframe_max_references()
+        refs = refs[:most]
+        return refs + faces[: most - len(refs)]
 
     def missing_for(self, people: set[str] | None = None) -> list[str]:
         """What is missing for `people` (None: everyone); the set and props always count."""
