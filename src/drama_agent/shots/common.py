@@ -3,6 +3,7 @@ keyframe size, and a per-revision cache."""
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -87,8 +88,43 @@ KEYFRAME_SIZES: dict[str, str] = {
 }
 
 
+KEYFRAME_SHORT_EDGE = 1536  # the short edge of the 9:16 and 16:9 sizes above
+MIN_KEYFRAME_SHORT_EDGE = 256
+
+
+def keyframe_short_edge() -> int:
+    """DRAMA_KEYFRAME_SHORT_EDGE draws keyframes smaller than the table above, and sends
+    their references smaller with them: 1024 gives 1024x1824 for 9:16, 768 gives 768x1344.
+    For when the image server's GPU is short of memory (a 4 MP draw with nine references
+    is its heaviest request). Never larger than the table; read at each draw."""
+    try:
+        edge = int(os.environ.get("DRAMA_KEYFRAME_SHORT_EDGE", "") or KEYFRAME_SHORT_EDGE)
+    except ValueError:
+        return KEYFRAME_SHORT_EDGE
+    return max(MIN_KEYFRAME_SHORT_EDGE, min(edge, KEYFRAME_SHORT_EDGE))
+
+
+def scaled_keyframe_size(size: str) -> str:
+    """A size of the table at the configured short edge, both sides multiples of 32."""
+    edge = keyframe_short_edge()
+    if edge >= KEYFRAME_SHORT_EDGE:
+        return size
+    w, h = (max(32, round(int(x) * edge / KEYFRAME_SHORT_EDGE / 32) * 32) for x in size.split("x"))
+    return f"{w}x{h}"
+
+
+def keyframe_aspect(size: str) -> str | None:
+    """The aspect ratio a keyframe size was drawn for, at the table's size or a smaller one."""
+    for aspect, full in KEYFRAME_SIZES.items():
+        if size in (full, scaled_keyframe_size(full)):
+            return aspect
+    return None
+
+
 def frame_size(pkg: ProductionPackage) -> str:
     """The keyframe size: the video's aspect ratio at about 4 MP (vertical 9:16 unless the
-    brief says else)."""
+    brief says else), or smaller under DRAMA_KEYFRAME_SHORT_EDGE."""
     m = re.search(r"(\d+)\s*:\s*(\d+)", pkg.asset_requirements.style_brief.aspect_ratio or "")
-    return KEYFRAME_SIZES.get(f"{m.group(1)}:{m.group(2)}" if m else "", KEYFRAME_SIZES["9:16"])
+    return scaled_keyframe_size(
+        KEYFRAME_SIZES.get(f"{m.group(1)}:{m.group(2)}" if m else "", KEYFRAME_SIZES["9:16"])
+    )

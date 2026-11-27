@@ -207,9 +207,10 @@ def test_the_planner_names_become_character_ids(package):
     subs = planned_sub_shots(package, shot, out)
     assert [s.people for s in subs] == [[speaker]] * 2
     assert subs[1].start_ms == 7000 and subs[1].placement == {speaker: "left"}
-    out.sub_shots[1].people = ["Nobody Here"]
-    with pytest.raises(ValueError, match="isn't one of the shot's people"):
-        planned_sub_shots(package, shot, out)
+    # Someone who isn't in the shot (the action mentions them) is left out, not refused.
+    out.sub_shots[1].people = [first, "Nobody Here"]
+    assert [s.people for s in planned_sub_shots(package, shot, out)] == [[speaker]] * 2
+    out.sub_shots[1].people = [first]
     # Small slips are forgiven: a name with a surname or title, a first cut just after 0.
     first_name = first.split()[0]
     out.sub_shots[0].start_s = 0.2
@@ -1163,12 +1164,12 @@ def test_a_plan_that_cuts_mid_line_is_repaired(tmp_path):
         sid = shot["shot_id"]
         b.http.post(f"{b.base}/{sid}/plan", json={})
         s = b.wait() and b.shot(sid)
-        first, second = b.calls("shot_plan")
+        # The plan reader moves the cut to the line's end itself: one planner call.
+        [first] = b.calls("shot_plan")
         assert first.context["clip_s"] == shot["clip_ms"] // 1000 and first.context["lines"]
-        assert any("middle of" in p for p in second.context["problems"])
         assert s["plan"]["status"] == "done" and s["plan"]["problems"] == []
         line = first.context["lines"][0]
-        assert s["sub_shots"][1]["start_ms"] >= line["end_s"] * 1000
+        assert s["sub_shots"][1]["start_ms"] == line["end_s"] * 1000
 
 
 def test_an_unclean_stored_plan_is_flagged_on_the_board_and_in_the_spec(tmp_path):
@@ -1187,24 +1188,28 @@ def test_an_unclean_stored_plan_is_flagged_on_the_board_and_in_the_spec(tmp_path
         assert mine["clean"] is False and mine["problems"] == problems
 
 
-class AlwaysCutsMidLine(CutsMidLine):
-    """Cuts in the middle of the line every time, even when told."""
+class AlwaysNoSides(CutsMidLine):
+    """Never says where the second cut's person is in the frame, even when told (a slip
+    the plan reader can't settle from the storyboard)."""
 
     async def generate(self, request, output_model):
         if request.stage == "shot_plan":
             request.context.pop("problems", None)
-        return await super().generate(request, output_model)
+        out = await super().generate(request, output_model)
+        if request.stage == "shot_plan":
+            out.sub_shots[1].placement = {}
+        return out
 
 
 def test_a_model_plan_still_not_clean_is_kept_and_flagged(tmp_path):
-    with Board(tmp_path, text=AlwaysCutsMidLine()) as b:
+    with Board(tmp_path, text=AlwaysNoSides()) as b:
         b.design()
         sid = b.busiest()["shot_id"]
         b.http.post(f"{b.base}/{sid}/plan", json={})
         s = b.wait() and b.shot(sid)
         assert len(b.calls("shot_plan")) == 2
         assert s["plan"]["source"] == "model" and s["plan"]["status"] == "done"
-        assert len(s["sub_shots"]) == 2 and any("middle of" in p for p in s["plan"]["problems"])
+        assert len(s["sub_shots"]) == 2 and any("where is" in p for p in s["plan"]["problems"])
         spec = json.loads(member(b.zip(), "shot_keyframes/sub_shots.json"))
         assert next(p for p in spec["shots"] if p["shot_id"] == sid)["clean"] is False
 
@@ -1794,6 +1799,34 @@ def test_keyframes_are_drawn_at_about_four_megapixels(package):
     assert w % 32 == 0 and h % 32 == 0
 
 
+def test_keyframe_short_edge_draws_smaller_keyframes(package, monkeypatch):
+    from drama_agent.shot_frames import frame_size
+    from drama_agent.shots.common import (
+        KEYFRAME_SIZES,
+        keyframe_aspect,
+        keyframe_short_edge,
+        scaled_keyframe_size,
+    )
+
+    monkeypatch.setenv("DRAMA_KEYFRAME_SHORT_EDGE", "1024")
+    assert frame_size(package) == "1024x1824"
+    take = plan_take(package, done_images(package), [], single_plan(package, busiest(package)))
+    assert take.size == "1024x1824"
+    # Both a small keyframe and one drawn at the full size before still name their aspect.
+    assert keyframe_aspect("1024x1824") == keyframe_aspect("1536x2720") == "9:16"
+    assert keyframe_aspect("1000x1000") is None
+    for full in KEYFRAME_SIZES.values():
+        w, h = (int(x) for x in scaled_keyframe_size(full).split("x"))
+        assert w % 32 == 0 and h % 32 == 0 and w * h < 2_100_000
+    monkeypatch.setenv("DRAMA_KEYFRAME_SHORT_EDGE", "768")
+    assert frame_size(package) == "768x1344"
+    # Never larger than the table, never tiny, and a bad value is ignored.
+    for value, edge in (("4096", 1536), ("8", 256), ("big", 1536), ("", 1536)):
+        monkeypatch.setenv("DRAMA_KEYFRAME_SHORT_EDGE", value)
+        assert keyframe_short_edge() == edge
+    assert frame_size(package) == "1536x2720"
+
+
 def test_a_take_can_be_drawn_with_nano_banana(tmp_path):
     with Board(tmp_path) as b:
         b.design()
@@ -1930,3 +1963,46 @@ def test_a_new_reading_keeps_the_choices_of_the_cuts_that_didnt_change(tmp_path)
         assert all(c["state"]["hair"] == "pinned up (reading 2)"
                    for s in b.shot(sid)["sub_shots"] for c in s["choices"])  # fmt: skip
         assert b.shot(oid)["sub_shots"][0]["choices"] == before
+
+
+def test_keyframe_references_are_shrunk_to_the_keyframes_size(tmp_path, package, monkeypatch):
+    """A design picture is 16 MP; sent as it is, a few of them crash MCPHub's model
+    server. A reference goes up at the keyframe's short edge at most."""
+    import subprocess
+
+    from drama_agent.shots import assemble as asm
+    from drama_agent.shots.common import keyframe_short_edge
+    from drama_agent.shots.models import FrameRef, ShotTake
+    from drama_agent.shots.runner import ShotFrameRunner
+    from drama_agent.videogen import ffmpeg_available
+
+    if not ffmpeg_available():
+        pytest.skip("ffmpeg is not installed")
+    repo = InMemoryRepository()
+    repo.save_package(package, True)
+    media = MediaStore(tmp_path)
+    big = media.path("generated/big.jpg")
+    big.parent.mkdir(parents=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=gray:s=3552x4736",
+                    "-frames:v", "1", str(big)], check=True)  # fmt: skip
+    [img] = done_images(package)[:1]
+    img.file = "generated/big.jpg"
+    repo.save_image(img)
+    shot = package.shot_list[0]
+    take = ShotTake(take_id="stk_test", run_id="stk_test", package_id=package.package_id,
+                    revision_id=package.revision_id, shot_id=shot.shot_id, sub_shot=1,
+                    prompt="p", size="1536x2720", references=[
+                        FrameRef(ref_id=img.image_id, role="a look", kind="look")])  # fmt: skip
+    runner = ShotFrameRunner(repo, media, FixtureImageClient(), FixtureModelClient())
+    [ref] = runner._reference_bytes(take)
+    sent = tmp_path / "sent.jpg"
+    sent.write_bytes(ref.data)
+    info = asm.probe(sent)
+    assert min(info["width"], info["height"]) == keyframe_short_edge() == 1536
+    assert ref.mime == "image/jpeg" and len(ref.data) < big.stat().st_size
+    # A smaller keyframe sends its references smaller with it.
+    monkeypatch.setenv("DRAMA_KEYFRAME_SHORT_EDGE", "768")
+    [ref] = runner._reference_bytes(take)
+    sent.write_bytes(ref.data)
+    info = asm.probe(sent)
+    assert min(info["width"], info["height"]) == 768

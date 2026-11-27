@@ -30,6 +30,7 @@ from typing import Protocol
 import httpx
 
 RETRYABLE_STATUS = {429, 502, 503, 504}
+MAX_BACKOFF_S = 120.0  # the longest wait between two tries of the MCPHub route
 MAX_REFERENCES = 9
 MAX_REFERENCE_BYTES = 24 * 1024 * 1024
 
@@ -68,7 +69,10 @@ class MiniMaxImageClient:
         model: str = "minimax-h3-image",
         *,
         timeout_s: float = 600.0,  # the GPU queues requests; MCPHub itself gives up at 300 s
-        max_retries: int = 2,
+        # The model server answers 502 at once whenever it is busy or restarting, for
+        # five minutes at a time: retries 5, 10, 20, 40, 80 s apart, then every 2 minutes,
+        # ride that out (eight retries span about nine minutes).
+        max_retries: int = 8,
         backoff_s: float = 5.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -124,7 +128,7 @@ class MiniMaxImageClient:
                 if resp.status_code not in RETRYABLE_STATUS:
                     raise ImageGenError(f"image generation failed: {last}")
             if attempt < self.max_retries:
-                await asyncio.sleep(self.backoff_s * 2**attempt)
+                await asyncio.sleep(min(self.backoff_s * 2**attempt, MAX_BACKOFF_S))
         raise ImageGenError(f"image generation failed: {last}")
 
 

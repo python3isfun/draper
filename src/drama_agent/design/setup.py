@@ -79,6 +79,8 @@ def image_client_from_env() -> ImageClient:
             api_key=os.environ["MCPHUB_KEY"],
             base_url=os.environ.get("MCPHUB_IMAGE_URL", "https://api.mcphub.com/api/v3/gpu-images"),
             model=os.environ.get("MCPHUB_IMAGE_MODEL", "minimax-h3-image"),
+            max_retries=int(os.environ.get("MCPHUB_IMAGE_RETRIES", "8")),
+            backoff_s=float(os.environ.get("MCPHUB_IMAGE_BACKOFF_S", "5")),
         )
     raise RuntimeError(f"unknown DRAMA_IMAGE_CLIENT={kind!r}")
 

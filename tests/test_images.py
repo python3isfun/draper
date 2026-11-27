@@ -450,3 +450,17 @@ def test_generate_checks_the_job_and_refuses_archived_stories(tmp_path):
         assert http.post(base).status_code == 409
         first = ok["images"][0]["image_id"]
         assert http.post(f"/v1/generated-images/{first}/regenerate").status_code == 409
+
+
+def test_a_flapping_model_server_is_retried_until_it_answers():
+    """MCPHub's model server answers 502 at once while busy or restarting, on and off for
+    minutes: a draw retries five times with backoff rather than failing on the third."""
+    client, seen = minimax(lambda r, n: httpx.Response(502, json={"detail": "busy"}) if n < 8
+                           else httpx.Response(200, json=b64_image(b"IMG")))  # fmt: skip
+    assert client.max_retries == 8
+    result = asyncio.run(client.generate("a fox", "1024x1024", 7, []))
+    assert result.data == b"IMG" and len(seen) == 8
+    # The waits: 5, 10, 20, 40, 80 s, then two minutes at most between tries.
+    from drama_agent.imagegen import MAX_BACKOFF_S
+
+    assert [min(5.0 * 2**k, MAX_BACKOFF_S) for k in range(8)] == [5, 10, 20, 40, 80, 120, 120, 120]

@@ -181,10 +181,11 @@ def plan_context(pkg: ProductionPackage, shot: Shot, clip: int | None = None) ->
     return ctx
 
 
-def _who(pkg: ProductionPackage, shot: Shot, name: str) -> str:
+def _who(pkg: ProductionPackage, shot: Shot, name: str, *, strict: bool = True) -> str | None:
     """The character a planner's name means, among the shot's people: the id, the exact
     name, else the one person whose name contains it or whose first name it starts with
-    ("Lila", "Lila Chen", "Ms. Lila" for Lila). Raises when it means no one or several."""
+    ("Lila", "Lila Chen", "Ms. Lila" for Lila). Raises when it means no one or several
+    (None for no one, without `strict`)."""
     people = [c for c in pkg.story_bible.characters if c.character_id in shot.character_ids]
     said = name.strip().casefold()
     exact = [c for c in people if said in (c.character_id.casefold(), c.name.casefold())]
@@ -195,6 +196,8 @@ def _who(pkg: ProductionPackage, shot: Shot, name: str) -> str:
             if c.name.casefold() in said or said in c.name.casefold()
             or (words and c.name.split() and c.name.split()[0].casefold() in words)
         ]  # fmt: skip
+    if not exact and not strict:
+        return None
     if len(exact) != 1:
         raise ValueError(f"the plan puts {name} on screen, who isn't one of the shot's people")
     return exact[0].character_id
@@ -213,7 +216,8 @@ def _sides(
         side = side.strip().lower().replace("centre", "center")
         if side not in allowed:
             raise ValueError(f"{what} for {name} is {side!r}, not one of {allowed}")
-        out[_who(pkg, shot, name)] = side
+        if (who := _who(pkg, shot, name, strict=False)) is not None:
+            out[who] = side
     return out
 
 
@@ -224,9 +228,11 @@ def planned_sub_shots(
     clip: int | None = None,
     *,
     strict: bool = True,
+    repair: bool = True,
 ) -> list[SubShot]:
     """The planner's sub-shots (names become character ids), checked as make_sub_shots
-    checks them. A first cut a moment after 0 s is moved to 0 s."""
+    checks them. A first cut a moment after 0 s is moved to 0 s. With `repair`, two slips
+    the storyboard settles are put right (below); an insert keeps its cuts and flags them."""
     planned = sorted(out.sub_shots, key=lambda p: p.start_s)
     if not planned:  # the planner sees no cut to make: the shot is its one sub-shot
         return make_sub_shots(pkg, shot, [{
@@ -234,16 +240,35 @@ def planned_sub_shots(
             "action": shot.visual_action, "people": list(shot.character_ids),
             "placement": spread(list(shot.character_ids)),
         }], clip, strict=strict)  # fmt: skip
+    # Two slips the planner makes that the storyboard settles: a person it names who isn't
+    # in the shot (someone the action mentions) is left out, and a cut that lands inside a
+    # line moves to the line's end (a cut never falls in the middle of a line), or is
+    # dropped when no room is left there.
+    lines = shot_lines(pkg, shot)
+    end = clip or clip_ms(shot)
     rows = []
+    moved: list[int] = []  # the rows whose cut was moved to a line's end
     for k, p in enumerate(planned):
         start = 0 if k == 0 and p.start_s * 1000 < MIN_SUB_SHOT_MS else round(p.start_s * 1000)
+        if repair and k and (inside := [x for x in lines if x["start_ms"] < start < x["end_ms"]]):
+            start = max(x["end_ms"] for x in inside)
+            if end - start < MIN_SUB_SHOT_MS:
+                continue
+            moved.append(len(rows))
         rows.append({
             "start_ms": start, "framing": p.framing, "camera": p.camera, "action": p.action,
-            "people": list(dict.fromkeys(_who(pkg, shot, n) for n in p.people)),
+            "people": [w for n in p.people if (w := _who(pkg, shot, n, strict=False))],
             "placement": _sides(pkg, shot, p.placement, ("left", "center", "right"),
                                 "the frame position"),
             "off_screen": _sides(pkg, shot, p.off_screen, ("left", "right"), "the off-screen side"),
         })  # fmt: skip
+    for row in rows:
+        row["people"] = list(dict.fromkeys(row["people"]))
+    # A moved cut that lands on (or within a sub-shot's length of) another cut goes: the
+    # other cut already makes the change of view there.
+    rows = [r for i, r in enumerate(rows) if i not in moved or not any(
+        j != i and abs(o["start_ms"] - r["start_ms"]) < MIN_SUB_SHOT_MS
+        for j, o in enumerate(rows))]  # fmt: skip
     return make_sub_shots(pkg, shot, rows, clip, strict=strict)
 
 

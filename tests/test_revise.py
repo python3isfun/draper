@@ -153,6 +153,29 @@ def test_a_shot_revision_carries_plans_forward_and_flags_the_revised_shots_plan(
     assert plan_outdated(new, shots["sh_01_02_01"], plans["sh_01_02_01"]) is None
 
 
+def test_a_storyboard_revision_is_not_held_to_coverage_of_shots_it_did_not_write():
+    """A story storyboarded before the coverage rule: its other shots break it, and a
+    revision that re-cuts one shot must still pass the storyboard step's gate (as it passes
+    the final one), and the model is never asked to fix shots outside its scope."""
+
+    def edit(stage, out):
+        if stage == "storyboard":
+            for s in out.shots:
+                if s.shot_id == "sh_01_01_02":
+                    s.visual_action += " She hesitates at the door."
+
+    def setup(repo, base):
+        a, b = (next(s for s in base.shot_list if s.shot_id == i)
+                for i in ("sh_03_01_01", "sh_03_01_02"))  # fmt: skip
+        a.framing = b.framing = "Medium two-shot of both"
+        b.character_ids = list(a.character_ids)
+        repo.replace_package(base)
+
+    rev, _, _, client = _revise(edit, _req(["sh_01_01_02"]), setup=setup)
+    assert rev.status == "published", (rev.error, rev.issues)
+    assert client.stages.count("storyboard") == 1  # passed on the first attempt
+
+
 def test_publishing_waits_for_work_in_flight_and_fails_if_it_never_ends():
     def setup(repo, base):
         repo.save_shot_plan(_plan(base, "sh_01_01_02", status="writing"))

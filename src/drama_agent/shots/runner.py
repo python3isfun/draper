@@ -22,8 +22,15 @@ from ..models.package import utcnow
 from ..models.storyboard import Shot
 from ..pace import story_pace
 from ..shot_reading import SceneReading
+from . import assemble as asm
 from .approvals import is_busy
-from .common import KEYFRAME_SIZES, NotReady, intimate_scene, shot_of
+from .common import (
+    NotReady,
+    intimate_scene,
+    keyframe_aspect,
+    keyframe_short_edge,
+    shot_of,
+)
 from .history import replace_plan
 from .inserts import carry_takes, kept_cuts
 from .judge import JudgeOutput, judge_instructions
@@ -106,6 +113,10 @@ def _rank(problems: list[str]) -> tuple[int, int, int]:
 
 
 log = logging.getLogger(__name__)
+
+# Keyframe references are sent at the keyframe's own short edge (`keyframe_short_edge`:
+# 1536 px unless DRAMA_KEYFRAME_SHORT_EDGE says smaller), so a 16 MP design picture
+# doesn't go up as it is.
 
 
 class ShotFrameRunner:
@@ -391,7 +402,8 @@ class ShotFrameRunner:
                 )
                 out = await self.text.generate(request, PlanOutput)
                 try:
-                    subs = planned_sub_shots(pkg, shot, out, clip_ms, strict=False)
+                    subs = planned_sub_shots(pkg, shot, out, clip_ms, strict=False,
+                                             repair=insert is None)  # fmt: skip
                     if insert is not None and previous is not None:  # the cuts' views as they were
                         subs = kept_cuts(previous.sub_shots, subs, insert[0])
                     # A wrong cut count is refused by no save, but was asked for: retried.
@@ -693,9 +705,8 @@ class ShotFrameRunner:
             ),
             "pictures": pictures,
             **shot_context(pkg, shot),
-            "aspect": next(
-                (k for k, v in {**SIZES, **KEYFRAME_SIZES}.items() if v == take.size), take.size
-            ),
+            "aspect": keyframe_aspect(take.size)
+            or next((k for k, v in SIZES.items() if v == take.size), take.size),
             "previous_prompt": take.previous_prompt,
             "fixes": take.fixes,
             "direction": take.direction,
@@ -804,13 +815,24 @@ class ShotFrameRunner:
         return self.media.path(rel), mime
 
     def _reference_bytes(self, take: ShotTake) -> list[Reference]:
+        """The take's reference pictures, each shrunk to the keyframe's short edge (a design picture
+        is 16 MP; five of them at full size crash MCPHub's model server, which then answers
+        502 to everyone for minutes). A picture that can't be shrunk goes as it is."""
         out = []
         for r in take.references:
             found = self._ref_file(r.ref_id)
             if found is None or not found[0].is_file():
                 raise RuntimeError(f"reference picture {r.role} is not available any more")
             path, mime = found
-            out.append(Reference(path.name, path.read_bytes(), mime))
+            data = None
+            try:
+                data = asm.shrink_picture(path, keyframe_short_edge())
+            except asm.AssembleError:
+                log.warning("reference %s could not be shrunk", r.ref_id, exc_info=True)
+            if data is not None:
+                out.append(Reference(path.stem + ".jpg", data, "image/jpeg"))
+            else:
+                out.append(Reference(path.name, path.read_bytes(), mime))
         return out
 
     def _media(self, take: ShotTake) -> list[MediaPart]:

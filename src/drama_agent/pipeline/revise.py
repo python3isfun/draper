@@ -523,6 +523,12 @@ class ReviseRunner:
                                   {o.requirement_id: o for o in output.design_overrides}
                                   | _kept_overrides(base, state, rev, scope))  # fmt: skip
             issues = step.check(state)
+            if step.name == "storyboard":
+                # As at the final gate: shots this revision didn't write (other scenes,
+                # storyboarded before the coverage rule) aren't held to coverage. The model
+                # couldn't fix them: they are put back from the base revision.
+                draft = state.draft_package()
+                issues = coverage_in_scope(issues, draft, set(changed_ids(base, draft)))
             if not issues:
                 if trace:
                     trace.event("stage_passed", f"Revision: {step.name} passed.", stage=step.name)

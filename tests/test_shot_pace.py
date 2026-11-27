@@ -107,11 +107,12 @@ def test_the_asked_settings_hold_when_planning_fails(tmp_path):
         # Left out, the clip is the plan's own (as the pace and cut count are).
         b.http.post(f"{b.base}/{sid}/plan", json={})
         assert b.wait() and b.calls("shot_plan")[-1].context["clip_s"] == 8
+        before = b.shot(sid)["sub_shots"]
         b.text.fail = True
         r = b.http.post(f"{b.base}/{sid}/plan", json={"pace": "slow_burn", "cuts": 2})
         assert r.json()["pace"] == "slow_burn" and r.json()["cuts"] == 2
         s = b.wait() and b.shot(sid)
-        assert s["plan"]["status"] == "failed" and len(s["sub_shots"]) == 2  # the old cuts
+        assert s["plan"]["status"] == "failed" and s["sub_shots"] == before  # the old cuts
         assert s["plan"]["pace"] == "slow_burn" and s["plan"]["cuts"] == 2  # for the next try
 
 
@@ -188,3 +189,34 @@ def test_a_planner_answer_with_no_cuts_plans_the_shot_as_one(package):
     [only] = planned_sub_shots(package, shot, PlanOutput(sub_shots=[], notes="no cut needed"))
     assert (only.start_ms, only.framing, only.people) == (0, shot.framing, shot.character_ids)
     assert only.end_ms >= shot.duration_ms
+
+
+def test_the_plan_reader_settles_the_planners_slips_by_the_storyboard(package):
+    """A person the planner names who isn't in the shot (the action mentions them) is left
+    out, and a cut that lands inside a line moves to the line's end (or goes, with no room
+    left): the storyboard decides both."""
+    from drama_agent.shots.planner import PlannedSubShot, PlanOutput, planned_sub_shots
+    from drama_agent.shots.plans import shot_lines
+
+    shot = next(s for s in package.shot_list if shot_lines(package, s)
+                and shot_lines(package, s)[0]["end_ms"] - shot_lines(package, s)[0]["start_ms"]
+                >= 2000)  # fmt: skip
+    [line, *_] = shot_lines(package, shot)
+    stranger = next(c.name for c in package.story_bible.characters
+                    if c.character_id not in shot.character_ids)  # fmt: skip
+    mine = next(c.name for c in package.story_bible.characters
+                if c.character_id == line["speaker_id"])  # fmt: skip
+    inside = (line["start_ms"] + line["end_ms"]) / 2000  # a moment inside the line, in s
+    out = PlanOutput(sub_shots=[
+        PlannedSubShot(start_s=0, framing="wide", action="talk", people=[mine, stranger],
+                       placement={mine: "left", stranger: "right"}),
+        PlannedSubShot(start_s=inside, framing="close-up", action="listens", people=[mine],
+                       placement={mine: "left"}),
+    ])  # fmt: skip
+    subs = planned_sub_shots(package, shot, out)
+    assert subs[0].people == [line["speaker_id"]]
+    assert list(subs[0].placement) == [line["speaker_id"]]
+    if len(subs) == 2:
+        assert subs[1].start_ms == line["end_ms"]
+    else:
+        assert subs[0].end_ms - line["end_ms"] < 1000  # no room after the line

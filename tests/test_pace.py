@@ -270,9 +270,12 @@ def test_a_plan_that_holds_a_listener_through_a_line_is_sent_back_and_flagged(tm
         b.http.post(f"{b.base}/{sid}/plan", json={})
         s = b.wait() and b.shot(sid)
         assert len(b.calls("shot_plan")) == 2  # the listener sent it back once
-        assert s["plan"]["notes"] == "attempt 0"  # the retry cut mid-line: the first stands
-        # The board flags the off-screen line; the plan stays until a person fixes it.
+        # The retry's mid-line cut is moved to the line's end by the plan reader, but it
+        # still holds the listener through the line: the board flags the off-screen line
+        # and the plan stays until a person fixes it.
+        assert s["plan"]["notes"] in ("attempt 0", "attempt 1")
         assert any(p.startswith(OFF_SCREEN_LINE) for p in s["plan"]["problems"])
+        assert not any("middle of" in p for p in s["plan"]["problems"])
 
 
 def test_the_pace_api_takes_any_spelling(tmp_path):

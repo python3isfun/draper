@@ -325,6 +325,7 @@ MCPHub's GPU route, using the same `MCPHUB_KEY`:
 | `DRAMA_IMAGE_CLIENT` | follows `DRAMA_MODEL_CLIENT` | `minimax` (real) or `fixture` (local placeholder images) |
 | `MCPHUB_IMAGE_URL` | `https://api.mcphub.com/api/v3/gpu-images` | image route (note: not under `/v1`) |
 | `MCPHUB_IMAGE_MODEL` | `minimax-h3-image` | image model |
+| `DRAMA_KEYFRAME_SHORT_EDGE` | `1536` | draws shot keyframes smaller, and sends their references smaller with them: `1024` gives 1024x1824 for 9:16, `768` gives 768x1344 (never larger than 1536; read at each draw). For when the image server's GPU is short of memory: a 4 MP draw with nine references is its heaviest request |
 | `GEMINI_API_KEY` / `GEMINI_URL` | — / `https://generativelanguage.googleapis.com/v1beta` | enables Nano Banana (`nano-banana`) as a second provider for keyframes, chat messages and study tests; a gateway serving the Gemini API can stand in for the URL. With fixture images, a local stand-in is offered instead |
 | `GEMINI_IMAGE_MODEL` | `gemini-nano-banana-2.1` | the Gemini image model for keyframes, chats and studies |
 | `DRAMA_LOCAL_IMAGE_URL` | `http://localhost:8080` | a simple image server of your own that Face Lab tests can be drawn with (`local`): `POST /image` with a `prompt` form field (plus `size` and `seed`, which it may ignore), answering with a PNG or JPEG. With fixture images, a local stand-in |
