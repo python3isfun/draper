@@ -85,7 +85,13 @@ COVERAGE_RULES = (
     "and the same people: change the size, the angle or who the shot is about. In a scene, "
     "at most one shot in two is a two-shot or group shot.\n"
     "- **Cut on movement or on a line**: a shot ends on the action or the word that the next "
-    "shot picks up, not on a held look."
+    "shot picks up, not on a held look.\n"
+    "- **Whoever speaks a line is in the shot that carries it** (`character_ids`). The "
+    "listener's face is a view inside that shot, which the cut planner makes; a shot of "
+    "the listener alone never carries someone else's line.\n"
+    "- **A prop is picked up once and put down once in a scene.** Between the two it stays "
+    "where it is, in the same hand: a thing planted and taken up again reads as a loop "
+    "once the shots are cut together. People keep their side of the room through a scene."
 )
 
 

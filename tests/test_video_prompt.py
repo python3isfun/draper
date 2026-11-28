@@ -227,3 +227,36 @@ def test_a_line_continued_from_the_shot_before_quotes_only_its_own_words():
                            "finishes her carried speech with synchronized lips.")  # fmt: skip
     problems, _ = prompt_findings(_out(carried), ctx, [])
     assert any("doesn't quote Lila's line word for word" in p for p in problems)
+
+
+def test_only_the_shots_own_lines_are_heard_and_an_insert_may_carry_its_line_as_sound():
+    ctx = _reaction()
+    right = ("A close-up facing her. McKenna from {pic:A} is at frame right, facing Lila, who "
+             "is off frame left. McKenna listens in silence, mouth closed.")  # fmt: skip
+    own = "Off screen, Lila's voice: \"I don't remember.\" The only other sound is the hum."
+    assert prompt_findings(_out(right, sound=own), ctx, [])[0] == []
+    # A line of the shot after, written in as an answer on its way: H3 would voice it.
+    extra = own + ' Then Derek\'s off-screen voice answers: "An amazing one!"'
+    problems, _ = prompt_findings(_out(right, sound=extra), ctx, [])
+    assert any(
+        '`sound` quotes "An amazing one!", which is no line of this shot' in p for p in problems
+    )
+    # An insert of hands: its speaker is in the cut, their face is not. The line may be
+    # quoted in the sound sentence, and nobody's lips need naming.
+    hands = _reaction(on=("McKenna",), off=())
+    hands["cuts"][0] |= {
+        "framing": "Insert of McKenna's hands on the print",
+        "lines": [{"speaker": "McKenna", "line": "Look at the curves.", "where": "on screen",
+                   "delivery": ""}]}  # fmt: skip
+    text = "A tight insert of the hands of McKenna from {pic:A} on the print, her face above the frame."
+    sound = (
+        'From above the frame McKenna says: "Look at the curves." The only other sound is paper.'
+    )
+    problems, advice = prompt_findings(_out(text, sound=sound), hands, [])
+    assert problems == [] and not any("lips" in a for a in advice)
+    # In a framing that shows her face, the same prompt is still a problem.
+    hands["cuts"][0]["framing"] = "close-up of McKenna"
+    assert any(
+        "doesn't quote McKenna's line" in p
+        for p in prompt_findings(_out(text, sound=sound), hands, [])[0]
+    )

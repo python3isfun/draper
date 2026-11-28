@@ -219,20 +219,28 @@ def carry_unchanged(
     new: list[Choice], old: SceneReading | None, cuts: dict[str, str], pool: list[Candidate]
 ) -> list[Choice]:
     """A new reading keeps the old one's choices for every cut that is the same as when it
-    was read (`cuts`: cut_prints now), where the person still has that picture to choose.
+    was read (`cuts`: cut_prints now), where the person still has that picture to choose
+    (or the picture that replaced it as the pick of the same look).
     A plan change in one shot then leaves the scene's other shots as they were: their
     keyframes, prompts and clips stay current instead of being redone from a reading
     that only differs in wording."""
     if old is None or not old.cuts:
         return new
     ids = {(c.character_id, c.image_id) for c in pool}
+    # A look or face whose pick was replaced is the same choice with the new picture: the
+    # moment still calls for that look, and what the person wears then hasn't changed.
+    slot = {(c.character_id, c.kind, c.look_id): c.image_id for c in pool}
+    now = {(c.character_id, c.image_id): slot.get((c.character_id, c.kind, c.look_id))
+           for c in old.candidates}  # fmt: skip
     out = []
     for c in new:
         key = f"{c.shot_id}:{c.sub_shot}"
         before = old.choice(c.shot_id, c.sub_shot, c.character_id)
-        if (before is not None and old.cuts.get(key) == cuts.get(key)
-                and (c.character_id, before.image_id) in ids):  # fmt: skip
-            c = before.model_copy()
+        if before is not None and old.cuts.get(key) == cuts.get(key):
+            if (c.character_id, before.image_id) in ids:
+                c = before.model_copy()
+            elif replaced := now.get((c.character_id, before.image_id)):
+                c = before.model_copy(update={"image_id": replaced})
         out.append(c)
     return out
 

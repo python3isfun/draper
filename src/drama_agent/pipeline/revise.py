@@ -300,9 +300,11 @@ def coverage_in_scope(
     issues: list[Issue], pkg: ProductionPackage, rewritten: set[str]
 ) -> list[Issue]:
     """The issues a revision is held to: every check but coverage, and coverage only on
-    the shots this revision wrote (`rewritten`: its changed ids) and the scenes those
-    shots are in. A story from before the rule keeps its old shots, and a revision that
-    didn't touch the storyboard isn't held to it."""
+    the shots this revision wrote or was asked to write (`rewritten`: its changed ids and
+    its targets) and the scenes those shots are in. A story from before the rule keeps its
+    old shots, and a revision that didn't touch the storyboard isn't held to it. A shot the
+    request targets is held to the rule even when the model handed it back unchanged:
+    asked to re-storyboard, it otherwise copies the old shots and passes."""
     scenes = {s.scene_id for s in pkg.shot_list if s.shot_id in rewritten}
     return [i for i in issues if i.check != "coverage"
             or i.object_id in rewritten or i.object_id in scenes]  # fmt: skip
@@ -424,8 +426,8 @@ class ReviseRunner:
         )]  # fmt: skip
         locked_base = base.model_copy(update={"locked_ids": sorted(scope.locked)})
         final = hc.run_hard_checks(new, state.request.options) + hc.check_locks(locked_base, new)
-        final = coverage_in_scope(final, new, set(rev.changed_ids) if "storyboard" in rev.steps
-                                  else set())  # fmt: skip
+        final = coverage_in_scope(final, new, set(rev.changed_ids) | set(req.target_ids)
+                                  if "storyboard" in rev.steps else set())  # fmt: skip
         if final:
             return self._needs_revision(rev, base, state, final, step=None, trace=trace, pkg=new)
 
@@ -528,7 +530,8 @@ class ReviseRunner:
                 # storyboarded before the coverage rule) aren't held to coverage. The model
                 # couldn't fix them: they are put back from the base revision.
                 draft = state.draft_package()
-                issues = coverage_in_scope(issues, draft, set(changed_ids(base, draft)))
+                issues = coverage_in_scope(issues, draft,
+                                           set(changed_ids(base, draft)) | set(req.target_ids))  # fmt: skip
             if not issues:
                 if trace:
                     trace.event("stage_passed", f"Revision: {step.name} passed.", stage=step.name)

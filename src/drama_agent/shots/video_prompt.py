@@ -409,9 +409,14 @@ def prompt_findings(
         tag = f"cut {block.sub_shot}"
         at = 0
         shown = [x for x in cut["lines"] if x["where"] == "on screen" or not cut["people"]]
+        # An insert shows hands, feet or a prop: a line spoken over it by someone whose
+        # face is out of the frame is voice-over too, and may sit in the sound sentence.
+        insert = bool(re.search(r"\binsert\b|\bdetail\b", cut.get("framing", ""), re.IGNORECASE))
         for x in shown:
             quoted = f'"{x["line"].strip()}"'
             k = block.text.find(quoted, at)
+            if k < 0 and insert and quoted in out.sound:
+                continue
             if k < 0:
                 problems.append(f"{tag} doesn't quote {x['speaker']}'s line word for word, "
                                 f"in order: {quoted}")  # fmt: skip
@@ -430,7 +435,7 @@ def prompt_findings(
             if quoted not in out.sound:
                 problems.append(f"`sound` doesn't carry {x['speaker']}'s off-screen line of "
                                 f"{tag} word for word: {quoted}")  # fmt: skip
-        if shown and "lips" not in block.text.lower():
+        if shown and not insert and "lips" not in block.text.lower():
             advice.append(f"{tag} doesn't say whose lips move on its line")
         if not shown and cut["people"] and not _SILENT.search(block.text):
             advice.append(f"{tag} has no line spoken in frame and doesn't say the people stay "

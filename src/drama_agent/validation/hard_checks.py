@@ -103,7 +103,7 @@ def check_coverage(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> 
     """Within a scene: two consecutive shots never share a size and the same people on
     screen, and at most one shot in two is a two-shot or group shot (once a scene has
     three or more shots); no shot is shorter than the shortest clip; and a line is spoken
-    in one shot. The storyboard is told the same rules (pace.COVERAGE_RULES)."""
+    in one shot, which its speaker is in. The storyboard is told the same rules (pace.COVERAGE_RULES)."""
     issues: list[Issue] = []
     by_scene: dict[str, list[Shot]] = defaultdict(list)
     for sh in sorted(pkg.shot_list, key=lambda s: s.start_ms):
@@ -141,6 +141,20 @@ def check_coverage(pkg: ProductionPackage, idx: PackageIndex, _: JobOptions) -> 
     cued: dict[str, str] = {}  # a line -> the first shot that speaks it
     for sh in sorted(pkg.shot_list, key=lambda s: s.start_ms):
         for cue in sh.dialogue_cues:
+            line = idx.dialogue.get(cue.dialogue_id)
+            if (
+                line is not None
+                and not line.voice_only
+                and line.character_id not in sh.character_ids
+            ):
+                issues.append(_issue(
+                    "coverage", sh.shot_id,
+                    f"line {cue.dialogue_id} is spoken by {line.character_id}, who isn't in "
+                    "this shot: the video model would voice it itself, in a voice of its own. "
+                    "Give the line to a shot its speaker is in and show the listener as a "
+                    "moment of that shot (add the speaker to character_ids only if they are "
+                    "seen)",
+                ))  # fmt: skip
             first = cued.setdefault(cue.dialogue_id, sh.shot_id)
             if first != sh.shot_id:
                 issues.append(_issue(

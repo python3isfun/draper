@@ -123,6 +123,31 @@ rules a revision was written under before scoring it
    ([references/draper-levers.md](references/draper-levers.md)). Re-measuring after a fix
    is part of the recommendation.
 
+## Workflow: close the gap to a reference, round by round
+
+Use this when the job is "make ours as good as that clip". One round changes one thing,
+so the next measurement says whether it worked.
+
+1. **Score both.** Measure the reference and our newest cut with the same command, and
+   keep the scorecard in `director/<date>-<slug>-scorecard.md`: median shot, shots over
+   4 s, cuts a minute, the share of close singles, words per line, lines that differ from
+   the script, leads whose face changes, continuity breaks, audio peak. Add a row a round.
+2. **Take the largest gap that is ours to close,** furthest upstream first: script, then
+   storyboard, cut plan, design pictures, keyframes, video prompt, render, assembly. A
+   round that fixes keyframes under a storyboard that will be rewritten is thrown away.
+3. **Write the rule before the fix.** Put what the round learned into this skill (a craft
+   rule, a checklist line, a row in the levers table) and into the app where the row
+   points, with a test. Then apply it to the episode. A fix made by hand in one episode
+   and not written down comes back in the next.
+4. **Regenerate only what the change touches,** and look at stills before video: a
+   keyframe sheet costs minutes, a render an hour. Render one take while iterating; two
+   only for a cut that will be shown.
+5. **Review the new cut with the review workflow above,** fill in the scorecard, and stop
+   when a round moves nothing or the remaining gaps are the model's (resolution, motion
+   quality), not the plan's.
+
+Never copy the reference's lines, characters or scenes: the scorecard compares craft.
+
 ## Workflow: critique or plan a storyboard (before rendering)
 
 Read each scene's shots in order and check:

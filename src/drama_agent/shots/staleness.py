@@ -139,6 +139,12 @@ def keyframe_judge(
                        else (p := approved_take(takes, t.shot_id, t.sub_shot - 1))
                        and FrameRef(ref_id=frame_ref(p), role="", kind="previous_frame"))  # fmt: skip
                 if now is None or now.ref_id != r.ref_id:
+                    # The previous shot's keyframe lends a cut its light and set and is
+                    # never waited for: shots are drawn side by side, so another draw of
+                    # it is often approved after the cut borrowed an earlier one. That is
+                    # no reason to redraw the cut, nor to hold the shot's later cuts.
+                    if r.kind == "previous_shot":
+                        continue
                     if t.moved_by_insert and r.kind != "previous_shot":
                         out.append(KF_CUT_INSERTED)
                     elif now is None and r.kind != "previous_shot":

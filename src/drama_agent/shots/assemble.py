@@ -125,7 +125,7 @@ class MusicBed:
 
 OVER_PAD_S = 0.3  # kept around a line's words laid over the next shot's picture
 OVER_SHARE = 0.6  # a clip gives at most this share of its sound to the shots beside it
-PEAK = 0.89  # the mix's ceiling (about -1 dB)
+PEAK = 0.71  # the limiter's ceiling (about -3 dB): the AAC encoder overshoots it by up to 1 dB
 
 
 def lay_over(
@@ -176,7 +176,7 @@ def assemble(
     to `poster` (JPEG) if asked. `trims` cuts each clip to (in, out) seconds; `music` lays
     beds under the result. `overlaps` gives per clip the (head, tail) seconds of its sound
     that play over the picture of the clip before and after it (an editor's J and L cuts):
-    its picture is that much shorter than its sound. The mix is limited to about -1 dB.
+    its picture is that much shorter than its sound. The mix is limited (PEAK).
     Returns {duration_s, width, height, clips, trimmed_s}."""
     if not clips:
         raise AssembleError("there are no clips to assemble")
@@ -235,7 +235,7 @@ def assemble(
         sounds.append(f"[m{k}]")
     filters.append(
         f"{''.join(sounds)}amix=inputs={len(sounds)}:duration=longest:normalize=0,"
-        f"atrim=0:{at:.3f},alimiter=limit={PEAK}:level=disabled[a]"
+        f"atrim=0:{at:.3f},alimiter=limit={PEAK}:attack=2:release=50:level=disabled[a]"
     )
     args += ["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
              "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",

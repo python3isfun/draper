@@ -279,3 +279,33 @@ def test_a_part_cued_where_its_speaker_is_not_is_spoken_in_the_speakers_shot(pac
     assert heard_lines(package, first) == [] and heard_lines(package, nxt) == []
     assert len([x for s in (first, nxt) for x in shot_lines(package, s)
                 if x["dialogue_id"] == cue.dialogue_id]) == 2  # fmt: skip
+
+
+def test_a_replaced_pick_keeps_the_choices_made_from_the_old_one():
+    from drama_agent.shot_reading import (
+        Candidate,
+        Choice,
+        PersonState,
+        SceneReading,
+        carry_unchanged,
+    )
+
+    def cand(image_id, look="lk_work", kind="look"):
+        return Candidate(image_id=image_id, character_id="ch_a", kind=kind, label="x", look_id=look)
+
+    state = PersonState(wearing="ivory blouse", hair="a bun")
+    before = Choice(shot_id="sh_1", sub_shot=1, character_id="ch_a", state=state,
+                    image_id="img_old", keep=["ivory blouse"])  # fmt: skip
+    old = SceneReading(package_id="p", revision_id="r", scene_id="sc", status="done",
+                       fingerprint="f", cuts={"sh_1:1": "same"}, choices=[before],
+                       candidates=[cand("img_old"), cand("img_other", "lk_night")])  # fmt: skip
+    fresh = Choice(shot_id="sh_1", sub_shot=1, character_id="ch_a", image_id="img_other",
+                   state=PersonState(wearing="something else", hair="loose"))  # fmt: skip
+    # The work look's pick was replaced: the same choice, drawn from the new picture.
+    pool = [cand("img_new"), cand("img_other", "lk_night")]
+    [kept] = carry_unchanged([fresh], old, {"sh_1:1": "same"}, pool)
+    assert (kept.image_id, kept.state.wearing, kept.keep) == ("img_new", "ivory blouse",
+                                                              ["ivory blouse"])  # fmt: skip
+    # A cut that changed is read afresh, and so is one whose look is gone.
+    assert carry_unchanged([fresh], old, {"sh_1:1": "changed"}, pool) == [fresh]
+    assert carry_unchanged([fresh], old, {"sh_1:1": "same"}, pool[1:]) == [fresh]
