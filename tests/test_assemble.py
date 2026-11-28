@@ -70,3 +70,50 @@ def test_the_assembly_applies_the_trims_and_lays_music_under_the_cut(tmp_path):
     assert abs(plain["duration_s"] - 11) < 0.3
     with pytest.raises(asm.AssembleError, match="one trim per clip"):
         asm.assemble([talk, walk], tmp_path / "x.mp4", trims=[(0.0, 1.0)])
+
+
+def test_a_line_is_laid_over_the_picture_of_the_clip_beside_it():
+    # Clip 1 speaks a line whose last 1.2 s the storyboard put over clip 2 (a listener
+    # with no line of its own, 3 s long in the storyboard).
+    trims, over = asm.lay_over(
+        [(0.5, 4.5), (0.0, 4.0), (1.0, 3.0)], [5.0, 4.0, 4.0],
+        [[], [("before", 1.2)], []], [True, False, True], [4.0, 3.0, 3.0],
+    )  # fmt: skip
+    assert over == [(0.0, 1.5), (0.0, 0.0), (0.0, 0.0)]  # the words and a short margin
+    assert trims == [(0.5, 4.5), (0.0, 3.0), (1.0, 3.0)]  # the listener: its storyboard length
+    # A listener that then speaks shows its picture for the overlap before its own line.
+    trims, over = asm.lay_over(
+        [(0.0, 4.0), (2.0, 4.0)], [4.0, 4.0], [[], [("before", 1.2)]], [True, True], [4.0, 4.0]
+    )
+    assert over[0] == (0.0, 1.5) and trims[1] == (0.5, 4.0)
+    # A clip never gives more than a share of its sound away.
+    _, over = asm.lay_over(
+        [(0.0, 2.0), (0.0, 4.0)], [2.0, 4.0], [[], [("before", 3.0)]], [True, False], [2.0, 4.0]
+    )
+    assert over[0] == (0.0, pytest.approx(1.2))
+    # A line that starts under the clip before: that clip holds for the words.
+    trims, over = asm.lay_over(
+        [(0.0, 3.0), (0.0, 4.0)], [4.0, 4.0], [[("after", 0.7)], []], [True, True], [3.0, 4.0]
+    )
+    assert over == [(0.0, 0.0), (0.7, 0.0)] and trims[0] == (0.0, pytest.approx(3.4))
+
+
+def test_the_assembly_plays_a_clips_sound_over_its_neighbours_picture(tmp_path):
+    talk = _clip(tmp_path / "talk.mp4", 4, (0.5, 3.8))
+    listen = _clip(tmp_path / "listen.mp4", 4, None, "blue")
+    out = asm.assemble([talk, listen], tmp_path / "ep.mp4", trims=[(0.0, 4.0), (0.0, 3.0)],
+                       overlaps=[(0.0, 1.5), (0.0, 0.0)])  # fmt: skip
+    # The picture is 2.5 s of the talker and 3 s of the listener; the tone runs to 3.8 s,
+    # over the listener's first 1.3 s.
+    assert abs(out["duration_s"] - 5.5) < 0.2
+    _, last = asm.sound_window(tmp_path / "ep.mp4")
+    assert abs(last - 3.8) < 0.2
+    frame = tmp_path / "f.jpg"
+    asm.frame_at(tmp_path / "ep.mp4", 3.0, frame)
+    px = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(frame), "-vf", "scale=1:1", "-f", "rawvideo",
+         "-pix_fmt", "rgb24", "pipe:1"], check=True, capture_output=True,
+    ).stdout  # fmt: skip
+    assert px[2] > px[0]  # blue: the listener is on screen while the tone still plays
+    with pytest.raises(asm.AssembleError, match="one overlap per clip"):
+        asm.assemble([talk, listen], tmp_path / "x.mp4", overlaps=[(0.0, 0.0)])

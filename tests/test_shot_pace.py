@@ -242,3 +242,40 @@ def test_the_plan_reader_settles_the_planners_slips_by_the_storyboard(package):
         assert subs[1].start_ms == line["end_ms"]
     else:
         assert subs[0].end_ms - line["end_ms"] < 1000  # no room after the line
+
+
+def test_a_part_cued_where_its_speaker_is_not_is_spoken_in_the_speakers_shot(package):
+    from drama_agent.shots.plans import carried_ms, heard_lines, shot_lines
+
+    lines = {d.dialogue_id: d for ep in package.episodes for sc in ep.scenes
+             for b in sc.beats if (d := b.dialogue)}  # fmt: skip
+    first = next(s for s in package.shot_list if s.dialogue_cues)
+    nxt = next(s for s in package.shot_list if s.episode_id == first.episode_id
+               and s.start_ms > first.start_ms)  # fmt: skip
+    cue = first.dialogue_cues[-1]
+    who = lines[cue.dialogue_id].character_id
+    cue.end_ms = first.start_ms + first.duration_ms
+    nxt.dialogue_cues = [cue.model_copy(update={"start_ms": nxt.start_ms,
+                                                "end_ms": nxt.start_ms + 1500})]  # fmt: skip
+    first.character_ids = [who]
+    nxt.character_ids = [c for c in nxt.character_ids if c != who] or ["someone_else"]
+    # The listener's shot has no words of the line; the speaker's shot has all of them,
+    # and its clip is longer by the time they had in the listener's shot.
+    assert [x for x in shot_lines(package, nxt) if x["dialogue_id"] == cue.dialogue_id] == []
+    [said] = [x for x in shot_lines(package, first) if x["dialogue_id"] == cue.dialogue_id]
+    assert (said["part"], said["text"], said["tail_ms"]) == ("whole", said["full_text"], 1500)
+    assert carried_ms(package, first) == 1500 and carried_ms(package, nxt) == 0
+    [heard] = heard_lines(package, nxt)
+    assert (heard["from_shot"], heard["side"], heard["ms"]) == (first.shot_id, "before", 1500)
+    assert said["full_text"].endswith(heard["text"])
+    # The other way round: the line starts over the listener and the speaker's shot follows.
+    first.character_ids, nxt.character_ids = ["someone_else"], [who]
+    [said] = [x for x in shot_lines(package, nxt) if x["dialogue_id"] == cue.dialogue_id]
+    assert said["text"] == said["full_text"] and said["lead_ms"] > 0
+    [heard] = heard_lines(package, first)
+    assert (heard["from_shot"], heard["side"]) == (nxt.shot_id, "after")
+    # Where the speaker is in neither shot, the parts stay where the storyboard cued them.
+    nxt.character_ids = ["someone_else"]
+    assert heard_lines(package, first) == [] and heard_lines(package, nxt) == []
+    assert len([x for s in (first, nxt) for x in shot_lines(package, s)
+                if x["dialogue_id"] == cue.dialogue_id]) == 2  # fmt: skip

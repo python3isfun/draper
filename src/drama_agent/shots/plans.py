@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from ..models import ProductionPackage
@@ -61,7 +62,10 @@ def shot_lines(pkg: ProductionPackage, shot: Shot) -> list[dict[str, Any]]:
     phrase end), `part` says which ("whole", "start", "middle", "end") and `full_text` is
     the whole line. H3 lip-syncs the words it is given to the seconds it has, so a shot
     quotes only its own words, every word is spoken in exactly one shot, and a shot that
-    holds a moment of a line (under MIN_PART_MS) doesn't have the line at all."""
+    holds a moment of a line (under MIN_PART_MS) doesn't have the line at all.
+    A part cued in a shot its speaker isn't in is spoken in the speaker's own shot beside
+    it instead (see `heard_lines`): `lead_ms` and `tail_ms` are the time of the words a
+    line took from the shot before and the shot after."""
     names = _names(pkg)
     lines = _dialogue(pkg)
     parts = _line_parts(pkg, shot)
@@ -70,48 +74,120 @@ def shot_lines(pkg: ProductionPackage, shot: Shot) -> list[dict[str, Any]]:
         line = lines.get(c.dialogue_id)
         if line is None:
             continue
-        text, part = parts.get(c.dialogue_id, (line.text, "whole"))
-        if not text:
+        p = parts.get(c.dialogue_id) or LinePart(line.text, "whole")
+        if not p.text:
             continue
         out.append({
             "dialogue_id": c.dialogue_id,
             "speaker_id": line.character_id,
             "speaker": names.get(line.character_id, line.character_id),
-            "text": text,
+            "text": p.text,
             "full_text": line.text,
-            "part": part,
+            "part": p.part,
             "start_ms": max(0, c.start_ms - shot.start_ms),
             "end_ms": max(0, c.end_ms - shot.start_ms),
+            "lead_ms": p.lead_ms,
+            "tail_ms": p.tail_ms,
         })  # fmt: skip
     return sorted(out, key=lambda x: x["start_ms"])
 
 
-def _line_parts(pkg: ProductionPackage, shot: Shot) -> dict[str, tuple[str, str]]:
-    """Per line cued in the shot: (the words of it spoken in this shot, which part), from
-    the line's cues over the episode's shots in order. The words are "" where the shot
-    holds too little of the line to speak any."""
+def heard_lines(pkg: ProductionPackage, shot: Shot) -> list[dict[str, Any]]:
+    """The parts of lines cued in the shot that are spoken in a shot beside it, because
+    their speaker is in that shot and not in this one: `from_shot`, `side` ("before": the
+    sound runs on from the shot before over this one's picture; "after": the next shot's
+    sound starts under this one's), `text` and `ms`, the time the storyboard gave them
+    here. The video model would voice them itself, in a voice of its own and often as
+    nonsense; the assembly lays the speaker's own sound over this shot's picture."""
+    names = _names(pkg)
+    lines = _dialogue(pkg)
+    out = []
+    for c in shot.dialogue_cues:
+        p = _line_parts(pkg, shot).get(c.dialogue_id)
+        if p is None or p.heard_from is None:
+            continue
+        who = lines[c.dialogue_id].character_id
+        out.append({
+            "dialogue_id": c.dialogue_id, "speaker_id": who, "speaker": names.get(who, who),
+            "text": p.heard_text, "from_shot": p.heard_from, "side": p.side, "ms": p.heard_ms,
+            "start_ms": max(0, c.start_ms - shot.start_ms),
+        })  # fmt: skip
+    return out
+
+
+def carried_ms(pkg: ProductionPackage, shot: Shot) -> int:
+    """The time of the words the shot's lines took from the shots beside it: its clip is
+    that much longer than its plan."""
+    return sum(x["lead_ms"] + x["tail_ms"] for x in shot_lines(pkg, shot))
+
+
+@dataclass(frozen=True)
+class LinePart:
+    """A line in one shot: the words spoken there and which part of the line they are; the
+    time of the words taken from the shots beside it; and, when its own words are spoken
+    in a shot beside it, which, on which side, the words and their time."""
+
+    text: str
+    part: str
+    lead_ms: int = 0
+    tail_ms: int = 0
+    heard_from: str | None = None
+    side: str = ""
+    heard_text: str = ""
+    heard_ms: int = 0
+
+
+def _line_parts(pkg: ProductionPackage, shot: Shot) -> dict[str, LinePart]:
+    """Per line cued in the shot: its LinePart, from the line's cues over the episode's
+    shots in order. The words are "" where the shot holds too little of the line to speak
+    any, or where they are spoken in the speaker's shot beside it."""
     mine = {c.dialogue_id for c in shot.dialogue_cues}
-    cues: dict[str, list[tuple[str, int]]] = {d: [] for d in mine}  # (shot, ms) in order
+    cues: dict[str, list[tuple[Shot, int]]] = {d: [] for d in mine}  # (shot, ms) in order
     for s in sorted((s for s in pkg.shot_list if s.episode_id == shot.episode_id),
                     key=lambda s: s.start_ms):  # fmt: skip
         for c in s.dialogue_cues:
             if c.dialogue_id in mine:
-                cues[c.dialogue_id].append((s.shot_id, max(0, c.end_ms - c.start_ms)))
+                cues[c.dialogue_id].append((s, max(0, c.end_ms - c.start_ms)))
     lines = _dialogue(pkg)
-    out = {}
+    out: dict[str, LinePart] = {}
     for d, spans in cues.items():
         if d not in lines:
             continue
         texts = split_line(lines[d].text, [ms for _, ms in spans])
+        there = [lines[d].character_id in s.character_ids for s, _ in spans]
+        lead, tail = [0] * len(spans), [0] * len(spans)
+        heard: dict[int, tuple[int, str, str, int]] = {}  # part -> (speaking part, side, ...)
+        for i, (_, ms) in enumerate(spans):
+            if there[i] or not texts[i]:
+                continue
+            # The speaker's shot beside this one that speaks the line: the one before
+            # (the sound runs on over this picture), else the one after.
+            if i > 0 and there[i - 1] and texts[i - 1]:
+                texts[i - 1] = f"{texts[i - 1]} {texts[i]}"
+                tail[i - 1] += ms
+                heard[i] = (i - 1, "before", texts[i], ms)
+            elif i + 1 < len(spans) and there[i + 1] and texts[i + 1]:
+                texts[i + 1] = f"{texts[i]} {texts[i + 1]}"
+                lead[i + 1] += ms
+                heard[i] = (i + 1, "after", texts[i], ms)
+            else:
+                continue
+            texts[i] = ""
         spoken = [i for i, t in enumerate(texts) if t]
-        for i, (shot_id, _) in enumerate(spans):
-            if shot_id != shot.shot_id:
+        for i, (s, _) in enumerate(spans):
+            if s.shot_id != shot.shot_id:
                 continue
             part = ("whole" if len(spoken) <= 1 else "start" if i == spoken[0]
                     else "end" if i == spoken[-1] else "middle")  # fmt: skip
             # A shot cued twice for one line (the storyboard shouldn't) speaks both parts.
-            had = out.get(d, ("", part))[0]
-            out[d] = (f"{had} {texts[i]}".strip(), part)
+            had = out.get(d)
+            text = f"{had.text if had else ''} {texts[i]}".strip()
+            j, side, words, ms = heard.get(i, (i, "", "", 0))
+            out[d] = LinePart(
+                text, part, lead[i] + (had.lead_ms if had else 0),
+                tail[i] + (had.tail_ms if had else 0),
+                spans[j][0].shot_id if i in heard else None, side, words, ms,
+            )  # fmt: skip
     return out
 
 

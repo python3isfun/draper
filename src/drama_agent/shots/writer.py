@@ -323,7 +323,8 @@ def in_frame(text: str) -> str:
 def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, Any]]:
     """Per <Picture N>: its role, and the definition and relationship sentences the prompt
     uses for it (MiniMax's edit form). Written here, not by the model, so every picture is
-    used for what it is: a face picture always transfers that exact face. A person's picture
+    used for what it is: a face picture always transfers that exact face, and the person's look
+    picture sent with it keeps the build and the clothes, not its own face. A person's picture
     chosen by reading the scene keeps the face, build and what it already gets right, and
     states how they look at this moment (shot_reading.py), so what the picture shows that
     the moment doesn't (a bag in hand, pinned hair) is not carried over. Without a reading,
@@ -333,8 +334,16 @@ def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, 
     names = _names(pkg)
     close = close_framing(take_sub(pkg, shot_of(pkg, take.shot_id), take).framing)
 
+    # A person's look picture is sent with their face picture when there is one. The look
+    # picture has a face of its own, small and never quite the same person: named among
+    # what it keeps, H3 draws that face, or a blend, and the person changes from keyframe
+    # to keyframe. With a face picture the look keeps the build and the clothes only.
+    face_of = {r.entity_id: n for n, r in enumerate(take.references, 1) if r.kind == "face"}
+
     def to_state(subject: str, who: str, r: FrameRef) -> str:
         assert r.state is not None
+        faced = r.kind == "look" and r.entity_id in face_of
+        face = f"the build (the face is <Subject {face_of[r.entity_id]}>'s)" if faced else ""
         keep = [k for k in (seen(k) for k in r.keep) if k]
         state = r.state.model_copy(update={"wearing": seen(r.state.wearing),
                                            "carrying": seen(r.state.carrying),
@@ -346,11 +355,13 @@ def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, 
             wearing, hair = in_frame(state.wearing), state.hair.rstrip(".")
             now = ", ".join(x for x in (f"{who or 'the person'} wears {wearing}" if wearing else "",
                                         f"hair {hair}" if hair else "") if x)  # fmt: skip
-            return (f"{subject} is partially preserved: the face, build and the garments this "
-                    f"framing shows remain; {now + '; ' if now else ''}anything held in the "
+            return (f"{subject} is partially preserved: {face or 'the face, build'} and the "
+                    f"garments this framing shows remain; {now + '; ' if now else ''}anything held in the "
                     "picture appears only where the action puts it; the pose, position and "
                     "expression follow this description.")  # fmt: skip
-        kept = ", ".join(["the face", "build", *keep])
+        kept = ", ".join([face] if face else ["the face", "build"]) + "".join(
+            f", {k}" for k in keep
+        )
         return (f"{subject} is partially preserved: {kept} remain; "
                 f"{state.sentence(who or 'the person')}; the pose, position and expression "
                 "follow this description.")  # fmt: skip
@@ -376,15 +387,18 @@ def picture_sentences(pkg: ProductionPackage, take: ShotTake) -> list[dict[str, 
                 rel = to_state(subject, who, r)
             case "look":
                 define = f"{who or 'The person'} in <Picture {n}> is {subject}."
-                rel = (f"{subject} is partially preserved: the face, hair, build and every "
+                kept = (f"the hair, build (the face is <Subject {face_of[r.entity_id]}>'s)"
+                        if r.entity_id in face_of else "the face, hair, build")  # fmt: skip
+                rel = (f"{subject} is partially preserved: {kept} and every "
                        "garment remain; anything held in the picture appears only where the "
                        "action puts it; the pose, position and expression follow this "
                        "description.")  # fmt: skip
             case "face" if r.entity_id in look_of:
                 scope = f"{who}'s face" if who else "The face"
                 define = f"{scope} in <Picture {n}> is {subject}."
-                rel = (f"{subject} supplies the exact facial features transferred to "
-                       f"<Subject {look_of[r.entity_id]}>.")  # fmt: skip
+                rel = (f"{subject} is the face of <Subject {look_of[r.entity_id]}> in the "
+                       "image: its exact facial features, face shape and apparent age, in "
+                       f"place of the face <Picture {look_of[r.entity_id]}> shows.")  # fmt: skip
             case "face" if r.state is not None:
                 define = f"{who or 'The person'} in <Picture {n}> is {subject}."
                 rel = to_state(subject, who, r)

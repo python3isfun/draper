@@ -125,9 +125,10 @@ def clip_ratio(pkg: ProductionPackage) -> str:
     return ratio if ratio in H3_RATIOS else "9:16"
 
 
-def clip_seconds(plan: ShotPlan, shot_ms: int) -> int:
-    """The clip's length in whole seconds: the plan's, else the storyboard's."""
-    return clamp_seconds(plan.sub_shots[-1].end_ms if plan.sub_shots else shot_ms)
+def clip_seconds(plan: ShotPlan, shot_ms: int, carried_ms: int = 0) -> int:
+    """The clip's length in whole seconds: the plan's, else the storyboard's, and the time
+    of the words its lines took from the shots beside it (plans.carried_ms)."""
+    return clamp_seconds((plan.sub_shots[-1].end_ms if plan.sub_shots else shot_ms) + carried_ms)
 
 
 def _camera_sentence(camera: str) -> str:

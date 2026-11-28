@@ -33,11 +33,12 @@ from ..models import ProductionPackage
 from ..models.images import GeneratedImage
 from ..models.storyboard import Shot
 from ..shot_reading import SceneReading
+from ..videogen import clamp_seconds
 from .approvals import approved_take, frame_ref
 from .clip_refs import clip_references, exportable
 from .common import _dialogue, _names
 from .models import PromptBlock, ShotPlan, ShotTake, ShotVideoPrompt
-from .plans import current_sub, shot_lines, sub_shot_lines
+from .plans import carried_ms, current_sub, shot_lines, sub_shot_lines
 from .references import chosen_pictures
 from .writer import shot_context, sub_shot_context
 
@@ -171,6 +172,11 @@ mid-sentence as the clip opens (`Derek, mid-sentence: "..."`), for a `cut_off` o
 the sentence breaks off at the cut. The words spoken in another shot are never quoted \
 here: H3 lip-syncs what it is given to the seconds it has, and a line with no words to \
 say comes out as nonsense.
+- **Only the lines in `lines` are heard.** A line of the shot before or after, an answer \
+the action says is coming, a voice finishing a sentence: none of it is written, quoted or \
+described as heard, in `text` or in `sound`. The edit lays a neighbouring shot's sound \
+over this picture where the story needs it; H3 asked for a voice it has no picture of \
+invents one, and often nonsense. A cut whose `lines` is empty is silent listening or action.
 - No timestamps like "[Shot 2] At 00:02.000": they are added from the plan.
 - 150 to 500 words in all (`text` of every cut, `camera` and `sound`).
 """
@@ -263,9 +269,16 @@ def prompt_context(
         if cut["keyframe"]:
             cut["keyframe_check"] = (checks or {}).get(sub.index, [])
         cuts.append(cut)
+    # Words taken from the shots beside this one (plans.heard_lines) need their time: the
+    # clip, and its last cut, run that much longer than the plan.
+    extra = carried_ms(pkg, shot)
+    clip_s: float = round(plan.sub_shots[-1].end_ms / 1000, 3)
+    if extra:
+        clip_s = clamp_seconds(plan.sub_shots[-1].end_ms + extra)
+        cuts[-1]["end_s"] = clip_s
     context = {
         **base,
-        "clip_s": round(plan.sub_shots[-1].end_ms / 1000, 3),
+        "clip_s": clip_s,
         "pictures": pictures,
         "cuts": cuts,
     }  # fmt: skip
@@ -442,6 +455,13 @@ def prompt_findings(
             tuple(f"the camera {m.split()[0]}" for m in CAMERA_MOVES)
         ):
             advice.append(f"{tag}'s camera isn't in MiniMax's wording: {block.camera[:60]}")
+    # Words quoted in the sound sentence that are no line of this shot are a line H3 would
+    # voice on its own: a neighbouring shot's, or one the writer made up.
+    lines = {x["line"].strip() for c in cuts for x in c["lines"]}
+    for q in _QUOTED.findall(out.sound):
+        if len(q.split()) and q[1:-1].strip() not in lines:
+            problems.append(f"`sound` quotes {q}, which is no line of this shot: only the "
+                            "shot's own lines are heard; leave it out")  # fmt: skip
     if "sound" not in out.sound.lower():
         advice.append("has no sound sentence: say what is heard")
     words = word_count(out.blocks, out.sound)

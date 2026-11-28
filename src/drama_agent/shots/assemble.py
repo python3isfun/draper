@@ -4,8 +4,9 @@ The clips are concatenated in storyboard order with their own sound; each is sca
 padded to the first clip's size and re-encoded, so clips of different sizes or codecs join
 cleanly. Each clip can be trimmed to its sound (`trim_points`: a rendered clip warms up
 from a posed first frame and settles into a held end state; the dead air is cut) and a
-music bed can be laid under the scenes (`music`), mixed below the dialogue. No titles or
-transitions: the cut is the editor's; this is the rough assembly that shows the episode as
+music bed can be laid under the scenes (`music`), mixed below the dialogue. A line can be
+heard over the picture of the clip beside the one that speaks it (`overlaps`, `lay_over`).
+No titles or transitions: the cut is the editor's; this is the rough assembly that shows the episode as
 rendered.
 """
 
@@ -122,66 +123,120 @@ class MusicBed:
     gain_db: float = MUSIC_DB
 
 
+OVER_PAD_S = 0.3  # kept around a line's words laid over the next shot's picture
+OVER_SHARE = 0.6  # a clip gives at most this share of its sound to the shots beside it
+PEAK = 0.89  # the mix's ceiling (about -1 dB)
+
+
+def lay_over(
+    trims: list[tuple[float, float]],
+    durations: list[float],
+    heard: list[list[tuple[str, float]]],
+    speaks: list[bool],
+    planned: list[float],
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Trims and overlaps for clips whose shots hear a line spoken in the clip beside them
+    (plans.heard_lines). `heard[i]` is, per such line of clip i, (side, seconds): "before"
+    (the clip before speaks it: its sound runs on over this clip's picture) or "after"
+    (the clip after speaks it: its sound starts under this clip's picture). `speaks[i]`
+    says whether clip i has a line of its own; `planned[i]` is its shot's length.
+    Returns (trims, overlaps): overlaps[i] is the (head, tail) seconds of clip i's sound
+    heard over its neighbours' picture instead of its own."""
+    cut = [list(t) for t in trims]
+    over = [[0.0, 0.0] for _ in trims]
+    for i, lines in enumerate(heard):
+        for side, seconds in lines:
+            if side == "before" and i > 0:
+                room = OVER_SHARE * (cut[i - 1][1] - cut[i - 1][0])
+                tail = min(seconds + OVER_PAD_S, room)
+                over[i - 1][1] = max(over[i - 1][1], tail)
+                # This clip shows the listener for that long before its own sound.
+                cut[i][0] = max(0.0, cut[i][0] - tail)
+                if not speaks[i]:  # a listener's clip is as long as the storyboard made it
+                    cut[i][1] = min(durations[i], cut[i][0] + max(planned[i], tail + 0.5))
+            elif side == "after" and i + 1 < len(trims):
+                room = OVER_SHARE * (cut[i + 1][1] - cut[i + 1][0])
+                head = min(seconds, room)
+                over[i + 1][0] = max(over[i + 1][0], head)
+                # The words start under this clip's end: it holds for them.
+                cut[i][1] = min(durations[i], cut[i][1] + max(0.0, head - TRIM_TAIL_S / 2))
+    return ([(round(a, 3), round(b, 3)) for a, b in cut],
+            [(round(a, 3), round(b, 3)) for a, b in over])  # fmt: skip
+
+
 def assemble(
     clips: list[Path],
     out: Path,
     poster: Path | None = None,
     trims: list[tuple[float, float]] | None = None,
     music: list[MusicBed] | None = None,
+    overlaps: list[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """Concatenate `clips` into `out` (mp4, 24 fps, AAC sound), and write the first frame
     to `poster` (JPEG) if asked. `trims` cuts each clip to (in, out) seconds; `music` lays
-    beds under the result. Returns {duration_s, width, height, clips, trimmed_s}."""
+    beds under the result. `overlaps` gives per clip the (head, tail) seconds of its sound
+    that play over the picture of the clip before and after it (an editor's J and L cuts):
+    its picture is that much shorter than its sound. The mix is limited to about -1 dB.
+    Returns {duration_s, width, height, clips, trimmed_s}."""
     if not clips:
         raise AssembleError("there are no clips to assemble")
     infos = [probe(p) for p in clips]
     trims = trims or [(0.0, info["duration_s"]) for info in infos]
     if len(trims) != len(clips):
         raise AssembleError("one trim per clip")
+    overlaps = overlaps or [(0.0, 0.0)] * len(clips)
+    if len(overlaps) != len(clips):
+        raise AssembleError("one overlap per clip")
     w, h = infos[0]["width"], infos[0]["height"]
     args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     for p in clips:
         args += ["-i", str(p)]
-    # A clip without sound gets a silent track, so the concat has sound throughout.
+    # A clip without sound gets a silent track, so the mix has sound throughout.
     silent = [i for i, info in enumerate(infos) if not info["audio"]]
     for _ in silent:
         args += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
     music = music or []
     for bed in music:
         args += ["-i", str(bed.path)]
-    filters, pairs = [], []
-    for i, (info, (t0, t1)) in enumerate(zip(infos, trims, strict=True)):
+    filters, pictures, sounds = [], [], []
+    at = 0.0  # where the clip's picture starts in the episode
+    for i, (info, (t0, t1), (head, tail)) in enumerate(zip(infos, trims, overlaps, strict=True)):
+        if t1 - t0 - head - tail < 0.1:  # never a clip with no picture
+            head = tail = 0.0
+        v0, v1 = t0 + head, t1 - tail
         filters.append(
-            f"[{i}:v]trim={t0:.3f}:{t1:.3f},setpts=PTS-STARTPTS,"
+            f"[{i}:v]trim={v0:.3f}:{v1:.3f},setpts=PTS-STARTPTS,"
             f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p[v{i}]"
         )
+        # The first clip has nothing before it to play over: its sound starts at its picture.
+        a0 = v0 if at - head < 0 else t0
+        delay = round(max(0.0, at - (v0 - a0)) * 1000)
         if info["audio"]:
-            filters.append(f"[{i}:a]atrim={t0:.3f}:{t1:.3f},asetpts=PTS-STARTPTS,"
-                           f"aresample=48000,aformat=channel_layouts=stereo[a{i}]")  # fmt: skip
+            src, cut = f"[{i}:a]", f"atrim={a0:.3f}:{t1:.3f}"
         else:
-            src = len(clips) + silent.index(i)
-            filters.append(f"[{src}:a]atrim=0:{t1 - t0:.3f},asetpts=PTS-STARTPTS[a{i}]")
-        pairs.append(f"[v{i}][a{i}]")
-    filters.append(f"{''.join(pairs)}concat=n={len(clips)}:v=1:a=1[v][cut]")
-    if music:
-        beds = []
-        for k, bed in enumerate(music):
-            src = len(clips) + len(silent) + k
-            delay = round(bed.start_s * 1000)
-            fade_out = max(0.0, bed.length_s - MUSIC_FADE_S)
-            filters.append(
-                f"[{src}:a]aresample=48000,aformat=channel_layouts=stereo,"
-                f"atrim=0:{bed.length_s:.3f},asetpts=PTS-STARTPTS,"
-                f"afade=t=in:st=0:d={MUSIC_FADE_S},afade=t=out:st={fade_out:.3f}:d={MUSIC_FADE_S},"
-                f"volume={bed.gain_db:.1f}dB,adelay={delay}|{delay}[m{k}]"
-            )
-            beds.append(f"[m{k}]")
+            src, cut = f"[{len(clips) + silent.index(i)}:a]", f"atrim=0:{t1 - a0:.3f}"
+        filters.append(f"{src}{cut},asetpts=PTS-STARTPTS,aresample=48000,"
+                       f"aformat=channel_layouts=stereo,adelay={delay}|{delay}[a{i}]")  # fmt: skip
+        pictures.append(f"[v{i}]")
+        sounds.append(f"[a{i}]")
+        at += v1 - v0
+    filters.append(f"{''.join(pictures)}concat=n={len(clips)}:v=1:a=0[v]")
+    for k, bed in enumerate(music):
+        src = len(clips) + len(silent) + k
+        delay = round(bed.start_s * 1000)
+        fade_out = max(0.0, bed.length_s - MUSIC_FADE_S)
         filters.append(
-            f"[cut]{''.join(beds)}amix=inputs={len(beds) + 1}:duration=first:normalize=0[a]"
+            f"[{src}:a]aresample=48000,aformat=channel_layouts=stereo,"
+            f"atrim=0:{bed.length_s:.3f},asetpts=PTS-STARTPTS,"
+            f"afade=t=in:st=0:d={MUSIC_FADE_S},afade=t=out:st={fade_out:.3f}:d={MUSIC_FADE_S},"
+            f"volume={bed.gain_db:.1f}dB,adelay={delay}|{delay}[m{k}]"
         )
-    else:
-        filters.append("[cut]anull[a]")
+        sounds.append(f"[m{k}]")
+    filters.append(
+        f"{''.join(sounds)}amix=inputs={len(sounds)}:duration=longest:normalize=0,"
+        f"atrim=0:{at:.3f},alimiter=limit={PEAK}:level=disabled[a]"
+    )
     args += ["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
              "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",
              str(out)]  # fmt: skip

@@ -90,7 +90,21 @@ rules a revision was written under before scoring it
      button).
 
    Build the shot table, then count the shares.
-4. **Trace our gaps upstream** (our episodes only). The render can't be closer or faster
+4. **Listen and check faces** (our episodes only). Neither shows in a contact sheet of
+   one frame a shot.
+   - **Speech:** transcribe the episode
+     (`ffmpeg -i <video> -vn -ac 1 -ar 16000 ep.wav`, then
+     `uv run --no-project --with openai-whisper --with "numpy<2.3" whisper ep.wav --model small --language en --output_format json`)
+     and read it against the script's lines in order. Look for a line heard twice, words
+     the script doesn't have, and a line that stops short. The speech check in the app
+     only looks at whose lips move, so it passes all of these. A transcript mishears rare
+     words; confirm a finding by ear before reporting it.
+   - **Faces:** tile each lead's approved keyframes beside their face picture
+     (`montage`), then a mid-frame of the matching clips. The clip copies its keyframe, so
+     a face that changes is almost always a keyframe to redraw, not a render to repeat.
+   - **Continuity:** read two frames a second (`ffmpeg -vf fps=2,scale=256:448`), not one
+     a shot, for props that reset and hands that belong to nobody.
+5. **Trace our gaps upstream** (our episodes only). The render can't be closer or faster
    than its plan:
    - **Storyboard:** each shot's `framing`, `camera`, `duration_ms` and line count, from
      `GET /v1/drama-packages/<id>` (`shot_list`). Check the revision against
@@ -99,13 +113,13 @@ rules a revision was written under before scoring it
    - **Cut plan:** the episode run's settings, from the `episode_runs` table.
 
    Snippets are in [references/draper-levers.md](references/draper-levers.md).
-5. **Score against the targets,** and list the reference's flaws so nobody copies them.
-6. **Write the report** to `director/<YYYY-MM-DD>-<slug>.md` with
+6. **Score against the targets,** and list the reference's flaws so nobody copies them.
+7. **Write the report** to `director/<YYYY-MM-DD>-<slug>.md` with
    [references/report-template.md](references/report-template.md). Contact sheets stay
    in the measure folder, ours included: the report cites shot numbers and start times, and
    gives the measure command that rebuilds the sheet. **Never save a third-party clip's
    frames in the repo.** (The founding study's sheet predates this rule.)
-7. **Recommend changes in Draper,** ranked by impact, each naming the file and rule
+8. **Recommend changes in Draper,** ranked by impact, each naming the file and rule
    ([references/draper-levers.md](references/draper-levers.md)). Re-measuring after a fix
    is part of the recommendation.
 
@@ -121,6 +135,11 @@ Read each scene's shots in order and check:
   for the turn, with its reason in `camera`.
 - **Wides:** is each wide or group frame doing a job (entrance, power picture,
   transition)?
+- **Props:** is each prop picked up once and put down once in the scene? A prop planted
+  and retrieved again reads as a loop once the shots are cut together.
+- **Lines and shots:** does every line start and end in a shot its speaker is in? A part
+  cued over someone else's single is moved to the speaker's shot and heard over the
+  listener, which works for a few words and not for a whole sentence.
 - **Variety:** no two consecutive shots share the same size and the same people
   (`check_coverage` enforces this).
 - **Ending:** does the scene end on a button: a line, a look, an insert, a reversal?
@@ -134,7 +153,12 @@ Cheap rule of thumb: count the shots. A brisk 30 s scene needs about 12 to 15, n
 - **A clip with no cuts for 6 s or more** is usually a storyboard shot the cut planner
   couldn't split, not a camera choice. Look at the plan.
 - **Scene detection and peaks:** detection reports pts times. A peak at 0.0 dB means the
-  mix hits full scale. The assembly (`shots/assemble.py`) has no limiter yet, so check the
-  music level (`music_db` in run settings).
+  mix hits full scale. The assembly limits the mix to about -1 dB
+  (`shots/assemble.py`, `PEAK`); a hotter peak is a clip from before that, or the encoder.
+- **MCPHub credits:** when they run out (HTTP 402), prompts stop being written and
+  checks stop running. Look at a failed prompt's error before blaming the rules.
+- **The run's time estimate** averages old, slow renders: a clip takes about 80 to 100 s.
+- **Editing any `.py` file reloads the local server** and pauses a run or drops a draw in
+  flight. Edit between runs.
 - **This ffmpeg has no `drawtext`:** label frames with ImageMagick (`montage -label`), as
   measure.py does.

@@ -63,7 +63,15 @@ from .common import NotReady, _names, shot_of
 from .flow import approve_draw, start_prompt, start_take
 from .models import DEFAULT_DRAWS, MAX_DRAWS, MAX_ROUNDS, ShotPlan, ShotTake, ShotVideoPrompt
 from .picks import shot_picks
-from .plans import advisory, current_sub, plan_of, plan_problems, shot_lines
+from .plans import (
+    advisory,
+    carried_ms,
+    current_sub,
+    heard_lines,
+    plan_of,
+    plan_problems,
+    shot_lines,
+)
 from .speech_check import (
     FRAME_SHORT_EDGE,
     SPEECH_STAGE,
@@ -695,12 +703,14 @@ class EpisodeRunner:
                 self._save(run)
                 paths = [self.media.path(c.file) for c in chosen]  # chosen: clips with a file
                 trims = await asyncio.to_thread(self._trims, paths, s.trim)
-                beds = await self._music_beds(pkg, run, shots, chosen, trims)
+                trims, overlaps = await asyncio.to_thread(self._lay_over, pkg, chosen, paths, trims)
+                shown = [(t0 + a, t1 - b) for (t0, t1), (a, b) in zip(trims, overlaps, strict=True)]
+                beds = await self._music_beds(pkg, run, shots, chosen, shown)
                 out_rel = f"episodes/{pkg.package_id}/{run.run_id}.mp4"
                 poster_rel = f"episodes/{pkg.package_id}/{run.run_id}.jpg"
                 info = await asyncio.to_thread(
                     asm.assemble, paths, self.media.path(out_rel), self.media.path(poster_rel),
-                    trims, beds,
+                    trims, beds, overlaps,
                 )  # fmt: skip
                 run.output = {"file": out_rel, "poster": poster_rel, "print": print_, **info}
         run.status, run.finished_at = "done", utcnow()
@@ -714,6 +724,42 @@ class EpisodeRunner:
         if not trim:
             return [(0.0, asm.probe(p)["duration_s"]) for p in paths]
         return [asm.trim_points(p) for p in paths]
+
+    @staticmethod
+    def _lay_over(
+        pkg: ProductionPackage,
+        chosen: list[ShotClip],
+        paths: list[Path],
+        trims: list[tuple[float, float]],
+    ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+        """The trims, and each clip's sound laid over its neighbours' picture, for the
+        lines a shot hears from the clip beside it (plans.heard_lines, asm.lay_over). A
+        line is only laid over when the clip beside it is the shot that speaks it, at the
+        words its lines have now (a clip rendered before the words moved voiced them itself)."""
+        at = {c.shot_id: i for i, c in enumerate(chosen)}
+        shots = {s.shot_id: s for s in pkg.shot_list}
+        heard: list[list[tuple[str, float]]] = []
+        for i, c in enumerate(chosen):
+            mine = []
+            for h in heard_lines(pkg, shots[c.shot_id]):
+                j = at.get(h["from_shot"])
+                beside = i - 1 if h["side"] == "before" else i + 1
+                if j != beside:
+                    continue
+                said = next((x["text"] for x in shot_lines(pkg, shots[chosen[j].shot_id])
+                             if x["dialogue_id"] == h["dialogue_id"]), None)  # fmt: skip
+                if said and said in chosen[j].prompt and h["text"] not in c.prompt:
+                    mine.append((h["side"], h["ms"] / 1000))
+            heard.append(mine)
+        if not any(heard):
+            return trims, [(0.0, 0.0)] * len(trims)
+        return asm.lay_over(
+            trims,
+            [asm.probe(p)["duration_s"] for p in paths],
+            heard,
+            [bool(shot_lines(pkg, shots[c.shot_id])) for c in chosen],
+            [shots[c.shot_id].duration_ms / 1000 for c in chosen],
+        )
 
     async def _music_beds(
         self,
@@ -801,7 +847,7 @@ class EpisodeRunner:
             return None
         ids = [r["ref_id"] for r in usable]
         prompt = clip_prompt(vp, plan, ids)
-        secs = clip_seconds(plan, shot.duration_ms)
+        secs = clip_seconds(plan, shot.duration_ms, carried_ms(pkg, shot))
         short_edge = FAST_SHORT_EDGE if fast else None
         refs = [ClipRef(ref_id=r["ref_id"], label=f"<Picture {i}>", kind=r["kind"], about=r["about"])
                 for i, r in enumerate(usable, 1)]  # fmt: skip

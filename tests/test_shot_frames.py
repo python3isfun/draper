@@ -927,8 +927,15 @@ def test_the_template_follows_the_rules_and_transfers_faces(package):
     assert prompt_findings(prompt, take.references) == []
     sentences = picture_sentences(package, take)
     faces = [x for x, r in zip(sentences, take.references, strict=True) if r.kind == "face"]
-    assert faces and all("supplies the exact facial features transferred to" in x["relationship"]
-                         for x in faces)  # fmt: skip
+    assert faces and all("its exact facial features, face shape and apparent age, in place of "
+                         "the face <Picture" in x["relationship"] for x in faces)  # fmt: skip
+    # The person's look picture, sent with a face picture, keeps the build and the clothes:
+    # named as keeping its face, H3 draws that face and the person changes between keyframes.
+    faced = {r.entity_id for r in take.references if r.kind == "face"}
+    looks = [x for x, r in zip(sentences, take.references, strict=True)
+             if r.kind == "look" and r.entity_id in faced]  # fmt: skip
+    assert looks and all("the face is <Subject" in x["relationship"]
+                         and "the face, " not in x["relationship"] for x in looks)  # fmt: skip
     # A later sub-shot's template too (previous keyframe first).
     plan = two_cuts(package, busiest(package))
     one = finished(plan_take(package, done_images(package), [], plan))
@@ -1412,7 +1419,8 @@ def test_a_close_framing_names_only_what_it_shows(package):
         return picture_sentences(package, take)[n]["relationship"]
 
     close = sentence("Medium close-up single, facing the desk")
-    assert "the face, build and the garments this framing shows remain" in close
+    assert "the build (the face is <Subject" in close
+    assert "and the garments this framing shows remain" in close
     assert "wears Rust knit top, hair a copper bob;" in close
     assert "trousers" not in close and "loafers" not in close and "clean" not in close
     assert "anything held in the picture appears only where the action puts it" in close
